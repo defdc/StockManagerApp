@@ -44,6 +44,36 @@ export function buildRawJson(header: string[], row: unknown[]): Record<string, u
   return obj
 }
 
+export interface LegacyRowInsert {
+  legacy_import_id: string
+  sheet_name: string | null
+  row_number: number
+  raw_json: Record<string, unknown>
+}
+
+// Last line of defense before a legacy_rows insert: raw_json is NOT NULL in the database,
+// so a null/undefined/non-object value here would otherwise surface as a Postgres constraint
+// violation instead of a readable error.
+export function normalizeRawJson(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { _empty: true }
+  }
+  return value as Record<string, unknown>
+}
+
+// Array.from (not .map) so a sparse/holey input array can't silently drop a row instead of
+// sanitizing it.
+export function sanitizeLegacyRows(rows: unknown[]): LegacyRowInsert[] {
+  return Array.from(rows)
+    .filter((row): row is Partial<LegacyRowInsert> => {
+      return !!row && typeof row === 'object' && !Array.isArray(row)
+    })
+    .map((row) => ({
+      ...row,
+      raw_json: normalizeRawJson(row.raw_json),
+    })) as LegacyRowInsert[]
+}
+
 function isEmptyValue(v: unknown): boolean {
   return v === null || v === undefined || (typeof v === 'string' && v.trim() === '')
 }

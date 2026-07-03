@@ -10,6 +10,7 @@ import {
   getSheetGrid,
   guessCategoryFromSheetName,
   readWorkbook,
+  sanitizeLegacyRows,
 } from '../lib/legacyImport'
 import type { LegacyImport } from '../types/database'
 
@@ -119,19 +120,36 @@ export default function ImportExcel() {
       for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
         const chunk = rows.slice(start, start + CHUNK_SIZE)
 
-        const legacyRowsPayload = chunk.map((row, i) => {
-          const rawJson = buildRawJson(header, row)
-          return {
-            legacy_import_id: importRow.id,
-            sheet_name: selectedSheet,
-            row_number: start + i + 2, // +1 for header row, +1 for 1-based numbering
-            raw_json: rawJson && typeof rawJson === 'object' ? rawJson : { _empty: true },
-          }
-        })
+        const legacyRowsPayload = chunk.map((row, i) => ({
+          legacy_import_id: importRow.id,
+          sheet_name: selectedSheet,
+          row_number: start + i + 2, // +1 for header row, +1 for 1-based numbering
+          raw_json: buildRawJson(header, row),
+        }))
+
+        const missingRawJsonBefore = legacyRowsPayload.filter(
+          (r) => !r.raw_json || typeof r.raw_json !== 'object'
+        ).length
+
+        // Never pass legacyRowsPayload straight into insert() — sanitize first so a sparse
+        // array or a bad raw_json can't reach the NOT NULL column as null/undefined.
+        const sanitizedLegacyRows = sanitizeLegacyRows(legacyRowsPayload)
+
+        const missingRawJsonAfter = sanitizedLegacyRows.filter((r) => !r.raw_json).length
+        console.log(
+          `[import] legacy_rows chunk ${start}-${start + chunk.length}: ` +
+            `original=${legacyRowsPayload.length} sanitized=${sanitizedLegacyRows.length} ` +
+            `missingRawJsonBefore=${missingRawJsonBefore} missingRawJsonAfter=${missingRawJsonAfter}`
+        )
+
+        const badRows = sanitizedLegacyRows.filter((row) => !row.raw_json)
+        if (badRows.length > 0) {
+          throw new Error(`Invalid legacy rows before insert: ${badRows.length}`)
+        }
 
         const { data: insertedLegacyRows, error: legacyError } = await supabase
           .from('legacy_rows')
-          .insert(legacyRowsPayload)
+          .insert(sanitizedLegacyRows)
           .select('id, row_number')
 
         if (legacyError) throw new Error(legacyError.message)
