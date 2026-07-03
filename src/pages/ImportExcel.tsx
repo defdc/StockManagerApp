@@ -147,12 +147,14 @@ export default function ImportExcel() {
           throw new Error(`Invalid legacy rows before insert: ${badRows.length}`)
         }
 
+        console.log(`[import] legacy_rows initial insert started (chunk ${start}-${start + chunk.length})`)
         const { data: insertedLegacyRows, error: legacyError } = await supabase
           .from('legacy_rows')
           .insert(sanitizedLegacyRows)
           .select('id, row_number')
 
-        if (legacyError) throw new Error(legacyError.message)
+        if (legacyError) throw new Error(`legacy_rows initial insert failed: ${legacyError.message}`)
+        console.log(`[import] legacy_rows initial insert completed (${insertedLegacyRows?.length ?? 0} rows)`)
 
         const rowNumberToLegacyId = new Map<number, string>()
         for (const r of insertedLegacyRows ?? []) {
@@ -202,12 +204,27 @@ export default function ImportExcel() {
           if (itemsError) throw new Error(itemsError.message)
 
           const updates = (insertedItems ?? [])
-            .filter((item) => item.legacy_row_id)
+            .filter((item) => !!item.legacy_row_id)
             .map((item) => ({ id: item.legacy_row_id as string, mapped_inventory_item_id: item.id }))
 
           if (updates.length > 0) {
-            const { error: upsertError } = await supabase.from('legacy_rows').upsert(updates)
-            if (upsertError) throw new Error(upsertError.message)
+            console.log(`[import] legacy_rows backlink update started (${updates.length} rows)`)
+            // Update-by-id only — never upsert here. legacy_rows.raw_json is NOT NULL and this
+            // step intentionally never sends raw_json, so an upsert that fell through to an
+            // INSERT (e.g. on a conflict-matching miss) would violate that constraint. A plain
+            // update touches only existing rows and only the mapped_inventory_item_id column,
+            // so the real raw_json backup is never at risk of being overwritten or nulled.
+            for (const { id, mapped_inventory_item_id } of updates) {
+              if (!id) continue // defensive: never update without a valid legacy_rows id
+              const { error: updateError } = await supabase
+                .from('legacy_rows')
+                .update({ mapped_inventory_item_id })
+                .eq('id', id)
+              if (updateError) {
+                throw new Error(`legacy_rows backlink update failed (id=${id}): ${updateError.message}`)
+              }
+            }
+            console.log(`[import] legacy_rows backlink update completed (${updates.length} rows)`)
           }
         }
 
