@@ -119,12 +119,15 @@ export default function ImportExcel() {
       for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
         const chunk = rows.slice(start, start + CHUNK_SIZE)
 
-        const legacyRowsPayload = chunk.map((row, i) => ({
-          legacy_import_id: importRow.id,
-          sheet_name: selectedSheet,
-          row_number: start + i + 2, // +1 for header row, +1 for 1-based numbering
-          raw_json: buildRawJson(header, row),
-        }))
+        const legacyRowsPayload = chunk.map((row, i) => {
+          const rawJson = buildRawJson(header, row)
+          return {
+            legacy_import_id: importRow.id,
+            sheet_name: selectedSheet,
+            row_number: start + i + 2, // +1 for header row, +1 for 1-based numbering
+            raw_json: rawJson && typeof rawJson === 'object' ? rawJson : { _empty: true },
+          }
+        })
 
         const { data: insertedLegacyRows, error: legacyError } = await supabase
           .from('legacy_rows')

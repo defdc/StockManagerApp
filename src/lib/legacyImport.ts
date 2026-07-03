@@ -14,7 +14,11 @@ export function getSheetGrid(workbook: XLSX.WorkBook, sheetName: string): SheetG
   const worksheet = workbook.Sheets[sheetName]
   const allRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null }) as unknown[][]
   const header = (allRows[0] ?? []).map((h) => (h === null || h === undefined ? '' : String(h).trim()))
-  const rows = allRows.slice(1)
+  // Fully blank rows can come back as sparse-array holes rather than `[]`. Array.from
+  // (unlike slice/map) visits every index and turns holes into real `undefined` entries,
+  // so downstream code never silently skips a row.
+  const rowCount = Math.max(allRows.length - 1, 0)
+  const rows = Array.from({ length: rowCount }, (_, i) => allRows[i + 1] ?? [])
   return { header, rows }
 }
 
@@ -28,6 +32,9 @@ export function findColumnIndex(header: string[], candidates: string[]): number 
 }
 
 export function buildRawJson(header: string[], row: unknown[]): Record<string, unknown> {
+  if (!Array.isArray(row) || (row.length === 0 && header.length === 0)) {
+    return { _empty: true }
+  }
   const obj: Record<string, unknown> = {}
   const len = Math.max(header.length, row.length)
   for (let i = 0; i < len; i++) {
