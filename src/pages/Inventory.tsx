@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
-import { formatIDR, formatDate } from '../lib/format'
+import { formatIDR, formatDate, formatStatus } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { CATEGORIES, ITEM_CONDITIONS, ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { InventoryItem, ItemCondition, ItemStatus, Partner } from '../types/database'
@@ -176,7 +176,7 @@ export default function Inventory() {
       header: 'Status',
       render: (i) => (
         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[i.status]}`}>
-          {i.status}
+          {formatStatus(i.status)}
         </span>
       ),
     },
@@ -235,7 +235,7 @@ export default function Inventory() {
           <option value="">All statuses</option>
           {ITEM_STATUSES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {formatStatus(s)}
             </option>
           ))}
         </select>
@@ -343,7 +343,7 @@ export default function Inventory() {
               >
                 {ITEM_STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {formatStatus(s)}
                   </option>
                 ))}
               </select>

@@ -22,6 +22,18 @@ interface ImportResult {
   skippedRows: number
   missingModal: number
   missingPrice: number
+  detectedTargetPrice: number
+}
+
+interface PricedPreviewRow {
+  rowNumber: number
+  itemName: unknown
+  modal: unknown
+  booked: unknown
+}
+
+function hasValue(value: unknown): boolean {
+  return value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')
 }
 
 export default function ImportExcel() {
@@ -32,6 +44,7 @@ export default function ImportExcel() {
   const [selectedSheet, setSelectedSheet] = useState('')
   const [previewHeader, setPreviewHeader] = useState<string[]>([])
   const [previewRows, setPreviewRows] = useState<unknown[][]>([])
+  const [pricedPreviewRows, setPricedPreviewRows] = useState<PricedPreviewRow[]>([])
 
   const [importing, setImporting] = useState(false)
   const [progress, setProgress] = useState({ done: 0, total: 0 })
@@ -72,8 +85,33 @@ export default function ImportExcel() {
 
   function loadPreview(wb: XLSX.WorkBook, sheetName: string) {
     const { header, rows } = getSheetGrid(wb, sheetName)
+    const stockIdx = detectStockColumns(header)
+    const pricedRows = rows
+      .map((row, index) => ({ row, rowNumber: index + 2 }))
+      .filter(({ row }) => {
+        const modal = stockIdx.modal >= 0 ? row[stockIdx.modal] : null
+        const booked = stockIdx.booked >= 0 ? row[stockIdx.booked] : null
+        return hasValue(modal) || hasValue(booked)
+      })
+    const bookedRows = pricedRows.filter(
+      ({ row }) => stockIdx.booked >= 0 && hasValue(row[stockIdx.booked])
+    )
+    const modalOnlyRows = pricedRows.filter(
+      ({ row }) => stockIdx.booked < 0 || !hasValue(row[stockIdx.booked])
+    )
+
     setPreviewHeader(header)
     setPreviewRows(rows.slice(0, 20))
+    setPricedPreviewRows(
+      [...bookedRows, ...modalOnlyRows]
+        .slice(0, 10)
+        .map(({ row, rowNumber }) => ({
+          rowNumber,
+          itemName: stockIdx.itemName >= 0 ? row[stockIdx.itemName] : null,
+          modal: stockIdx.modal >= 0 ? row[stockIdx.modal] : null,
+          booked: stockIdx.booked >= 0 ? row[stockIdx.booked] : null,
+        }))
+    )
   }
 
   function handleSheetSelect(name: string) {
@@ -89,7 +127,7 @@ export default function ImportExcel() {
     setResult(null)
 
     try {
-      const { header, rows } = getSheetGrid(workbook, selectedSheet)
+      const { header, rows, rawHeader, rawRows } = getSheetGrid(workbook, selectedSheet)
       const stockIdx = detectStockColumns(header)
       const category = guessCategoryFromSheetName(selectedSheet)
 
@@ -116,15 +154,17 @@ export default function ImportExcel() {
       let skippedRows = 0
       let missingModal = 0
       let missingPrice = 0
+      let detectedTargetPrice = 0
 
       for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
         const chunk = rows.slice(start, start + CHUNK_SIZE)
+        const rawChunk = rawRows.slice(start, start + CHUNK_SIZE)
 
-        const legacyRowsPayload = chunk.map((row, i) => ({
+        const legacyRowsPayload = rawChunk.map((row, i) => ({
           legacy_import_id: importRow.id,
           sheet_name: selectedSheet,
           row_number: start + i + 2, // +1 for header row, +1 for 1-based numbering
-          raw_json: buildRawJson(header, row),
+          raw_json: buildRawJson(rawHeader, row),
         }))
 
         const missingRawJsonBefore = legacyRowsPayload.filter(
@@ -173,6 +213,7 @@ export default function ImportExcel() {
           cleanRows++
           if (evalResult.missingModal) missingModal++
           if (evalResult.missingPrice) missingPrice++
+          else detectedTargetPrice++
 
           const legacyRowId = rowNumberToLegacyId.get(rowNumber) ?? null
 
@@ -242,6 +283,7 @@ export default function ImportExcel() {
         skippedRows,
         missingModal,
         missingPrice,
+        detectedTargetPrice,
       })
       loadPastImports()
     } catch (err) {
@@ -320,6 +362,44 @@ export default function ImportExcel() {
           </div>
         )}
 
+        {previewRows.length > 0 && (
+          <div>
+            <p className="mb-1 text-sm font-medium text-gray-700">Detected priced rows</p>
+            {pricedPreviewRows.length === 0 ? (
+              <p className="text-xs text-gray-500">No Modal or Booked values detected.</p>
+            ) : (
+              <div className="overflow-x-auto rounded-md border border-gray-200">
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-2 py-1 text-left font-medium text-gray-600">Excel row</th>
+                    <th className="px-2 py-1 text-left font-medium text-gray-600">Item name</th>
+                    <th className="px-2 py-1 text-left font-medium text-gray-600">Modal</th>
+                    <th className="px-2 py-1 text-left font-medium text-gray-600">Booked / target price</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {pricedPreviewRows.map((row) => (
+                    <tr key={row.rowNumber}>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-500">{row.rowNumber}</td>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                        {hasValue(row.itemName) ? String(row.itemName) : ''}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                        {hasValue(row.modal) ? String(row.modal) : ''}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                        {hasValue(row.booked) ? String(row.booked) : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              </div>
+            )}
+          </div>
+        )}
+
         {sheetNames.length > 0 && (
           <button
             onClick={handleImport}
@@ -344,6 +424,7 @@ export default function ImportExcel() {
             <li>Skipped rows (empty/month/total): {result.skippedRows}</li>
             <li>Rows with missing modal price: {result.missingModal}</li>
             <li>Rows with missing target price: {result.missingPrice}</li>
+            <li>Rows with detected target price: {result.detectedTargetPrice}</li>
           </ul>
         </div>
       )}

@@ -4,8 +4,9 @@ import { useAuth } from '../lib/auth'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { PLATFORMS } from '../lib/constants'
-import type { InventoryItem, Platform, Sale } from '../types/database'
+import type { Platform, Sale } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
+import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 
 type SaleRow = Sale & { inventory_items: { item_name: string } | null }
@@ -23,10 +24,11 @@ const emptyForm = {
   notes: '',
 }
 
+const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
+
 export default function Sales() {
   const { user } = useAuth()
   const [sales, setSales] = useState<SaleRow[]>([])
-  const [availableItems, setAvailableItems] = useState<InventoryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -50,18 +52,8 @@ export default function Sales() {
     setLoading(false)
   }
 
-  async function loadAvailableItems() {
-    const { data } = await supabase
-      .from('inventory_items')
-      .select('*')
-      .eq('status', 'ready')
-      .order('item_name')
-    setAvailableItems(data ?? [])
-  }
-
   useEffect(() => {
     loadSales()
-    loadAvailableItems()
   }, [])
 
   const filtered = useMemo(() => {
@@ -92,15 +84,6 @@ export default function Sales() {
     })
     setFormError(null)
     setShowModal(true)
-  }
-
-  function handleItemChange(itemId: string) {
-    const item = availableItems.find((i) => i.id === itemId)
-    setForm({
-      ...form,
-      inventory_item_id: itemId,
-      modal_price: item ? String(item.modal_price) : form.modal_price,
-    })
   }
 
   const salePrice = Number(form.sale_price) || 0
@@ -163,7 +146,6 @@ export default function Sales() {
     setSaving(false)
     setShowModal(false)
     loadSales()
-    loadAvailableItems()
   }
 
   async function handleDelete(s: SaleRow) {
@@ -181,7 +163,6 @@ export default function Sales() {
         .eq('status', 'sold')
     }
     loadSales()
-    loadAvailableItems()
   }
 
   function handleExport() {
@@ -273,32 +254,30 @@ export default function Sales() {
         <Modal title={editingId ? 'Edit sale' : 'Add sale'} onClose={() => setShowModal(false)} wide>
           <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
               {editingId ? (
+                <>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
                 <input
                   disabled
                   value={editingItemName}
                   className="w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm"
                 />
-              ) : (
-                <>
-                  <select
-                    required
-                    value={form.inventory_item_id}
-                    onChange={(e) => handleItemChange(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  >
-                    <option value="">Select item...</option>
-                    {availableItems.map((i) => (
-                      <option key={i.id} value={i.id}>
-                        {i.item_name}
-                      </option>
-                    ))}
-                  </select>
-                  {availableItems.length === 0 && (
-                    <p className="mt-1 text-xs text-gray-400">No ready items available to sell.</p>
-                  )}
                 </>
+              ) : (
+                <ItemCombobox
+                  required
+                  label="Item *"
+                  value={form.inventory_item_id || null}
+                  allowedStatuses={SELLABLE_ITEM_STATUSES}
+                  onChange={(item) =>
+                    setForm((current) => ({
+                      ...current,
+                      inventory_item_id: item?.id ?? '',
+                      modal_price: item ? String(item.modal_price) : current.modal_price,
+                    }))
+                  }
+                  placeholder="Search ready or booked items..."
+                />
               )}
             </div>
             <div>

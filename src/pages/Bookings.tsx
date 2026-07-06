@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
-import { formatIDR, formatDate, todayISO } from '../lib/format'
+import { formatIDR, formatDate, formatStatus, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { STATUS_BADGE_CLASSES } from '../lib/constants'
-import type { Booking, BookingStatus, InventoryItem } from '../types/database'
+import type { Booking, BookingStatus } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
+import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 
 type BookingRow = Booking & { inventory_items: { item_name: string } | null }
@@ -25,7 +26,6 @@ export default function Bookings() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [bookings, setBookings] = useState<BookingRow[]>([])
-  const [availableItems, setAvailableItems] = useState<InventoryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -51,18 +51,8 @@ export default function Bookings() {
     setLoading(false)
   }
 
-  async function loadAvailableItems() {
-    const { data } = await supabase
-      .from('inventory_items')
-      .select('*')
-      .eq('status', 'ready')
-      .order('item_name')
-    setAvailableItems(data ?? [])
-  }
-
   useEffect(() => {
     loadBookings()
-    loadAvailableItems()
   }, [])
 
   const filtered = useMemo(() => {
@@ -157,7 +147,6 @@ export default function Bookings() {
     setSaving(false)
     setShowModal(false)
     loadBookings()
-    loadAvailableItems()
   }
 
   async function handleDelete(b: BookingRow) {
@@ -175,7 +164,6 @@ export default function Bookings() {
         .eq('status', 'booked')
     }
     loadBookings()
-    loadAvailableItems()
   }
 
   async function handleConvertToSale(b: BookingRow) {
@@ -226,7 +214,6 @@ export default function Bookings() {
 
     alert('Booking converted to sale. You can edit fees/costs in the Sales page.')
     loadBookings()
-    loadAvailableItems()
     navigate('/sales')
   }
 
@@ -257,7 +244,7 @@ export default function Bookings() {
       header: 'Status',
       render: (b) => (
         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[b.status]}`}>
-          {b.status}
+          {formatStatus(b.status)}
         </span>
       ),
     },
@@ -319,9 +306,9 @@ export default function Bookings() {
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           <option value="">All statuses</option>
-          <option value="active">active</option>
-          <option value="cancelled">cancelled</option>
-          <option value="converted_to_sale">converted_to_sale</option>
+          <option value="active">{formatStatus('active')}</option>
+          <option value="cancelled">{formatStatus('cancelled')}</option>
+          <option value="converted_to_sale">{formatStatus('converted_to_sale')}</option>
         </select>
       </div>
 
@@ -336,32 +323,25 @@ export default function Bookings() {
         <Modal title={editingId ? 'Edit booking' : 'Add booking'} onClose={() => setShowModal(false)}>
           <form onSubmit={handleSubmit} className="space-y-3">
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
               {editingId ? (
+                <>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
                 <input
                   disabled
                   value={editingItemName}
                   className="w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm"
                 />
-              ) : (
-                <>
-                  <select
-                    required
-                    value={form.inventory_item_id}
-                    onChange={(e) => setForm({ ...form, inventory_item_id: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  >
-                    <option value="">Select item...</option>
-                    {availableItems.map((i) => (
-                      <option key={i.id} value={i.id}>
-                        {i.item_name}
-                      </option>
-                    ))}
-                  </select>
-                  {availableItems.length === 0 && (
-                    <p className="mt-1 text-xs text-gray-400">No ready items available to book.</p>
-                  )}
                 </>
+              ) : (
+                <ItemCombobox
+                  required
+                  label="Item *"
+                  value={form.inventory_item_id || null}
+                  onChange={(item) =>
+                    setForm((current) => ({ ...current, inventory_item_id: item?.id ?? '' }))
+                  }
+                  placeholder="Search ready items..."
+                />
               )}
             </div>
             <div>
@@ -415,8 +395,8 @@ export default function Bookings() {
                   onChange={(e) => setForm({ ...form, status: e.target.value as BookingStatus })}
                   className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                 >
-                  <option value="active">active</option>
-                  <option value="cancelled">cancelled</option>
+                  <option value="active">{formatStatus('active')}</option>
+                  <option value="cancelled">{formatStatus('cancelled')}</option>
                 </select>
                 <p className="mt-1 text-xs text-gray-400">
                   Use the "Convert to sale" action on the list to mark this as sold.

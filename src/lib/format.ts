@@ -32,6 +32,11 @@ export function formatDateTime(value: string | null | undefined): string {
   }).format(date)
 }
 
+export function formatStatus(value: string): string {
+  const words = value.replaceAll('_', ' ').toLowerCase()
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
 export function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
 }

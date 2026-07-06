@@ -3,6 +3,11 @@ import { supabase } from '../lib/supabase'
 import { formatIDR, formatDate } from '../lib/format'
 import StatCard from '../components/StatCard'
 import type { InventoryItem, Sale } from '../types/database'
+import { fetchAllRows } from '../lib/supabasePagination'
+
+type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price'>
+type SaleAggregate = Pick<Sale, 'id' | 'sale_price' | 'gross_profit' | 'net_profit'>
+type ExpenseAggregate = { id: string; amount: number }
 
 type SaleWithItem = Sale & { inventory_items: { item_name: string } | null }
 
@@ -30,72 +35,81 @@ export default function Dashboard() {
       setLoading(true)
       setError(null)
 
-      const [itemsRes, salesRes, expensesRes, recentSalesRes, lowStockRes, topProfitRes] =
-        await Promise.all([
-          supabase.from('inventory_items').select('*'),
-          supabase.from('sales').select('sale_price, gross_profit, net_profit'),
-          supabase.from('expenses').select('amount'),
-          supabase
-            .from('sales')
-            .select('*, inventory_items(item_name)')
-            .order('created_at', { ascending: false })
-            .limit(5),
-          supabase
-            .from('inventory_items')
-            .select('*')
-            .eq('status', 'ready')
-            .order('created_at', { ascending: true })
-            .limit(8),
-          supabase
-            .from('sales')
-            .select('*, inventory_items(item_name)')
-            .order('net_profit', { ascending: false })
-            .limit(5),
-        ])
+      try {
+        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes] =
+          await Promise.all([
+            supabase.from('inventory_items').select('id', { count: 'exact', head: true }),
+            fetchAllRows<InventoryAggregate>((from, to) =>
+              supabase
+                .from('inventory_items')
+                .select('id, status, quantity, modal_price')
+                .order('id')
+                .range(from, to)
+            ),
+            fetchAllRows<SaleAggregate>((from, to) =>
+              supabase
+                .from('sales')
+                .select('id, sale_price, gross_profit, net_profit')
+                .order('id')
+                .range(from, to)
+            ),
+            fetchAllRows<ExpenseAggregate>((from, to) =>
+              supabase.from('expenses').select('id, amount').order('id').range(from, to)
+            ),
+            supabase
+              .from('sales')
+              .select('*, inventory_items(item_name)')
+              .order('created_at', { ascending: false })
+              .limit(5),
+            supabase
+              .from('inventory_items')
+              .select('*')
+              .eq('status', 'ready')
+              .order('created_at', { ascending: true })
+              .limit(8),
+            supabase
+              .from('sales')
+              .select('*, inventory_items(item_name)')
+              .order('net_profit', { ascending: false })
+              .limit(5),
+          ])
 
-      const firstError =
-        itemsRes.error ||
-        salesRes.error ||
-        expensesRes.error ||
-        recentSalesRes.error ||
-        lowStockRes.error ||
-        topProfitRes.error
-      if (firstError) {
-        setError(firstError.message)
+        const firstError =
+          itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error
+        if (firstError) throw new Error(firstError.message)
+
+        const readyQty = items.filter((i) => i.status === 'ready').reduce((s, i) => s + i.quantity, 0)
+        const bookedQty = items
+          .filter((i) => i.status === 'booked')
+          .reduce((s, i) => s + i.quantity, 0)
+        const soldQty = items.filter((i) => i.status === 'sold').reduce((s, i) => s + i.quantity, 0)
+        const modalValue = items
+          .filter((i) => i.status === 'ready' || i.status === 'booked')
+          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+
+        const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
+        const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
+        const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0)
+        const netProfit = sales.reduce((s, sale) => s + sale.net_profit, 0) - totalExpenses
+
+        setData({
+          totalItems: itemCountRes.count ?? 0,
+          readyQty,
+          bookedQty,
+          soldQty,
+          modalValue,
+          revenue,
+          grossProfit,
+          netProfit,
+          recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
+          lowStockItems: lowStockRes.data ?? [],
+          topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
+        })
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.')
+      } finally {
         setLoading(false)
-        return
       }
-
-      const items = itemsRes.data ?? []
-      const sales = salesRes.data ?? []
-      const expenses = expensesRes.data ?? []
-
-      const readyQty = items.filter((i) => i.status === 'ready').reduce((s, i) => s + i.quantity, 0)
-      const bookedQty = items.filter((i) => i.status === 'booked').reduce((s, i) => s + i.quantity, 0)
-      const soldQty = items.filter((i) => i.status === 'sold').reduce((s, i) => s + i.quantity, 0)
-      const modalValue = items
-        .filter((i) => i.status === 'ready' || i.status === 'booked')
-        .reduce((s, i) => s + i.modal_price * i.quantity, 0)
-
-      const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
-      const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
-      const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0)
-      const netProfit = sales.reduce((s, sale) => s + sale.net_profit, 0) - totalExpenses
-
-      setData({
-        totalItems: items.length,
-        readyQty,
-        bookedQty,
-        soldQty,
-        modalValue,
-        revenue,
-        grossProfit,
-        netProfit,
-        recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
-        lowStockItems: lowStockRes.data ?? [],
-        topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
-      })
-      setLoading(false)
     }
     load()
   }, [])
