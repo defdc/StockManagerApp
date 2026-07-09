@@ -35,6 +35,8 @@ export interface InventoryItem {
   quantity: number
   modal_price: number
   target_price: number
+  batch_name?: string | null
+  batch_modal_total?: number | null
   status: ItemStatus
   owner: string
   notes: string | null
@@ -57,6 +59,8 @@ export interface Booking {
   id: string
   inventory_item_id: string | null
   customer_id: string | null
+  booking_group_id: string | null
+  group_total_deal_price: number | null
   buyer_name: string
   deal_price: number
   dp_amount: number
@@ -73,6 +77,7 @@ export interface Sale {
   id: string
   inventory_item_id: string | null
   customer_id: string | null
+  booking_group_id: string | null
   buyer_name: string
   platform: Platform
   sale_price: number
@@ -129,3 +134,12 @@ export interface LegacyRow {
   created_at: string
 }
 
+export interface ActivityLog {
+  id: string
+  action: string
+  entity: string
+  entity_id: string | null
+  details: Record<string, unknown>
+  created_by: string | null
+  created_at: string
+}

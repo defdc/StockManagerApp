@@ -2,9 +2,11 @@ import { useEffect, useState, type ChangeEvent } from 'react'
 import type * as XLSX from 'xlsx'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
-import { formatDateTime } from '../lib/format'
+import { formatDateTime, formatIDR } from '../lib/format'
+import { logActivity } from '../lib/activityLog'
 import {
   buildRawJson,
+  detectBatchModals,
   detectStockColumns,
   evaluateStockRow,
   getSheetGrid,
@@ -21,19 +23,22 @@ interface ImportResult {
   cleanRows: number
   skippedRows: number
   missingModal: number
-  missingPrice: number
-  detectedTargetPrice: number
+  rowsWithBookedValue: number
+  bookingRecordsCreated: number
+  inventoryRowsMarkedBooked: number
+  rowsWithBatch: number
+  rowsWithBatchModalTotal: number
+  rowsWithCalculatedBatchModal: number
 }
 
 interface PricedPreviewRow {
   rowNumber: number
-  itemName: unknown
-  modal: unknown
-  booked: unknown
-}
-
-function hasValue(value: unknown): boolean {
-  return value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '')
+  itemName: string
+  quantity: number
+  batchName: string | null
+  batchModalTotal: number | null
+  modalPrice: number | null
+  bookedAmount: number | null
 }
 
 export default function ImportExcel() {
@@ -84,34 +89,32 @@ export default function ImportExcel() {
   }
 
   function loadPreview(wb: XLSX.WorkBook, sheetName: string) {
-    const { header, rows } = getSheetGrid(wb, sheetName)
+    const { header, rows, merges } = getSheetGrid(wb, sheetName)
     const stockIdx = detectStockColumns(header)
-    const pricedRows = rows
-      .map((row, index) => ({ row, rowNumber: index + 2 }))
-      .filter(({ row }) => {
-        const modal = stockIdx.modal >= 0 ? row[stockIdx.modal] : null
-        const booked = stockIdx.booked >= 0 ? row[stockIdx.booked] : null
-        return hasValue(modal) || hasValue(booked)
-      })
-    const bookedRows = pricedRows.filter(
-      ({ row }) => stockIdx.booked >= 0 && hasValue(row[stockIdx.booked])
-    )
-    const modalOnlyRows = pricedRows.filter(
-      ({ row }) => stockIdx.booked < 0 || !hasValue(row[stockIdx.booked])
-    )
+    const batchByRow = detectBatchModals(rows, merges, stockIdx)
+    const pricedRows = rows.flatMap((row, index): PricedPreviewRow[] => {
+      const evaluation = evaluateStockRow(row, stockIdx, batchByRow.get(index) ?? null)
+      if (evaluation.skip || (evaluation.missingModal && !evaluation.bookedAmount && !evaluation.batchName)) {
+        return []
+      }
+      return [
+        {
+          rowNumber: index + 2,
+          itemName: evaluation.itemName,
+          quantity: evaluation.quantity,
+          batchName: evaluation.batchName,
+          batchModalTotal: evaluation.batchModalTotal,
+          modalPrice: evaluation.missingModal ? null : evaluation.modalPrice,
+          bookedAmount: evaluation.bookedAmount,
+        },
+      ]
+    })
+    const bookedRows = pricedRows.filter((row) => row.bookedAmount !== null)
+    const otherPricedRows = pricedRows.filter((row) => row.bookedAmount === null)
 
     setPreviewHeader(header)
     setPreviewRows(rows.slice(0, 20))
-    setPricedPreviewRows(
-      [...bookedRows, ...modalOnlyRows]
-        .slice(0, 10)
-        .map(({ row, rowNumber }) => ({
-          rowNumber,
-          itemName: stockIdx.itemName >= 0 ? row[stockIdx.itemName] : null,
-          modal: stockIdx.modal >= 0 ? row[stockIdx.modal] : null,
-          booked: stockIdx.booked >= 0 ? row[stockIdx.booked] : null,
-        }))
-    )
+    setPricedPreviewRows([...bookedRows, ...otherPricedRows].slice(0, 10))
   }
 
   function handleSheetSelect(name: string) {
@@ -127,8 +130,9 @@ export default function ImportExcel() {
     setResult(null)
 
     try {
-      const { header, rows, rawHeader, rawRows } = getSheetGrid(workbook, selectedSheet)
+      const { header, rows, rawHeader, rawRows, merges } = getSheetGrid(workbook, selectedSheet)
       const stockIdx = detectStockColumns(header)
+      const batchByRow = detectBatchModals(rows, merges, stockIdx)
       const category = guessCategoryFromSheetName(selectedSheet)
 
       const { data: importRow, error: importError } = await supabase
@@ -153,8 +157,12 @@ export default function ImportExcel() {
       let cleanRows = 0
       let skippedRows = 0
       let missingModal = 0
-      let missingPrice = 0
-      let detectedTargetPrice = 0
+      let rowsWithBookedValue = 0
+      let bookingRecordsCreated = 0
+      let inventoryRowsMarkedBooked = 0
+      let rowsWithBatch = 0
+      let rowsWithBatchModalTotal = 0
+      let rowsWithCalculatedBatchModal = 0
 
       for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
         const chunk = rows.slice(start, start + CHUNK_SIZE)
@@ -202,20 +210,35 @@ export default function ImportExcel() {
         }
 
         const inventoryPayload: Record<string, unknown>[] = []
+        const bookingByLegacyRowId = new Map<string, { buyerName: string; dealPrice: number }>()
 
         chunk.forEach((row, i) => {
           const rowNumber = start + i + 2
-          const evalResult = evaluateStockRow(row, stockIdx)
+          const evalResult = evaluateStockRow(row, stockIdx, batchByRow.get(start + i) ?? null)
           if (evalResult.skip) {
             skippedRows++
             return
           }
           cleanRows++
           if (evalResult.missingModal) missingModal++
-          if (evalResult.missingPrice) missingPrice++
-          else detectedTargetPrice++
+          if (evalResult.bookedAmount !== null) {
+            rowsWithBookedValue++
+            inventoryRowsMarkedBooked++
+          }
+          if (evalResult.batchName) rowsWithBatch++
+          if (evalResult.batchModalTotal !== null) rowsWithBatchModalTotal++
+          if (evalResult.modalCalculatedFromBatch) rowsWithCalculatedBatchModal++
 
           const legacyRowId = rowNumberToLegacyId.get(rowNumber) ?? null
+          if (!legacyRowId && evalResult.bookedAmount !== null) {
+            throw new Error(`Cannot create imported booking: legacy row ${rowNumber} was not linked.`)
+          }
+          if (legacyRowId && evalResult.bookedAmount !== null) {
+            bookingByLegacyRowId.set(legacyRowId, {
+              buyerName: evalResult.buyerName,
+              dealPrice: evalResult.bookedAmount,
+            })
+          }
 
           inventoryPayload.push({
             item_name: evalResult.itemName,
@@ -223,8 +246,10 @@ export default function ImportExcel() {
             condition: 'unknown',
             quantity: evalResult.quantity,
             modal_price: evalResult.modalPrice,
-            target_price: evalResult.targetPrice,
-            status: 'ready',
+            target_price: 0,
+            batch_name: evalResult.batchName,
+            batch_modal_total: evalResult.batchModalTotal,
+            status: evalResult.bookedAmount !== null ? 'booked' : 'ready',
             owner: 'shared',
             notes:
               evalResult.legacyCuan !== null
@@ -243,6 +268,34 @@ export default function ImportExcel() {
             .select('id, legacy_row_id')
 
           if (itemsError) throw new Error(itemsError.message)
+
+          const bookingsPayload = (insertedItems ?? []).flatMap((item) => {
+            if (!item.legacy_row_id) return []
+            const booking = bookingByLegacyRowId.get(item.legacy_row_id)
+            if (!booking) return []
+            return [
+              {
+                inventory_item_id: item.id,
+                buyer_name: booking.buyerName,
+                deal_price: booking.dealPrice,
+                dp_amount: 0,
+                remaining_amount: booking.dealPrice,
+                deadline: null,
+                status: 'active',
+                notes: 'Created from legacy Excel Booked column during import',
+                created_by: user.id,
+              },
+            ]
+          })
+
+          if (bookingsPayload.length > 0) {
+            const { data: insertedBookings, error: bookingsError } = await supabase
+              .from('bookings')
+              .insert(bookingsPayload)
+              .select('id')
+            if (bookingsError) throw new Error(`bookings insert failed: ${bookingsError.message}`)
+            bookingRecordsCreated += insertedBookings?.length ?? 0
+          }
 
           const updates = (insertedItems ?? [])
             .filter((item) => !!item.legacy_row_id)
@@ -282,8 +335,19 @@ export default function ImportExcel() {
         cleanRows,
         skippedRows,
         missingModal,
-        missingPrice,
-        detectedTargetPrice,
+        rowsWithBookedValue,
+        bookingRecordsCreated,
+        inventoryRowsMarkedBooked,
+        rowsWithBatch,
+        rowsWithBatchModalTotal,
+        rowsWithCalculatedBatchModal,
+      })
+      await logActivity({
+        action: 'Import',
+        entity: 'legacy_imports',
+        entityId: importRow.id,
+        userId: user.id,
+        details: { file_name: fileName, sheet_name: selectedSheet, clean_rows: cleanRows },
       })
       loadPastImports()
     } catch (err) {
@@ -369,32 +433,46 @@ export default function ImportExcel() {
               <p className="text-xs text-gray-500">No Modal or Booked values detected.</p>
             ) : (
               <div className="overflow-x-auto rounded-md border border-gray-200">
-              <table className="min-w-full divide-y divide-gray-200 text-xs">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-2 py-1 text-left font-medium text-gray-600">Excel row</th>
-                    <th className="px-2 py-1 text-left font-medium text-gray-600">Item name</th>
-                    <th className="px-2 py-1 text-left font-medium text-gray-600">Modal</th>
-                    <th className="px-2 py-1 text-left font-medium text-gray-600">Booked / target price</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {pricedPreviewRows.map((row) => (
-                    <tr key={row.rowNumber}>
-                      <td className="whitespace-nowrap px-2 py-1 text-gray-500">{row.rowNumber}</td>
-                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
-                        {hasValue(row.itemName) ? String(row.itemName) : ''}
-                      </td>
-                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
-                        {hasValue(row.modal) ? String(row.modal) : ''}
-                      </td>
-                      <td className="whitespace-nowrap px-2 py-1 text-gray-700">
-                        {hasValue(row.booked) ? String(row.booked) : ''}
-                      </td>
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Excel row</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Item name</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">pcs</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Batch</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Batch modal total</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Modal/pcs calculated</th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">
+                        Booked amount
+                      </th>
+                      <th className="px-2 py-1 text-left font-medium text-gray-600">Import action</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {pricedPreviewRows.map((row) => (
+                      <tr key={row.rowNumber}>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-500">{row.rowNumber}</td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">{row.itemName}</td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">{row.quantity}</td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                          {row.batchName ?? '-'}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                          {row.batchModalTotal === null ? '-' : formatIDR(row.batchModalTotal)}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                          {row.modalPrice === null ? '-' : formatIDR(row.modalPrice)}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                          {row.bookedAmount === null ? '-' : formatIDR(row.bookedAmount)}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1 text-gray-700">
+                          {row.bookedAmount === null ? '-' : 'Create booking + mark item booked'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
@@ -423,8 +501,12 @@ export default function ImportExcel() {
             <li>Clean inventory rows created: {result.cleanRows}</li>
             <li>Skipped rows (empty/month/total): {result.skippedRows}</li>
             <li>Rows with missing modal price: {result.missingModal}</li>
-            <li>Rows with missing target price: {result.missingPrice}</li>
-            <li>Rows with detected target price: {result.detectedTargetPrice}</li>
+            <li>Rows with booked value detected: {result.rowsWithBookedValue}</li>
+            <li>Booking records created: {result.bookingRecordsCreated}</li>
+            <li>Inventory rows marked as booked: {result.inventoryRowsMarkedBooked}</li>
+            <li>Rows with batch detected: {result.rowsWithBatch}</li>
+            <li>Rows with batch modal total detected: {result.rowsWithBatchModalTotal}</li>
+            <li>Rows with modal price calculated from batch: {result.rowsWithCalculatedBatchModal}</li>
           </ul>
         </div>
       )}

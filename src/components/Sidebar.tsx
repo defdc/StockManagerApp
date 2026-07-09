@@ -7,9 +7,11 @@ const links = [
   { to: '/inventory', label: 'Inventory' },
   { to: '/bookings', label: 'Bookings' },
   { to: '/sales', label: 'Sales' },
+  { to: '/buyers', label: 'Buyers' },
   { to: '/expenses', label: 'Expenses' },
   { to: '/partners', label: 'Partners' },
   { to: '/import', label: 'Import Excel' },
+  { to: '/activity', label: 'Activity' },
 ]
 
 export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {

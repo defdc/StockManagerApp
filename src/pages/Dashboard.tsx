@@ -6,10 +6,13 @@ import type { InventoryItem, Sale } from '../types/database'
 import { fetchAllRows } from '../lib/supabasePagination'
 
 type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price'>
-type SaleAggregate = Pick<Sale, 'id' | 'sale_price' | 'gross_profit' | 'net_profit'>
+type SaleAggregate = Pick<Sale, 'id' | 'buyer_name' | 'sale_price' | 'gross_profit' | 'net_profit' | 'sale_date'>
 type ExpenseAggregate = { id: string; amount: number }
 
 type SaleWithItem = Sale & { inventory_items: { item_name: string } | null }
+type SaleWithBatch = Pick<Sale, 'id' | 'net_profit'> & {
+  inventory_items: { batch_name: string | null } | null
+}
 
 interface DashboardData {
   totalItems: number
@@ -17,6 +20,11 @@ interface DashboardData {
   bookedQty: number
   soldQty: number
   modalValue: number
+  readyInventoryValue: number
+  bookedInventoryValue: number
+  soldThisMonth: number
+  topBuyer: string
+  highestProfitBatch: string
   revenue: number
   grossProfit: number
   netProfit: number
@@ -29,6 +37,7 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [lowStockThreshold, setLowStockThreshold] = useState(2)
 
   useEffect(() => {
     async function load() {
@@ -36,7 +45,7 @@ export default function Dashboard() {
       setError(null)
 
       try {
-        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes] =
+        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, batchSalesRes] =
           await Promise.all([
             supabase.from('inventory_items').select('id', { count: 'exact', head: true }),
             fetchAllRows<InventoryAggregate>((from, to) =>
@@ -49,7 +58,7 @@ export default function Dashboard() {
             fetchAllRows<SaleAggregate>((from, to) =>
               supabase
                 .from('sales')
-                .select('id, sale_price, gross_profit, net_profit')
+                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date')
                 .order('id')
                 .range(from, to)
             ),
@@ -65,6 +74,7 @@ export default function Dashboard() {
               .from('inventory_items')
               .select('*')
               .eq('status', 'ready')
+              .lte('quantity', lowStockThreshold)
               .order('created_at', { ascending: true })
               .limit(8),
             supabase
@@ -72,10 +82,11 @@ export default function Dashboard() {
               .select('*, inventory_items(item_name)')
               .order('net_profit', { ascending: false })
               .limit(5),
+            supabase.from('sales').select('id, net_profit, inventory_items(batch_name)').limit(1000),
           ])
 
         const firstError =
-          itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error
+          itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error || batchSalesRes.error
         if (firstError) throw new Error(firstError.message)
 
         const readyQty = items.filter((i) => i.status === 'ready').reduce((s, i) => s + i.quantity, 0)
@@ -86,11 +97,31 @@ export default function Dashboard() {
         const modalValue = items
           .filter((i) => i.status === 'ready' || i.status === 'booked')
           .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+        const readyInventoryValue = items
+          .filter((i) => i.status === 'ready')
+          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+        const bookedInventoryValue = items
+          .filter((i) => i.status === 'booked')
+          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
 
         const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
         const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
         const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0)
         const netProfit = sales.reduce((s, sale) => s + sale.net_profit, 0) - totalExpenses
+        const currentMonth = new Date().toISOString().slice(0, 7)
+        const soldThisMonth = sales.filter((sale) => sale.sale_date?.startsWith(currentMonth)).length
+        const buyerRevenue = new Map<string, number>()
+        for (const sale of sales) {
+          buyerRevenue.set(sale.buyer_name, (buyerRevenue.get(sale.buyer_name) ?? 0) + sale.sale_price)
+        }
+        const topBuyerEntry = [...buyerRevenue.entries()].sort((a, b) => b[1] - a[1])[0]
+        const batchProfit = new Map<string, number>()
+        for (const sale of ((batchSalesRes.data as unknown as SaleWithBatch[]) ?? [])) {
+          const batchName = sale.inventory_items?.batch_name
+          if (!batchName) continue
+          batchProfit.set(batchName, (batchProfit.get(batchName) ?? 0) + sale.net_profit)
+        }
+        const highestProfitBatchEntry = [...batchProfit.entries()].sort((a, b) => b[1] - a[1])[0]
 
         setData({
           totalItems: itemCountRes.count ?? 0,
@@ -98,6 +129,13 @@ export default function Dashboard() {
           bookedQty,
           soldQty,
           modalValue,
+          readyInventoryValue,
+          bookedInventoryValue,
+          soldThisMonth,
+          topBuyer: topBuyerEntry ? `${topBuyerEntry[0]} (${formatIDR(topBuyerEntry[1])})` : '-',
+          highestProfitBatch: highestProfitBatchEntry
+            ? `${highestProfitBatchEntry[0]} (${formatIDR(highestProfitBatchEntry[1])})`
+            : '-',
           revenue,
           grossProfit,
           netProfit,
@@ -112,7 +150,7 @@ export default function Dashboard() {
       }
     }
     load()
-  }, [])
+  }, [lowStockThreshold])
 
   if (loading) return <p className="text-gray-500">Loading dashboard...</p>
   if (error) return <p className="text-sm text-red-600">{error}</p>
@@ -120,7 +158,19 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold text-gray-900">Dashboard</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold text-gray-900">Dashboard</h1>
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          Low stock threshold
+          <input
+            type="number"
+            min="0"
+            value={lowStockThreshold}
+            onChange={(event) => setLowStockThreshold(Number(event.target.value) || 0)}
+            className="w-20 rounded-md border border-gray-300 px-2 py-1 text-sm"
+          />
+        </label>
+      </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Total inventory items" value={String(data.totalItems)} />
@@ -131,6 +181,11 @@ export default function Dashboard() {
         <StatCard label="Total revenue" value={formatIDR(data.revenue)} />
         <StatCard label="Total gross profit" value={formatIDR(data.grossProfit)} />
         <StatCard label="Total net profit" value={formatIDR(data.netProfit)} subtext="after general expenses" />
+        <StatCard label="Ready Inventory Value" value={formatIDR(data.readyInventoryValue)} />
+        <StatCard label="Booked Inventory Value" value={formatIDR(data.bookedInventoryValue)} />
+        <StatCard label="Sold This Month" value={String(data.soldThisMonth)} subtext="sales" />
+        <StatCard label="Top Buyer" value={data.topBuyer} />
+        <StatCard label="Highest Profit Batch" value={data.highestProfitBatch} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -158,7 +213,7 @@ export default function Dashboard() {
         <div className="rounded-lg border border-gray-200 bg-white p-4">
           <h2 className="mb-3 font-medium text-gray-900">Low stock / unsold items</h2>
           {data.lowStockItems.length === 0 ? (
-            <p className="text-sm text-gray-400">No ready stock.</p>
+            <p className="text-sm text-gray-400">No ready stock at or below {lowStockThreshold} pcs.</p>
           ) : (
             <ul className="space-y-2 text-sm">
               {data.lowStockItems.map((i) => (

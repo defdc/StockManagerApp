@@ -1,15 +1,33 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
+import { logActivity } from '../lib/activityLog'
+import { bookingGroupDisplayId } from '../lib/bookingGroups'
+import { smartSearchRank } from '../lib/search'
 import { PLATFORMS } from '../lib/constants'
 import type { Platform, Sale } from '../types/database'
-import DataTable, { type Column } from '../components/DataTable'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
+import BuyerAutocomplete from '../components/BuyerAutocomplete'
 
 type SaleRow = Sale & { inventory_items: { item_name: string } | null }
+
+interface SaleGroup {
+  key: string
+  bookingGroupId: string | null
+  sales: SaleRow[]
+  isGrouped: boolean
+  itemCount: number
+  buyerName: string
+  platform: Platform
+  saleDate: string
+  totalRevenue: number
+  totalModal: number
+  grossProfit: number
+  netProfit: number
+}
 
 const emptyForm = {
   inventory_item_id: '',
@@ -39,6 +57,7 @@ export default function Sales() {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([])
 
   async function loadSales() {
     setLoading(true)
@@ -57,8 +76,56 @@ export default function Sales() {
   }, [])
 
   const filtered = useMemo(() => {
-    return sales.filter((s) => s.buyer_name.toLowerCase().includes(search.toLowerCase()))
+    return sales
+      .map((sale) => ({
+        sale,
+        rank: smartSearchRank(search, [
+          { value: sale.buyer_name },
+          { value: sale.inventory_items?.item_name },
+          { value: sale.notes, kind: 'notes' },
+        ]),
+      }))
+      .filter(({ rank }) => rank !== null)
+      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.sale.sale_date.localeCompare(a.sale.sale_date))
+      .map(({ sale }) => sale)
   }, [sales, search])
+
+  const knownGroupIds = useMemo(
+    () => sales.map((sale) => sale.booking_group_id).filter((id): id is string => Boolean(id)),
+    [sales]
+  )
+
+  const groupedSales = useMemo(() => {
+    const groups = new Map<string, SaleRow[]>()
+    filtered.forEach((sale) => {
+      const key = sale.booking_group_id ? `group:${sale.booking_group_id}` : `sale:${sale.id}`
+      groups.set(key, [...(groups.get(key) ?? []), sale])
+    })
+
+    return Array.from(groups.entries()).map(([key, groupSales]) => {
+      const firstSale = groupSales[0]
+      return {
+        key,
+        bookingGroupId: firstSale.booking_group_id,
+        sales: groupSales,
+        isGrouped: Boolean(firstSale.booking_group_id) && groupSales.length > 1,
+        itemCount: groupSales.length,
+        buyerName: firstSale.buyer_name,
+        platform: firstSale.platform,
+        saleDate: firstSale.sale_date,
+        totalRevenue: groupSales.reduce((sum, sale) => sum + sale.sale_price, 0),
+        totalModal: groupSales.reduce((sum, sale) => sum + sale.modal_price, 0),
+        grossProfit: groupSales.reduce((sum, sale) => sum + sale.gross_profit, 0),
+        netProfit: groupSales.reduce((sum, sale) => sum + sale.net_profit, 0),
+      } satisfies SaleGroup
+    })
+  }, [filtered])
+
+  function toggleGroupExpanded(groupKey: string) {
+    setExpandedGroupKeys((current) =>
+      current.includes(groupKey) ? current.filter((key) => key !== groupKey) : [...current, groupKey]
+    )
+  }
 
   function openAddModal() {
     setEditingId(null)
@@ -141,6 +208,12 @@ export default function Sales() {
         return
       }
       await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', form.inventory_item_id)
+      await logActivity({
+        action: 'Sale',
+        entity: 'sales',
+        userId: user?.id,
+        details: { buyer_name: form.buyer_name.trim(), inventory_item_id: form.inventory_item_id },
+      })
     }
 
     setSaving(false)
@@ -162,6 +235,72 @@ export default function Sales() {
         .eq('id', s.inventory_item_id)
         .eq('status', 'sold')
     }
+    await logActivity({
+      action: 'Delete',
+      entity: 'sales',
+      entityId: s.id,
+      userId: user?.id,
+      details: { buyer_name: s.buyer_name, inventory_item_id: s.inventory_item_id },
+    })
+    loadSales()
+  }
+
+  async function handleUndoSale(s: SaleRow) {
+    if (!confirm(`Undo sale to "${s.buyer_name}"? The sale record will be deleted.`)) return
+
+    let originatingBookingId: string | null = null
+    if (s.inventory_item_id) {
+      let bookingQuery = supabase
+        .from('bookings')
+        .select('id')
+        .eq('inventory_item_id', s.inventory_item_id)
+        .eq('status', 'converted_to_sale')
+        .order('updated_at', { ascending: false })
+        .limit(1)
+
+      if (s.booking_group_id) bookingQuery = bookingQuery.eq('booking_group_id', s.booking_group_id)
+
+      const { data: bookings } = await bookingQuery
+      originatingBookingId = bookings?.[0]?.id ?? null
+    }
+
+    const { error: deleteError } = await supabase.from('sales').delete().eq('id', s.id)
+    if (deleteError) {
+      alert(deleteError.message)
+      return
+    }
+
+    if (originatingBookingId) {
+      await supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .eq('id', originatingBookingId)
+      if (s.inventory_item_id) {
+        await supabase
+          .from('inventory_items')
+          .update({ status: 'booked', updated_at: new Date().toISOString() })
+          .eq('id', s.inventory_item_id)
+      }
+    } else if (s.inventory_item_id) {
+      await supabase
+        .from('inventory_items')
+        .update({ status: 'ready', updated_at: new Date().toISOString() })
+        .eq('id', s.inventory_item_id)
+        .eq('status', 'sold')
+    }
+
+    await logActivity({
+      action: 'Undo Sale',
+      entity: 'sales',
+      entityId: s.id,
+      userId: user?.id,
+      details: {
+        buyer_name: s.buyer_name,
+        inventory_item_id: s.inventory_item_id,
+        restored_booking_id: originatingBookingId,
+      },
+    })
+
     loadSales()
   }
 
@@ -170,6 +309,7 @@ export default function Sales() {
       'sales.csv',
       sales.map((s) => ({
         item_name: s.inventory_items?.item_name ?? '',
+        booking_group: bookingGroupDisplayId(s.booking_group_id, knownGroupIds),
         buyer_name: s.buyer_name,
         platform: s.platform,
         sale_price: s.sale_price,
@@ -184,36 +324,21 @@ export default function Sales() {
     )
   }
 
-  const columns: Column<SaleRow>[] = [
-    { header: 'Date', render: (s) => formatDate(s.sale_date) },
-    { header: 'Item', render: (s) => s.inventory_items?.item_name ?? '-' },
-    { header: 'Buyer', render: (s) => s.buyer_name },
-    { header: 'Platform', render: (s) => s.platform },
-    { header: 'Sale price', render: (s) => formatIDR(s.sale_price) },
-    { header: 'Modal', render: (s) => formatIDR(s.modal_price) },
-    { header: 'Gross profit', render: (s) => formatIDR(s.gross_profit) },
-    {
-      header: 'Net profit',
-      render: (s) => (
-        <span className={s.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
-          {formatIDR(s.net_profit)}
-        </span>
-      ),
-    },
-    {
-      header: 'Actions',
-      render: (s) => (
-        <div className="flex gap-2">
-          <button onClick={() => openEditModal(s)} className="text-blue-600 hover:underline">
-            Edit
-          </button>
-          <button onClick={() => handleDelete(s)} className="text-red-600 hover:underline">
-            Delete
-          </button>
-        </div>
-      ),
-    },
-  ]
+  function renderSaleActions(sale: SaleRow) {
+    return (
+      <div className="flex gap-2">
+        <button onClick={() => openEditModal(sale)} className="text-blue-600 hover:underline">
+          Edit
+        </button>
+        <button onClick={() => handleUndoSale(sale)} className="text-amber-700 hover:underline">
+          Undo Sale
+        </button>
+        <button onClick={() => handleDelete(sale)} className="text-red-600 hover:underline">
+          Delete
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -237,7 +362,7 @@ export default function Sales() {
 
       <input
         type="text"
-        placeholder="Search buyer name..."
+        placeholder="Search buyer, item, or notes..."
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
@@ -247,7 +372,95 @@ export default function Sales() {
       {loading ? (
         <p className="text-gray-500">Loading sales...</p>
       ) : (
-        <DataTable columns={columns} data={filtered} keyField={(s) => s.id} />
+        <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+          <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Date</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Items</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Platform</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Gross profit</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Net profit</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {groupedSales.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-3 py-6 text-center text-gray-400">
+                    No data found.
+                  </td>
+                </tr>
+              ) : (
+                groupedSales.map((group) => {
+                  const firstSale = group.sales[0]
+                  const isExpanded = expandedGroupKeys.includes(group.key)
+                  return (
+                    <Fragment key={group.key}>
+                      <tr className="hover:bg-gray-50">
+                        <td className="whitespace-nowrap px-3 py-2">{formatDate(group.saleDate)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {group.isGrouped ? (
+                            <button
+                              onClick={() => toggleGroupExpanded(group.key)}
+                              className="font-medium text-blue-700 hover:underline"
+                            >
+                              {bookingGroupDisplayId(group.bookingGroupId, knownGroupIds)} ·{' '}
+                              {isExpanded ? 'Hide' : 'Show'} {group.itemCount} items
+                            </button>
+                          ) : (
+                            firstSale.inventory_items?.item_name ?? '-'
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">{group.buyerName}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{group.platform}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalRevenue)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalModal)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.grossProfit)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          <span className={group.netProfit < 0 ? 'text-red-600' : 'text-green-700'}>
+                            {formatIDR(group.netProfit)}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {group.isGrouped ? (
+                            <span className="text-gray-400">Expand to edit items</span>
+                          ) : (
+                            renderSaleActions(firstSale)
+                          )}
+                        </td>
+                      </tr>
+                      {group.isGrouped &&
+                        isExpanded &&
+                        group.sales.map((sale) => (
+                          <tr key={sale.id} className="bg-gray-50 text-xs">
+                            <td className="whitespace-nowrap px-3 py-2"></td>
+                            <td className="whitespace-nowrap px-3 py-2 pl-8">
+                              {sale.inventory_items?.item_name ?? '-'}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2">{sale.buyer_name}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{sale.platform}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.modal_price)}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.gross_profit)}</td>
+                            <td className="whitespace-nowrap px-3 py-2">
+                              <span className={sale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
+                                {formatIDR(sale.net_profit)}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2">{renderSaleActions(sale)}</td>
+                          </tr>
+                        ))}
+                    </Fragment>
+                  )
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {showModal && (
@@ -281,12 +494,11 @@ export default function Sales() {
               )}
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Buyer name *</label>
-              <input
+              <BuyerAutocomplete
                 required
+                label="Buyer name *"
                 value={form.buyer_name}
-                onChange={(e) => setForm({ ...form, buyer_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(buyerName) => setForm({ ...form, buyer_name: buyerName })}
               />
             </div>
             <div>

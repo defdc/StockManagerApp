@@ -4,13 +4,17 @@ import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
 import { formatIDR, formatDate, formatStatus, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
-import { STATUS_BADGE_CLASSES } from '../lib/constants'
-import type { Booking, BookingStatus } from '../types/database'
+import { logActivity } from '../lib/activityLog'
+import { bookingGroupDisplayId } from '../lib/bookingGroups'
+import { smartSearchRank } from '../lib/search'
+import { PLATFORMS, STATUS_BADGE_CLASSES } from '../lib/constants'
+import type { Booking, BookingStatus, Platform } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
+import BuyerAutocomplete from '../components/BuyerAutocomplete'
 
-type BookingRow = Booking & { inventory_items: { item_name: string } | null }
+type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number } | null }
 
 const emptyForm = {
   inventory_item_id: '',
@@ -19,6 +23,14 @@ const emptyForm = {
   dp_amount: '0',
   deadline: '',
   status: 'active' as BookingStatus,
+  notes: '',
+}
+
+const emptyBulkSaleForm = {
+  buyer_name: '',
+  platform: 'Other' as Platform,
+  total_sale_price: '0',
+  sale_date: todayISO(),
   notes: '',
 }
 
@@ -38,13 +50,18 @@ export default function Bookings() {
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [selectedBookingIds, setSelectedBookingIds] = useState<string[]>([])
+  const [showBulkSaleModal, setShowBulkSaleModal] = useState(false)
+  const [bulkSaleForm, setBulkSaleForm] = useState(emptyBulkSaleForm)
+  const [bulkSaleSaving, setBulkSaleSaving] = useState(false)
+  const [bulkSaleError, setBulkSaleError] = useState<string | null>(null)
 
   async function loadBookings() {
     setLoading(true)
     setError(null)
     const { data, error } = await supabase
       .from('bookings')
-      .select('*, inventory_items(item_name)')
+      .select('*, inventory_items(item_name, modal_price)')
       .order('created_at', { ascending: false })
     if (error) setError(error.message)
     else setBookings((data as unknown as BookingRow[]) ?? [])
@@ -56,12 +73,79 @@ export default function Bookings() {
   }, [])
 
   const filtered = useMemo(() => {
-    return bookings.filter((b) => {
-      const matchesSearch = b.buyer_name.toLowerCase().includes(search.toLowerCase())
-      const matchesStatus = statusFilter ? b.status === statusFilter : true
-      return matchesSearch && matchesStatus
-    })
+    return bookings
+      .map((b) => ({
+        booking: b,
+        rank: smartSearchRank(search, [
+          { value: b.buyer_name },
+          { value: b.inventory_items?.item_name },
+          { value: b.notes, kind: 'notes' },
+        ]),
+      }))
+      .filter(({ booking, rank }) => (statusFilter ? booking.status === statusFilter : true) && rank !== null)
+      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || a.booking.buyer_name.localeCompare(b.booking.buyer_name))
+      .map(({ booking }) => booking)
   }, [bookings, search, statusFilter])
+
+  const knownGroupIds = useMemo(
+    () => bookings.map((booking) => booking.booking_group_id).filter((id): id is string => Boolean(id)),
+    [bookings]
+  )
+
+  const selectedBookings = useMemo(
+    () => bookings.filter((booking) => selectedBookingIds.includes(booking.id)),
+    [bookings, selectedBookingIds]
+  )
+
+  const allFilteredSelected =
+    filtered.length > 0 && filtered.every((booking) => selectedBookingIds.includes(booking.id))
+
+  function toggleBookingSelection(bookingId: string) {
+    setSelectedBookingIds((current) =>
+      current.includes(bookingId)
+        ? current.filter((id) => id !== bookingId)
+        : [...current, bookingId]
+    )
+  }
+
+  function toggleSelectAll() {
+    const filteredIds = filtered.map((booking) => booking.id)
+    if (allFilteredSelected) {
+      setSelectedBookingIds((current) => current.filter((id) => !filteredIds.includes(id)))
+      return
+    }
+    setSelectedBookingIds((current) => Array.from(new Set([...current, ...filteredIds])))
+  }
+
+  function openBulkSaleModal() {
+    if (selectedBookings.length === 0) return
+    const invalidBookings = selectedBookings.filter((booking) => booking.status !== 'active' || !booking.inventory_item_id)
+    if (invalidBookings.length > 0) {
+      alert('Only active bookings with linked inventory items can be converted in bulk.')
+      return
+    }
+
+    const groupIds = Array.from(
+      new Set(selectedBookings.map((booking) => booking.booking_group_id).filter(Boolean))
+    )
+    if (groupIds.length > 1) {
+      alert('Please convert one booking group at a time.')
+      return
+    }
+
+    const firstBuyer = selectedBookings[0]?.buyer_name ?? ''
+    const allSameBuyer = selectedBookings.every((booking) => booking.buyer_name === firstBuyer)
+    const totalDealPrice = selectedBookings.reduce((sum, booking) => sum + booking.deal_price, 0)
+
+    setBulkSaleForm({
+      ...emptyBulkSaleForm,
+      buyer_name: allSameBuyer ? firstBuyer : '',
+      total_sale_price: String(totalDealPrice),
+      sale_date: todayISO(),
+    })
+    setBulkSaleError(null)
+    setShowBulkSaleModal(true)
+  }
 
   function openAddModal() {
     setEditingId(null)
@@ -142,6 +226,12 @@ export default function Bookings() {
         return
       }
       await supabase.from('inventory_items').update({ status: 'booked' }).eq('id', form.inventory_item_id)
+      await logActivity({
+        action: 'Booking',
+        entity: 'bookings',
+        userId: user?.id,
+        details: { buyer_name: form.buyer_name.trim(), inventory_item_id: form.inventory_item_id },
+      })
     }
 
     setSaving(false)
@@ -163,6 +253,13 @@ export default function Bookings() {
         .eq('id', b.inventory_item_id)
         .eq('status', 'booked')
     }
+    await logActivity({
+      action: 'Delete',
+      entity: 'bookings',
+      entityId: b.id,
+      userId: user?.id,
+      details: { buyer_name: b.buyer_name },
+    })
     loadBookings()
   }
 
@@ -191,6 +288,7 @@ export default function Bookings() {
     const { error: saleError } = await supabase.from('sales').insert({
       inventory_item_id: b.inventory_item_id,
       customer_id: b.customer_id,
+      booking_group_id: b.booking_group_id,
       buyer_name: b.buyer_name,
       platform: 'Other',
       sale_price: salePrice,
@@ -211,8 +309,127 @@ export default function Bookings() {
 
     await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', b.inventory_item_id)
     await supabase.from('bookings').update({ status: 'converted_to_sale' }).eq('id', b.id)
+    await logActivity({
+      action: 'Sale',
+      entity: 'sales',
+      userId: user?.id,
+      details: { buyer_name: b.buyer_name, booking_id: b.id, inventory_item_id: b.inventory_item_id },
+    })
 
     alert('Booking converted to sale. You can edit fees/costs in the Sales page.')
+    loadBookings()
+    navigate('/sales')
+  }
+
+  async function handleBulkConvertToSale(e: FormEvent) {
+    e.preventDefault()
+    if (selectedBookings.length === 0) {
+      setBulkSaleError('Please select at least one booking.')
+      return
+    }
+    if (!bulkSaleForm.buyer_name.trim()) {
+      setBulkSaleError('Buyer name is required.')
+      return
+    }
+
+    const invalidBookings = selectedBookings.filter((booking) => booking.status !== 'active' || !booking.inventory_item_id)
+    if (invalidBookings.length > 0) {
+      setBulkSaleError('Only active bookings with linked inventory items can be converted in bulk.')
+      return
+    }
+
+    const existingGroupIds = Array.from(
+      new Set(selectedBookings.map((booking) => booking.booking_group_id).filter(Boolean))
+    )
+    if (existingGroupIds.length > 1) {
+      setBulkSaleError('Please convert one booking group at a time.')
+      return
+    }
+
+    setBulkSaleSaving(true)
+    setBulkSaleError(null)
+
+    const bookingGroupId = existingGroupIds[0] ?? crypto.randomUUID()
+    const totalSalePrice = Number(bulkSaleForm.total_sale_price) || 0
+    const salePricePerItem = totalSalePrice / selectedBookings.length
+    const groupTotalDealPrice =
+      selectedBookings.find((booking) => booking.group_total_deal_price !== null)?.group_total_deal_price ??
+      selectedBookings.reduce((sum, booking) => sum + booking.deal_price, 0)
+
+    const salesPayload = selectedBookings.map((booking) => {
+      const modalPrice = booking.inventory_items?.modal_price ?? 0
+      const grossProfit = salePricePerItem - modalPrice
+      return {
+        inventory_item_id: booking.inventory_item_id,
+        customer_id: booking.customer_id,
+        booking_group_id: bookingGroupId,
+        buyer_name: bulkSaleForm.buyer_name.trim(),
+        platform: bulkSaleForm.platform,
+        sale_price: salePricePerItem,
+        modal_price: modalPrice,
+        marketplace_fee: 0,
+        packing_cost: 0,
+        shipping_subsidy: 0,
+        gross_profit: grossProfit,
+        net_profit: grossProfit,
+        sale_date: bulkSaleForm.sale_date || todayISO(),
+        notes: bulkSaleForm.notes.trim() || null,
+        created_by: user?.id,
+      }
+    })
+
+    const { error: saleError } = await supabase.from('sales').insert(salesPayload)
+    if (saleError) {
+      setBulkSaleSaving(false)
+      setBulkSaleError(saleError.message)
+      return
+    }
+
+    const inventoryItemIds = selectedBookings
+      .map((booking) => booking.inventory_item_id)
+      .filter((id): id is string => Boolean(id))
+    const { error: itemError } = await supabase
+      .from('inventory_items')
+      .update({ status: 'sold', updated_at: new Date().toISOString() })
+      .in('id', inventoryItemIds)
+
+    if (itemError) {
+      setBulkSaleSaving(false)
+      setBulkSaleError(itemError.message)
+      return
+    }
+
+    const { error: bookingError } = await supabase
+      .from('bookings')
+      .update({
+        status: 'converted_to_sale',
+        booking_group_id: bookingGroupId,
+        group_total_deal_price: groupTotalDealPrice,
+        updated_at: new Date().toISOString(),
+      })
+      .in(
+        'id',
+        selectedBookings.map((booking) => booking.id)
+      )
+
+    setBulkSaleSaving(false)
+    if (bookingError) {
+      setBulkSaleError(bookingError.message)
+      return
+    }
+
+    setShowBulkSaleModal(false)
+    setSelectedBookingIds([])
+    await logActivity({
+      action: 'Bulk Sale',
+      entity: 'sales',
+      userId: user?.id,
+      details: {
+        count: selectedBookings.length,
+        buyer_name: bulkSaleForm.buyer_name.trim(),
+        booking_group_id: bookingGroupId,
+      },
+    })
     loadBookings()
     navigate('/sales')
   }
@@ -223,6 +440,8 @@ export default function Bookings() {
       bookings.map((b) => ({
         item_name: b.inventory_items?.item_name ?? '',
         buyer_name: b.buyer_name,
+        booking_group: bookingGroupDisplayId(b.booking_group_id, knownGroupIds),
+        group_total_deal_price: b.group_total_deal_price,
         deal_price: b.deal_price,
         dp_amount: b.dp_amount,
         remaining_amount: b.remaining_amount,
@@ -234,7 +453,20 @@ export default function Bookings() {
   }
 
   const columns: Column<BookingRow>[] = [
+    {
+      header: 'Select',
+      render: (b) => (
+        <input
+          type="checkbox"
+          checked={selectedBookingIds.includes(b.id)}
+          onChange={() => toggleBookingSelection(b.id)}
+          aria-label={`Select booking for ${b.buyer_name}`}
+          className="h-4 w-4 rounded border-gray-300"
+        />
+      ),
+    },
     { header: 'Item', render: (b) => b.inventory_items?.item_name ?? '-' },
+    { header: 'Group', render: (b) => bookingGroupDisplayId(b.booking_group_id, knownGroupIds) },
     { header: 'Buyer', render: (b) => b.buyer_name },
     { header: 'Deal price', render: (b) => formatIDR(b.deal_price) },
     { header: 'DP', render: (b) => formatIDR(b.dp_amount) },
@@ -295,7 +527,7 @@ export default function Bookings() {
       <div className="flex flex-wrap gap-2">
         <input
           type="text"
-          placeholder="Search buyer name..."
+          placeholder="Search buyer, item, or notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
@@ -310,6 +542,36 @@ export default function Bookings() {
           <option value="cancelled">{formatStatus('cancelled')}</option>
           <option value="converted_to_sale">{formatStatus('converted_to_sale')}</option>
         </select>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
+        <label className="flex items-center gap-2 text-gray-700">
+          <input
+            type="checkbox"
+            checked={allFilteredSelected}
+            onChange={toggleSelectAll}
+            disabled={filtered.length === 0}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+          Select all visible
+        </label>
+        {selectedBookingIds.length > 0 && (
+          <>
+            <span className="text-gray-500">{selectedBookingIds.length} selected</span>
+            <button
+              onClick={openBulkSaleModal}
+              className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800"
+            >
+              Convert Selected to Sale
+            </button>
+            <button
+              onClick={() => setSelectedBookingIds([])}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Clear
+            </button>
+          </>
+        )}
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -345,12 +607,11 @@ export default function Bookings() {
               )}
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Buyer name *</label>
-              <input
+              <BuyerAutocomplete
                 required
+                label="Buyer name *"
                 value={form.buyer_name}
-                onChange={(e) => setForm({ ...form, buyer_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(buyerName) => setForm({ ...form, buyer_name: buyerName })}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -429,6 +690,87 @@ export default function Bookings() {
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showBulkSaleModal && (
+        <Modal title={`Convert ${selectedBookings.length} booking${selectedBookings.length === 1 ? '' : 's'} to sale`} onClose={() => setShowBulkSaleModal(false)}>
+          <form onSubmit={handleBulkConvertToSale} className="space-y-3">
+            <div>
+              <BuyerAutocomplete
+                required
+                label="Buyer *"
+                value={bulkSaleForm.buyer_name}
+                onChange={(buyerName) => setBulkSaleForm({ ...bulkSaleForm, buyer_name: buyerName })}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Platform</label>
+                <select
+                  value={bulkSaleForm.platform}
+                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, platform: e.target.value as Platform })}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                >
+                  {PLATFORMS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Sale date</label>
+                <input
+                  type="date"
+                  value={bulkSaleForm.sale_date}
+                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, sale_date: e.target.value })}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Total sale price (Rp)</label>
+              <input
+                type="number"
+                min="0"
+                value={bulkSaleForm.total_sale_price}
+                onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, total_sale_price: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+              This creates grouped sale rows with one shared booking group ID. The Sales page will show them as one expandable transaction.
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+              <textarea
+                value={bulkSaleForm.notes}
+                onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, notes: e.target.value })}
+                rows={2}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+
+            {bulkSaleError && <p className="text-sm text-red-600">{bulkSaleError}</p>}
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkSaleModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={bulkSaleSaving}
+                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                {bulkSaleSaving ? 'Converting...' : 'Convert to sale'}
               </button>
             </div>
           </form>

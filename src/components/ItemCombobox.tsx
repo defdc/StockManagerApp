@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { formatIDR, formatStatus } from '../lib/format'
+import { searchTokens, smartSearchRank } from '../lib/search'
 import { supabase } from '../lib/supabase'
 import type { InventoryItem } from '../types/database'
 
@@ -12,7 +13,7 @@ interface ItemComboboxProps {
   required?: boolean
 }
 
-const SEARCH_FIELDS = ['item_name', 'item_code', 'category', 'notes'] as const
+const SEARCH_FIELDS = ['item_name', 'item_code', 'category', 'batch_name', 'notes'] as const
 const SUGGESTION_LIMIT = 20
 const DEFAULT_ALLOWED_STATUSES = ['ready']
 
@@ -22,8 +23,12 @@ function itemLabel(item: InventoryItem): string {
 
 async function findItems(search: string, statuses: string[]): Promise<InventoryItem[]> {
   const fields = search ? SEARCH_FIELDS : SEARCH_FIELDS.slice(0, 1)
+  const tokens = searchTokens(search)
+  const queryPairs = fields.flatMap((field) =>
+    tokens.length > 0 ? tokens.map((token) => ({ field, token })) : [{ field, token: '' }]
+  )
   const results = await Promise.all(
-    fields.map(async (field) => {
+    queryPairs.map(async ({ field, token }) => {
       let query = supabase
         .from('inventory_items')
         .select('*')
@@ -31,7 +36,7 @@ async function findItems(search: string, statuses: string[]): Promise<InventoryI
         .order('item_name')
         .limit(SUGGESTION_LIMIT)
 
-      if (search) query = query.ilike(field, `%${search}%`)
+      if (token) query = query.ilike(field, `%${token}%`)
 
       const { data, error } = await query
       if (error) throw new Error(error.message)
@@ -43,7 +48,18 @@ async function findItems(search: string, statuses: string[]): Promise<InventoryI
   for (const item of results.flat()) uniqueItems.set(item.id, item)
 
   return [...uniqueItems.values()]
-    .sort((a, b) => a.item_name.localeCompare(b.item_name))
+    .map((item) => ({
+      item,
+      rank: smartSearchRank(search, [
+        { value: item.item_name },
+        { value: item.item_code },
+        { value: item.category },
+        { value: item.notes, kind: 'notes' },
+      ]),
+    }))
+    .filter((entry) => !search || entry.rank !== null)
+    .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || a.item.item_name.localeCompare(b.item.item_name))
+    .map(({ item }) => item)
     .slice(0, SUGGESTION_LIMIT)
 }
 
@@ -205,6 +221,7 @@ export default function ItemCombobox({
               >
                 <span className="block text-sm font-medium text-gray-900">{itemLabel(item)}</span>
                 <span className="block text-xs text-gray-500">
+                  {item.batch_name ? `${item.batch_name} · ` : ''}
                   {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} · Qty: {item.quantity} · Modal:{' '}
                   {formatIDR(item.modal_price)} · Target: {formatIDR(item.target_price)}
                 </span>

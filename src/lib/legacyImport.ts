@@ -5,6 +5,7 @@ export type SheetGrid = {
   rows: unknown[][]
   rawHeader: string[]
   rawRows: unknown[][]
+  merges: XLSX.Range[]
 }
 
 export async function readWorkbook(file: File): Promise<XLSX.WorkBook> {
@@ -47,7 +48,7 @@ export function getSheetGrid(workbook: XLSX.WorkBook, sheetName: string): SheetG
   const rowCount = Math.max(expandedRows.length - 1, allRows.length - 1, 0)
   const rows = Array.from({ length: rowCount }, (_, i) => expandedRows[i + 1] ?? [])
   const rawRows = Array.from({ length: rowCount }, (_, i) => allRows[i + 1] ?? [])
-  return { header, rows, rawHeader, rawRows }
+  return { header, rows, rawHeader, rawRows, merges: worksheet['!merges'] ?? [] }
 }
 
 export function findColumnIndex(header: string[], candidates: string[]): number {
@@ -173,17 +174,75 @@ export interface StockColumnIndexes {
   pcs: number
   modal: number
   booked: number
+  buyerName: number
   cuan: number
+  modalIsPerItem: boolean
 }
 
 export function detectStockColumns(header: string[]): StockColumnIndexes {
+  const modal = findColumnIndex(header, ['modal', 'modal/pcs'])
   return {
     itemName: findColumnIndex(header, ['item name', 'item_name', 'name']),
     pcs: findColumnIndex(header, ['pcs']),
-    modal: findColumnIndex(header, ['modal', 'modal/pcs']),
+    modal,
     booked: findColumnIndex(header, ['booked']),
+    buyerName: findColumnIndex(header, ['buyer name', 'buyer_name', 'buyer', 'customer name']),
     cuan: findColumnIndex(header, ['cuan']),
+    modalIsPerItem: modal >= 0 && header[modal].toLowerCase().trim() === 'modal/pcs',
   }
+}
+
+export interface BatchModalInfo {
+  batchName: string
+  batchModalTotal: number
+  modalPrice: number | null
+}
+
+export function generateBatchName(batchModalTotal: number): string {
+  return `Modal Batch Rp${Math.trunc(batchModalTotal).toLocaleString('id-ID')}`
+}
+
+export function detectBatchModals(
+  rows: unknown[][],
+  merges: XLSX.Range[],
+  idx: StockColumnIndexes
+): Map<number, BatchModalInfo> {
+  const batchByRow = new Map<number, BatchModalInfo>()
+  if (idx.modal < 0 || idx.modalIsPerItem) return batchByRow
+
+  for (const merge of merges) {
+    const isVerticalModalMerge =
+      merge.s.c === idx.modal && merge.e.c === idx.modal && merge.e.r > merge.s.r
+    if (!isVerticalModalMerge) continue
+
+    // `rows` excludes the header at worksheet row 0, so worksheet row 1 maps to index 0.
+    const startIndex = merge.s.r - 1
+    const endIndex = merge.e.r - 1
+    const batchModalTotal = parseCurrency(rows[startIndex]?.[idx.modal])
+    if (batchModalTotal === null) continue
+
+    let totalQuantity = 0
+    const validRowIndexes: number[] = []
+    for (let rowIndex = startIndex; rowIndex <= endIndex; rowIndex++) {
+      const row = rows[rowIndex]
+      if (!row) continue
+      const evaluation = evaluateStockRow(row, idx)
+      if (evaluation.skip) continue
+
+      validRowIndexes.push(rowIndex)
+      const quantity = idx.pcs >= 0 ? toNumberOrNull(row[idx.pcs]) : null
+      if (quantity !== null && quantity > 0) totalQuantity += quantity
+    }
+
+    const info: BatchModalInfo = {
+      batchName: generateBatchName(batchModalTotal),
+      batchModalTotal,
+      modalPrice: totalQuantity > 0 ? batchModalTotal / totalQuantity : null,
+    }
+    for (const rowIndex of validRowIndexes) batchByRow.set(rowIndex, info)
+  }
+
+  return batchByRow
 }
 
 export type RowEvaluation =
@@ -193,13 +252,20 @@ export type RowEvaluation =
       itemName: string
       quantity: number
       modalPrice: number
-      targetPrice: number
+      bookedAmount: number | null
+      buyerName: string
+      batchName: string | null
+      batchModalTotal: number | null
+      modalCalculatedFromBatch: boolean
       legacyCuan: number | null
       missingModal: boolean
-      missingPrice: boolean
     }
 
-export function evaluateStockRow(row: unknown[], idx: StockColumnIndexes): RowEvaluation {
+export function evaluateStockRow(
+  row: unknown[],
+  idx: StockColumnIndexes,
+  batch: BatchModalInfo | null = null
+): RowEvaluation {
   const rawName = idx.itemName >= 0 ? row[idx.itemName] : null
 
   if (isEmptyValue(rawName)) return { skip: true, reason: 'empty_name' }
@@ -209,8 +275,10 @@ export function evaluateStockRow(row: unknown[], idx: StockColumnIndexes): RowEv
   if (looksLikeTotalRow(nameStr)) return { skip: true, reason: 'total_row' }
 
   const pcs = idx.pcs >= 0 ? toNumberOrNull(row[idx.pcs]) : null
-  const modal = idx.modal >= 0 ? parseCurrency(row[idx.modal]) : null
+  const modal = batch ? batch.modalPrice : idx.modal >= 0 ? parseCurrency(row[idx.modal]) : null
   const booked = idx.booked >= 0 ? parseCurrency(row[idx.booked]) : null
+  const rawBuyerName = idx.buyerName >= 0 ? row[idx.buyerName] : null
+  const buyerName = isEmptyValue(rawBuyerName) ? 'Imported booking' : String(rawBuyerName).trim()
   const cuan = idx.cuan >= 0 ? parseCurrency(row[idx.cuan]) : null
 
   return {
@@ -218,10 +286,13 @@ export function evaluateStockRow(row: unknown[], idx: StockColumnIndexes): RowEv
     itemName: nameStr,
     quantity: pcs && pcs > 0 ? pcs : 1,
     modalPrice: modal ?? 0,
-    targetPrice: booked ?? 0,
+    bookedAmount: booked !== null && booked > 0 ? booked : null,
+    buyerName,
+    batchName: batch?.batchName ?? null,
+    batchModalTotal: batch?.batchModalTotal ?? null,
+    modalCalculatedFromBatch: batch !== null && batch.modalPrice !== null,
     legacyCuan: cuan,
     missingModal: modal === null,
-    missingPrice: booked === null,
   }
 }
 
