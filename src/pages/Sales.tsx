@@ -6,13 +6,13 @@ import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
-import { PLATFORMS } from '../lib/constants'
-import type { Platform, Sale } from '../types/database'
+import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
+import type { FulfillmentStatus, Platform, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 
-type SaleRow = Sale & { inventory_items: { item_name: string } | null }
+type SaleRow = Sale & { inventory_items: { item_name: string; batch_name: string | null } | null }
 
 interface SaleGroup {
   key: string
@@ -29,6 +29,16 @@ interface SaleGroup {
   netProfit: number
 }
 
+interface DailySalesGroup {
+  key: string
+  saleDate: string
+  revenue: number
+  profit: number
+  transactions: number
+  itemsSold: number
+  transactionGroups: SaleGroup[]
+}
+
 const emptyForm = {
   inventory_item_id: '',
   buyer_name: '',
@@ -39,6 +49,15 @@ const emptyForm = {
   packing_cost: '0',
   shipping_subsidy: '0',
   sale_date: todayISO(),
+  fulfillment_status: 'parking' as FulfillmentStatus,
+  notes: '',
+}
+
+const emptyGroupEditForm = {
+  buyer_name: '',
+  platform: 'Other' as Platform,
+  sale_date: todayISO(),
+  fulfillment_status: 'parking' as FulfillmentStatus,
   notes: '',
 }
 
@@ -58,13 +77,19 @@ export default function Sales() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([])
+  const [expandedDateKeys, setExpandedDateKeys] = useState<string[]>([])
+  const [showGroupEditModal, setShowGroupEditModal] = useState(false)
+  const [groupEditTarget, setGroupEditTarget] = useState<SaleGroup | null>(null)
+  const [groupEditForm, setGroupEditForm] = useState(emptyGroupEditForm)
+  const [groupEditError, setGroupEditError] = useState<string | null>(null)
+  const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | FulfillmentStatus>('all')
 
   async function loadSales() {
     setLoading(true)
     setError(null)
     const { data, error } = await supabase
       .from('sales')
-      .select('*, inventory_items(item_name)')
+      .select('*, inventory_items(item_name, batch_name)')
       .order('sale_date', { ascending: false })
     if (error) setError(error.message)
     else setSales((data as unknown as SaleRow[]) ?? [])
@@ -85,41 +110,64 @@ export default function Sales() {
           { value: sale.notes, kind: 'notes' },
         ]),
       }))
-      .filter(({ rank }) => rank !== null)
+      .filter(({ rank, sale }) => rank !== null && (fulfillmentFilter === 'all' || sale.fulfillment_status === fulfillmentFilter))
       .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.sale.sale_date.localeCompare(a.sale.sale_date))
       .map(({ sale }) => sale)
-  }, [sales, search])
+  }, [sales, search, fulfillmentFilter])
 
   const knownGroupIds = useMemo(
     () => sales.map((sale) => sale.booking_group_id).filter((id): id is string => Boolean(id)),
     [sales]
   )
 
-  const groupedSales = useMemo(() => {
-    const groups = new Map<string, SaleRow[]>()
+  const dailySalesGroups = useMemo(() => {
+    const groupedByDate = new Map<string, SaleRow[]>()
     filtered.forEach((sale) => {
-      const key = sale.booking_group_id ? `group:${sale.booking_group_id}` : `sale:${sale.id}`
-      groups.set(key, [...(groups.get(key) ?? []), sale])
+      groupedByDate.set(sale.sale_date, [...(groupedByDate.get(sale.sale_date) ?? []), sale])
     })
 
-    return Array.from(groups.entries()).map(([key, groupSales]) => {
-      const firstSale = groupSales[0]
+    return Array.from(groupedByDate.entries()).map(([saleDate, daySales]) => {
+      const transactionGroups = new Map<string, SaleRow[]>()
+      daySales.forEach((sale) => {
+        const key = sale.booking_group_id ? `group:${sale.booking_group_id}` : `sale:${sale.id}`
+        transactionGroups.set(key, [...(transactionGroups.get(key) ?? []), sale])
+      })
+
+      const transactionGroupList = Array.from(transactionGroups.entries()).map(([key, groupSales]) => {
+        const firstSale = groupSales[0]
+        return {
+          key,
+          bookingGroupId: firstSale.booking_group_id,
+          sales: groupSales,
+          isGrouped: Boolean(firstSale.booking_group_id) && groupSales.length > 1,
+          itemCount: groupSales.length,
+          buyerName: firstSale.buyer_name,
+          platform: firstSale.platform,
+          saleDate: firstSale.sale_date,
+          totalRevenue: groupSales.reduce((sum, sale) => sum + sale.sale_price, 0),
+          totalModal: groupSales.reduce((sum, sale) => sum + sale.modal_price, 0),
+          grossProfit: groupSales.reduce((sum, sale) => sum + sale.gross_profit, 0),
+          netProfit: groupSales.reduce((sum, sale) => sum + sale.net_profit, 0),
+        } satisfies SaleGroup
+      })
+
       return {
-        key,
-        bookingGroupId: firstSale.booking_group_id,
-        sales: groupSales,
-        isGrouped: Boolean(firstSale.booking_group_id) && groupSales.length > 1,
-        itemCount: groupSales.length,
-        buyerName: firstSale.buyer_name,
-        platform: firstSale.platform,
-        saleDate: firstSale.sale_date,
-        totalRevenue: groupSales.reduce((sum, sale) => sum + sale.sale_price, 0),
-        totalModal: groupSales.reduce((sum, sale) => sum + sale.modal_price, 0),
-        grossProfit: groupSales.reduce((sum, sale) => sum + sale.gross_profit, 0),
-        netProfit: groupSales.reduce((sum, sale) => sum + sale.net_profit, 0),
-      } satisfies SaleGroup
+        key: saleDate,
+        saleDate,
+        revenue: daySales.reduce((sum, sale) => sum + sale.sale_price, 0),
+        profit: daySales.reduce((sum, sale) => sum + sale.net_profit, 0),
+        transactions: transactionGroupList.length,
+        itemsSold: daySales.length,
+        transactionGroups: transactionGroupList,
+      } satisfies DailySalesGroup
     })
   }, [filtered])
+
+  useEffect(() => {
+    if (dailySalesGroups.length > 0 && expandedDateKeys.length === 0) {
+      setExpandedDateKeys(dailySalesGroups.map((group) => group.key))
+    }
+  }, [dailySalesGroups, expandedDateKeys])
 
   function toggleGroupExpanded(groupKey: string) {
     setExpandedGroupKeys((current) =>
@@ -127,11 +175,76 @@ export default function Sales() {
     )
   }
 
+  function toggleDateExpanded(dateKey: string) {
+    setExpandedDateKeys((current) =>
+      current.includes(dateKey) ? current.filter((key) => key !== dateKey) : [...current, dateKey]
+    )
+  }
+
+  function getBatchLabel(sale: SaleRow | null | undefined) {
+    return sale?.inventory_items?.batch_name?.trim() || 'Unassigned'
+  }
+
+  function getBatchSummary(sales: SaleRow[]) {
+    return Array.from(new Set(sales.map((sale) => getBatchLabel(sale)).filter(Boolean))).join(', ') || 'Unassigned'
+  }
+
+  async function copySummary(group: DailySalesGroup) {
+    const items = group.transactionGroups.flatMap((transactionGroup) => transactionGroup.sales)
+    const itemLines = items.flatMap((sale, index) => [
+      `${index + 1}.`,
+      sale.inventory_items?.item_name ?? '-',
+      `Batch : ${getBatchLabel(sale)}`,
+      `Buyer : ${sale.buyer_name}`,
+      `Sale : ${formatIDR(sale.sale_price)}`,
+      '',
+    ])
+
+    const summary = [
+      formatDate(group.saleDate),
+      '',
+      'Revenue',
+      formatIDR(group.revenue),
+      '',
+      'Profit',
+      formatIDR(group.profit),
+      '',
+      'Transactions',
+      String(group.transactions),
+      '',
+      'Items Sold',
+      String(group.itemsSold),
+      '',
+      ...itemLines,
+      'End of Report',
+    ].join('\n')
+
+    try {
+      await navigator.clipboard.writeText(summary)
+    } catch {
+      // Ignore clipboard failures in unsupported contexts.
+    }
+  }
+
   function openAddModal() {
     setEditingId(null)
     setForm(emptyForm)
     setFormError(null)
     setShowModal(true)
+  }
+
+  function openGroupEditModal(group: SaleGroup) {
+    const firstSale = group.sales[0]
+    setGroupEditTarget(group)
+    setGroupEditForm({
+      buyer_name: firstSale.buyer_name,
+      platform: firstSale.platform,
+      sale_date: firstSale.sale_date,
+      fulfillment_status: firstSale.fulfillment_status ?? 'parking',
+      notes: firstSale.notes ?? '',
+    })
+    setGroupEditError(null)
+    setShowGroupEditModal(true)
   }
 
   function openEditModal(s: SaleRow) {
@@ -147,6 +260,7 @@ export default function Sales() {
       packing_cost: String(s.packing_cost),
       shipping_subsidy: String(s.shipping_subsidy),
       sale_date: s.sale_date,
+      fulfillment_status: s.fulfillment_status ?? 'parking',
       notes: s.notes ?? '',
     })
     setFormError(null)
@@ -160,6 +274,43 @@ export default function Sales() {
   const shippingSubsidy = Number(form.shipping_subsidy) || 0
   const grossProfitPreview = salePrice - modalPrice
   const netProfitPreview = grossProfitPreview - marketplaceFee - packingCost - shippingSubsidy
+
+  async function handleGroupEditSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!groupEditTarget?.bookingGroupId) {
+      setGroupEditError('This transaction does not have a shared booking group.')
+      return
+    }
+    if (!groupEditForm.buyer_name.trim()) {
+      setGroupEditError('Buyer name is required.')
+      return
+    }
+
+    setSaving(true)
+    setGroupEditError(null)
+
+    const { error } = await supabase
+      .from('sales')
+      .update({
+        buyer_name: groupEditForm.buyer_name.trim(),
+        platform: groupEditForm.platform,
+        sale_date: groupEditForm.sale_date || todayISO(),
+        fulfillment_status: groupEditForm.fulfillment_status,
+        notes: groupEditForm.notes.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('booking_group_id', groupEditTarget.bookingGroupId)
+
+    setSaving(false)
+    if (error) {
+      setGroupEditError(error.message)
+      return
+    }
+
+    setShowGroupEditModal(false)
+    setGroupEditTarget(null)
+    loadSales()
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -185,6 +336,7 @@ export default function Sales() {
       gross_profit: grossProfitPreview,
       net_profit: netProfitPreview,
       sale_date: form.sale_date || todayISO(),
+      fulfillment_status: form.fulfillment_status,
       notes: form.notes.trim() || null,
       updated_at: new Date().toISOString(),
     }
@@ -208,7 +360,7 @@ export default function Sales() {
         return
       }
       await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', form.inventory_item_id)
-      await logActivity({
+      void logActivity({
         action: 'Sale',
         entity: 'sales',
         userId: user?.id,
@@ -235,7 +387,7 @@ export default function Sales() {
         .eq('id', s.inventory_item_id)
         .eq('status', 'sold')
     }
-    await logActivity({
+    void logActivity({
       action: 'Delete',
       entity: 'sales',
       entityId: s.id,
@@ -289,7 +441,7 @@ export default function Sales() {
         .eq('status', 'sold')
     }
 
-    await logActivity({
+    void logActivity({
       action: 'Undo Sale',
       entity: 'sales',
       entityId: s.id,
@@ -360,13 +512,27 @@ export default function Sales() {
         </div>
       </div>
 
-      <input
-        type="text"
-        placeholder="Search buyer, item, or notes..."
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          placeholder="Search buyer, item, or notes..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        />
+        <select
+          value={fulfillmentFilter}
+          onChange={(e) => setFulfillmentFilter(e.target.value as 'all' | FulfillmentStatus)}
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        >
+          <option value="all">All</option>
+          {FULFILLMENT_STATUSES.map((status) => (
+            <option key={status} value={status}>
+              {FULFILLMENT_LABELS[status]}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
       {loading ? (
@@ -378,8 +544,9 @@ export default function Sales() {
               <tr>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Date</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Items</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Fulfillment</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Platform</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Gross profit</th>
@@ -388,72 +555,146 @@ export default function Sales() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {groupedSales.length === 0 ? (
+              {dailySalesGroups.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={10} className="px-3 py-6 text-center text-gray-400">
                     No data found.
                   </td>
                 </tr>
               ) : (
-                groupedSales.map((group) => {
-                  const firstSale = group.sales[0]
-                  const isExpanded = expandedGroupKeys.includes(group.key)
+                dailySalesGroups.map((dayGroup) => {
+                  const isDateExpanded = expandedDateKeys.includes(dayGroup.key)
                   return (
-                    <Fragment key={group.key}>
-                      <tr className="hover:bg-gray-50">
-                        <td className="whitespace-nowrap px-3 py-2">{formatDate(group.saleDate)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">
-                          {group.isGrouped ? (
+                    <Fragment key={dayGroup.key}>
+                      <tr className="bg-gray-50">
+                        <td colSpan={9} className="px-3 py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <button
-                              onClick={() => toggleGroupExpanded(group.key)}
-                              className="font-medium text-blue-700 hover:underline"
+                              type="button"
+                              onClick={() => toggleDateExpanded(dayGroup.key)}
+                              className="flex items-center gap-2 text-left font-semibold text-gray-900"
                             >
-                              {bookingGroupDisplayId(group.bookingGroupId, knownGroupIds)} ·{' '}
-                              {isExpanded ? 'Hide' : 'Show'} {group.itemCount} items
+                              <span>{isDateExpanded ? '▼' : '▶'}</span>
+                              <span>{formatDate(dayGroup.saleDate)}</span>
                             </button>
-                          ) : (
-                            firstSale.inventory_items?.item_name ?? '-'
-                          )}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2">{group.buyerName}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{group.platform}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalRevenue)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalModal)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.grossProfit)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">
-                          <span className={group.netProfit < 0 ? 'text-red-600' : 'text-green-700'}>
-                            {formatIDR(group.netProfit)}
-                          </span>
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2">
-                          {group.isGrouped ? (
-                            <span className="text-gray-400">Expand to edit items</span>
-                          ) : (
-                            renderSaleActions(firstSale)
-                          )}
+                            <button
+                              type="button"
+                              onClick={() => void copySummary(dayGroup)}
+                              className="text-sm font-medium text-blue-700 hover:underline"
+                            >
+                              Copy Summary
+                            </button>
+                          </div>
                         </td>
                       </tr>
-                      {group.isGrouped &&
-                        isExpanded &&
-                        group.sales.map((sale) => (
-                          <tr key={sale.id} className="bg-gray-50 text-xs">
-                            <td className="whitespace-nowrap px-3 py-2"></td>
-                            <td className="whitespace-nowrap px-3 py-2 pl-8">
-                              {sale.inventory_items?.item_name ?? '-'}
+                      {isDateExpanded && (
+                        <>
+                          <tr className="bg-white">
+                            <td colSpan={10} className="px-3 py-3">
+                              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Revenue</p>
+                                  <p className="mt-1 text-lg font-semibold text-gray-900">{formatIDR(dayGroup.revenue)}</p>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Profit</p>
+                                  <p className="mt-1 text-lg font-semibold text-gray-900">{formatIDR(dayGroup.profit)}</p>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Transactions</p>
+                                  <p className="mt-1 text-lg font-semibold text-gray-900">{dayGroup.transactions}</p>
+                                </div>
+                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Items Sold</p>
+                                  <p className="mt-1 text-lg font-semibold text-gray-900">{dayGroup.itemsSold}</p>
+                                </div>
+                              </div>
                             </td>
-                            <td className="whitespace-nowrap px-3 py-2">{sale.buyer_name}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{sale.platform}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.modal_price)}</td>
-                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.gross_profit)}</td>
-                            <td className="whitespace-nowrap px-3 py-2">
-                              <span className={sale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
-                                {formatIDR(sale.net_profit)}
-                              </span>
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2">{renderSaleActions(sale)}</td>
                           </tr>
-                        ))}
+                          {dayGroup.transactionGroups.map((group) => {
+                            const firstSale = group.sales[0]
+                            const isExpanded = expandedGroupKeys.includes(group.key)
+                            return (
+                              <Fragment key={group.key}>
+                                <tr className="hover:bg-gray-50">
+                                  <td className="whitespace-nowrap px-3 py-2">{formatDate(group.saleDate)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    {group.isGrouped ? (
+                                      <div className="space-y-1">
+                                        <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                          🧾 Bulk Transaction
+                                        </span>
+                                        <button
+                                          onClick={() => toggleGroupExpanded(group.key)}
+                                          className="block font-medium text-blue-700 hover:underline"
+                                        >
+                                          {bookingGroupDisplayId(group.bookingGroupId, knownGroupIds)} ·{' '}
+                                          {isExpanded ? 'Hide' : 'Show'} {group.itemCount} items
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      firstSale.inventory_items?.item_name ?? '-'
+                                    )}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">{getBatchSummary(group.sales)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[group.sales[0].fulfillment_status ?? 'parking']}`}>
+                                      {FULFILLMENT_LABELS[group.sales[0].fulfillment_status ?? 'parking']}
+                                    </span>
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">{group.buyerName}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalRevenue)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalModal)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.grossProfit)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <span className={group.netProfit < 0 ? 'text-red-600' : 'text-green-700'}>
+                                      {formatIDR(group.netProfit)}
+                                    </span>
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    {group.isGrouped ? (
+                                      <button
+                                        onClick={() => openGroupEditModal(group)}
+                                        className="text-blue-600 hover:underline"
+                                      >
+                                        Edit Group
+                                      </button>
+                                    ) : (
+                                      renderSaleActions(firstSale)
+                                    )}
+                                  </td>
+                                </tr>
+                                {group.isGrouped &&
+                                  isExpanded &&
+                                  group.sales.map((sale) => (
+                                    <tr key={sale.id} className="bg-gray-50 text-xs">
+                                      <td className="whitespace-nowrap px-3 py-2"></td>
+                                      <td className="whitespace-nowrap px-3 py-2 pl-8">
+                                        {sale.inventory_items?.item_name ?? '-'}
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2">{getBatchLabel(sale)}</td>
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[sale.fulfillment_status ?? 'parking']}`}>
+                                          {FULFILLMENT_LABELS[sale.fulfillment_status ?? 'parking']}
+                                        </span>
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2">{sale.buyer_name}</td>
+                                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
+                                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.modal_price)}</td>
+                                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.gross_profit)}</td>
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <span className={sale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
+                                          {formatIDR(sale.net_profit)}
+                                        </span>
+                                      </td>
+                                      <td className="whitespace-nowrap px-3 py-2">{renderSaleActions(sale)}</td>
+                                    </tr>
+                                  ))}
+                              </Fragment>
+                            )
+                          })}
+                        </>
+                      )}
                     </Fragment>
                   )
                 })
@@ -461,6 +702,85 @@ export default function Sales() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {showGroupEditModal && groupEditTarget && (
+        <Modal title="Edit group sale" onClose={() => setShowGroupEditModal(false)} wide>
+          <form onSubmit={handleGroupEditSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Sale date</label>
+              <input
+                type="date"
+                value={groupEditForm.sale_date}
+                onChange={(e) => setGroupEditForm({ ...groupEditForm, sale_date: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Buyer</label>
+              <input
+                type="text"
+                value={groupEditForm.buyer_name}
+                onChange={(e) => setGroupEditForm({ ...groupEditForm, buyer_name: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Fulfillment status</label>
+              <select
+                value={groupEditForm.fulfillment_status}
+                onChange={(e) => setGroupEditForm({ ...groupEditForm, fulfillment_status: e.target.value as FulfillmentStatus })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              >
+                {FULFILLMENT_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {FULFILLMENT_LABELS[status]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Platform</label>
+              <select
+                value={groupEditForm.platform}
+                onChange={(e) => setGroupEditForm({ ...groupEditForm, platform: e.target.value as Platform })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              >
+                {(['Live', 'Other'] as Platform[]).map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+              <textarea
+                value={groupEditForm.notes}
+                onChange={(e) => setGroupEditForm({ ...groupEditForm, notes: e.target.value })}
+                rows={3}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+            </div>
+            {groupEditError && <p className="text-sm text-red-600 sm:col-span-2">{groupEditError}</p>}
+            <div className="flex justify-end gap-2 sm:col-span-2">
+              <button
+                type="button"
+                onClick={() => setShowGroupEditModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
 
       {showModal && (
@@ -502,15 +822,15 @@ export default function Sales() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Platform</label>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Fulfillment status</label>
               <select
-                value={form.platform}
-                onChange={(e) => setForm({ ...form, platform: e.target.value as Platform })}
+                value={form.fulfillment_status}
+                onChange={(e) => setForm({ ...form, fulfillment_status: e.target.value as FulfillmentStatus })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
               >
-                {PLATFORMS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
+                {FULFILLMENT_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {FULFILLMENT_LABELS[status]}
                   </option>
                 ))}
               </select>

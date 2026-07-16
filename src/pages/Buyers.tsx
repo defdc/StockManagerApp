@@ -2,20 +2,22 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { formatDate, formatIDR } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
-import type { Booking, Sale } from '../types/database'
+import type { Booking, FulfillmentStatus, Sale } from '../types/database'
 import Modal from '../components/Modal'
 
-type BuyerBooking = Booking & { inventory_items: { item_name: string } | null }
+type BuyerBooking = Booking & { inventory_items: { item_name: string; batch_name: string | null } | null }
 type BuyerSale = Sale & { inventory_items: { item_name: string } | null }
 
 interface BuyerSummary {
   buyer: string
   bookings: BuyerBooking[]
   sales: BuyerSale[]
+  bookedRevenue: number
+  salesRevenue: number
   revenue: number
-  grossProfit: number
   netProfit: number
-  lastPurchase: string | null
+  lastActivity: string | null
+  fulfillmentSummary: Record<FulfillmentStatus, number>
 }
 
 export default function Buyers() {
@@ -31,7 +33,10 @@ export default function Buyers() {
       setLoading(true)
       setError(null)
       const [bookingsRes, salesRes] = await Promise.all([
-        supabase.from('bookings').select('*, inventory_items(item_name)').order('created_at', { ascending: false }),
+        supabase
+          .from('bookings')
+          .select('*, inventory_items(item_name, batch_name)')
+          .order('created_at', { ascending: false }),
         supabase.from('sales').select('*, inventory_items(item_name)').order('sale_date', { ascending: false }),
       ])
 
@@ -57,26 +62,35 @@ export default function Buyers() {
         buyer: name,
         bookings: [],
         sales: [],
+        bookedRevenue: 0,
+        salesRevenue: 0,
         revenue: 0,
-        grossProfit: 0,
         netProfit: 0,
-        lastPurchase: null,
+        lastActivity: null,
+        fulfillmentSummary: { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 },
       }
       summaries.set(name, summary)
       return summary
     }
 
     for (const booking of bookings) {
-      ensureBuyer(booking.buyer_name).bookings.push(booking)
+      const summary = ensureBuyer(booking.buyer_name)
+      summary.bookings.push(booking)
+      if (booking.status === 'active') {
+        summary.bookedRevenue += booking.deal_price
+      }
+      if (!summary.lastActivity || booking.created_at > summary.lastActivity) summary.lastActivity = booking.created_at
     }
 
     for (const sale of sales) {
       const summary = ensureBuyer(sale.buyer_name)
       summary.sales.push(sale)
+      summary.salesRevenue += sale.sale_price
       summary.revenue += sale.sale_price
-      summary.grossProfit += sale.gross_profit
       summary.netProfit += sale.net_profit
-      if (!summary.lastPurchase || sale.sale_date > summary.lastPurchase) summary.lastPurchase = sale.sale_date
+      const fulfillmentStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+      summary.fulfillmentSummary[fulfillmentStatus] += 1
+      if (!summary.lastActivity || sale.sale_date > summary.lastActivity) summary.lastActivity = sale.sale_date
     }
 
     return [...summaries.values()]
@@ -112,11 +126,11 @@ export default function Buyers() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Bookings</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Purchases</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Purchased</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Profit</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Last Purchase</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Last Activity</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -134,11 +148,11 @@ export default function Buyers() {
                         {buyer.buyer}
                       </button>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-2">{buyer.bookings.length}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{buyer.bookings.filter((booking) => booking.status === 'active').length}</td>
                     <td className="whitespace-nowrap px-3 py-2">{buyer.sales.length}</td>
                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.revenue)}</td>
                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.netProfit)}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastPurchase)}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastActivity)}</td>
                   </tr>
                 ))
               )}
@@ -152,58 +166,106 @@ export default function Buyers() {
           <div className="space-y-5">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
               <div className="rounded-md bg-gray-50 p-3 text-sm">
+                <p className="text-gray-500">Booked revenue</p>
+                <p className="font-medium text-gray-900">{formatIDR(selectedBuyer.bookedRevenue)}</p>
+              </div>
+              <div className="rounded-md bg-gray-50 p-3 text-sm">
+                <p className="text-gray-500">Sales revenue</p>
+                <p className="font-medium text-gray-900">{formatIDR(selectedBuyer.salesRevenue)}</p>
+              </div>
+              <div className="rounded-md bg-gray-50 p-3 text-sm">
                 <p className="text-gray-500">Total revenue</p>
                 <p className="font-medium text-gray-900">{formatIDR(selectedBuyer.revenue)}</p>
               </div>
               <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Total gross profit</p>
-                <p className="font-medium text-gray-900">{formatIDR(selectedBuyer.grossProfit)}</p>
-              </div>
-              <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Total net profit</p>
+                <p className="text-gray-500">Profit</p>
                 <p className="font-medium text-gray-900">{formatIDR(selectedBuyer.netProfit)}</p>
-              </div>
-              <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Average purchase</p>
-                <p className="font-medium text-gray-900">
-                  {formatIDR(selectedBuyer.sales.length ? selectedBuyer.revenue / selectedBuyer.sales.length : 0)}
-                </p>
               </div>
             </div>
 
             <section>
-              <h2 className="mb-2 font-medium text-gray-900">Booking history</h2>
-              {selectedBuyer.bookings.length === 0 ? (
-                <p className="text-sm text-gray-400">No bookings.</p>
+              <h2 className="mb-2 font-medium text-gray-900">Fulfillment overview</h2>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                <div className="rounded-md bg-gray-50 p-3 text-sm">
+                  <p className="text-gray-500">Parking</p>
+                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.parking} items</p>
+                </div>
+                <div className="rounded-md bg-gray-50 p-3 text-sm">
+                  <p className="text-gray-500">Shipping</p>
+                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.shipping} items</p>
+                </div>
+                <div className="rounded-md bg-gray-50 p-3 text-sm">
+                  <p className="text-gray-500">Parking + Shipping</p>
+                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.parking_shipping} items</p>
+                </div>
+                <div className="rounded-md bg-gray-50 p-3 text-sm">
+                  <p className="text-gray-500">Delivered</p>
+                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.delivered} items</p>
+                </div>
+              </div>
+            </section>
+
+            <section>
+              <h2 className="mb-2 font-medium text-gray-900">Active bookings</h2>
+              {selectedBuyer.bookings.filter((booking) => booking.status === 'active').length === 0 ? (
+                <p className="text-sm text-gray-400">No active bookings.</p>
               ) : (
-                <ul className="space-y-2 text-sm">
-                  {selectedBuyer.bookings.map((booking) => (
-                    <li key={booking.id} className="rounded-md border border-gray-200 p-3">
-                      <p className="font-medium text-gray-800">{booking.inventory_items?.item_name ?? '-'}</p>
-                      <p className="text-gray-500">
-                        {formatDate(booking.created_at)} · {formatIDR(booking.deal_price)} · {booking.status}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
+                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="min-w-full divide-y divide-gray-200 text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item Name</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booking Date</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deal Price</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {selectedBuyer.bookings
+                        .filter((booking) => booking.status === 'active')
+                        .map((booking) => (
+                          <tr key={booking.id} className="hover:bg-gray-50">
+                            <td className="whitespace-nowrap px-3 py-2">{booking.inventory_items?.item_name ?? '-'}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{formatDate(booking.created_at)}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{formatIDR(booking.deal_price)}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{booking.inventory_items?.batch_name ?? '-'}</td>
+                            <td className="whitespace-nowrap px-3 py-2">{booking.status}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </section>
 
             <section>
-              <h2 className="mb-2 font-medium text-gray-900">Sales history</h2>
+              <h2 className="mb-2 font-medium text-gray-900">Purchase history</h2>
               {selectedBuyer.sales.length === 0 ? (
                 <p className="text-sm text-gray-400">No purchases.</p>
               ) : (
-                <ul className="space-y-2 text-sm">
-                  {selectedBuyer.sales.map((sale) => (
-                    <li key={sale.id} className="rounded-md border border-gray-200 p-3">
-                      <p className="font-medium text-gray-800">{sale.inventory_items?.item_name ?? '-'}</p>
-                      <p className="text-gray-500">
-                        {formatDate(sale.sale_date)} · {formatIDR(sale.sale_price)} · Net {formatIDR(sale.net_profit)}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
+                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="min-w-full divide-y divide-gray-200 text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item Name</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sale Date</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sale Price</th>
+                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Profit</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 bg-white">
+                      {selectedBuyer.sales.map((sale) => (
+                        <tr key={sale.id} className="hover:bg-gray-50">
+                          <td className="whitespace-nowrap px-3 py-2">{sale.inventory_items?.item_name ?? '-'}</td>
+                          <td className="whitespace-nowrap px-3 py-2">{formatDate(sale.sale_date)}</td>
+                          <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
+                          <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.net_profit)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </section>
           </div>

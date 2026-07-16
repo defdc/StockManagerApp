@@ -9,7 +9,7 @@ const links = [
   { to: '/sales', label: 'Sales' },
   { to: '/buyers', label: 'Buyers' },
   { to: '/expenses', label: 'Expenses' },
-  { to: '/partners', label: 'Partners' },
+  { to: '/batches', label: 'Batches' },
   { to: '/import', label: 'Import Excel' },
   { to: '/activity', label: 'Activity' },
 ]

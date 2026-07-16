@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { formatIDR, formatDate } from '../lib/format'
 import StatCard from '../components/StatCard'
-import type { InventoryItem, Sale } from '../types/database'
+import type { FulfillmentStatus, InventoryItem, Sale } from '../types/database'
 import { fetchAllRows } from '../lib/supabasePagination'
 
-type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price'>
-type SaleAggregate = Pick<Sale, 'id' | 'buyer_name' | 'sale_price' | 'gross_profit' | 'net_profit' | 'sale_date'>
+type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price' | 'batch_name' | 'batch_modal_total'>
+type SaleAggregate = Pick<Sale, 'id' | 'buyer_name' | 'sale_price' | 'gross_profit' | 'net_profit' | 'sale_date' | 'fulfillment_status'>
 type ExpenseAggregate = { id: string; amount: number }
 
 type SaleWithItem = Sale & { inventory_items: { item_name: string } | null }
-type SaleWithBatch = Pick<Sale, 'id' | 'net_profit'> & {
+type SaleWithBatch = Pick<Sale, 'id' | 'net_profit' | 'sale_price'> & {
   inventory_items: { batch_name: string | null } | null
 }
 
@@ -31,9 +32,17 @@ interface DashboardData {
   recentSales: SaleWithItem[]
   lowStockItems: InventoryItem[]
   topProfitSales: SaleWithItem[]
+  batchSummary: {
+    totalBatches: number
+    profitableBatches: number
+    inProgressBatches: number
+    noSalesBatches: number
+  }
+  fulfillmentSummary: Record<FulfillmentStatus, number>
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -51,14 +60,14 @@ export default function Dashboard() {
             fetchAllRows<InventoryAggregate>((from, to) =>
               supabase
                 .from('inventory_items')
-                .select('id, status, quantity, modal_price')
+                .select('id, status, quantity, modal_price, batch_name, batch_modal_total')
                 .order('id')
                 .range(from, to)
             ),
             fetchAllRows<SaleAggregate>((from, to) =>
               supabase
                 .from('sales')
-                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date')
+                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status')
                 .order('id')
                 .range(from, to)
             ),
@@ -82,7 +91,7 @@ export default function Dashboard() {
               .select('*, inventory_items(item_name)')
               .order('net_profit', { ascending: false })
               .limit(5),
-            supabase.from('sales').select('id, net_profit, inventory_items(batch_name)').limit(1000),
+            supabase.from('sales').select('id, sale_price, net_profit, inventory_items(batch_name)').limit(1000),
           ])
 
         const firstError =
@@ -123,6 +132,40 @@ export default function Dashboard() {
         }
         const highestProfitBatchEntry = [...batchProfit.entries()].sort((a, b) => b[1] - a[1])[0]
 
+        const batchSummaryMap = new Map<string, { revenue: number; batchModal: number; status: string }>()
+        for (const item of items) {
+          const batchName = item.batch_name?.trim() || 'Unassigned'
+          const current = batchSummaryMap.get(batchName) ?? { revenue: 0, batchModal: item.batch_modal_total ?? 0, status: 'No Sales' }
+          if ((item.batch_modal_total ?? 0) > 0 && current.batchModal === 0) {
+            current.batchModal = item.batch_modal_total ?? 0
+          }
+          batchSummaryMap.set(batchName, current)
+        }
+        for (const sale of ((batchSalesRes.data as unknown as SaleWithBatch[]) ?? [])) {
+          const batchName = sale.inventory_items?.batch_name
+          if (!batchName) continue
+          const current = batchSummaryMap.get(batchName) ?? { revenue: 0, batchModal: 0, status: 'No Sales' }
+          current.revenue += sale.sale_price
+          batchSummaryMap.set(batchName, current)
+        }
+        const batchSummary = Array.from(batchSummaryMap.values()).reduce(
+          (summary, batch) => {
+            if (batch.revenue === 0) summary.noSalesBatches += 1
+            else if (batch.batchModal > 0 && batch.revenue < batch.batchModal) summary.inProgressBatches += 1
+            else summary.profitableBatches += 1
+            return summary
+          },
+          { totalBatches: batchSummaryMap.size, profitableBatches: 0, inProgressBatches: 0, noSalesBatches: 0 }
+        )
+        const fulfillmentSummary = sales.reduce(
+          (summary, sale) => {
+            const fulfillmentStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+            summary[fulfillmentStatus] += 1
+            return summary
+          },
+          { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 }
+        )
+
         setData({
           totalItems: itemCountRes.count ?? 0,
           readyQty,
@@ -142,6 +185,8 @@ export default function Dashboard() {
           recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
           lowStockItems: lowStockRes.data ?? [],
           topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
+          batchSummary,
+          fulfillmentSummary,
         })
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.')
@@ -185,6 +230,22 @@ export default function Dashboard() {
         <StatCard label="Booked Inventory Value" value={formatIDR(data.bookedInventoryValue)} />
         <StatCard label="Sold This Month" value={String(data.soldThisMonth)} subtext="sales" />
         <StatCard label="Top Buyer" value={data.topBuyer} />
+        <button type="button" onClick={() => navigate('/batches')} className="text-left">
+          <StatCard
+            label="Batch Summary"
+            value={`${data.batchSummary.totalBatches} batches`}
+            subtext={`${data.batchSummary.profitableBatches} profitable · ${data.batchSummary.inProgressBatches} in progress · ${data.batchSummary.noSalesBatches} no sales`}
+          />
+        </button>
+        <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-medium text-gray-500">Fulfillment</p>
+          <p className="mt-2 text-sm text-gray-900">
+            Parking: {data.fulfillmentSummary.parking} · Shipping: {data.fulfillmentSummary.shipping} · Delivered: {data.fulfillmentSummary.delivered}
+          </p>
+          <p className="mt-1 text-xs text-gray-400">
+            Parking + Shipping: {data.fulfillmentSummary.parking_shipping}
+          </p>
+        </div>
         <StatCard label="Highest Profit Batch" value={data.highestProfitBatch} />
       </div>
 

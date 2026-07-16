@@ -342,7 +342,7 @@ export default function ImportExcel() {
         rowsWithBatchModalTotal,
         rowsWithCalculatedBatchModal,
       })
-      await logActivity({
+      void logActivity({
         action: 'Import',
         entity: 'legacy_imports',
         entityId: importRow.id,

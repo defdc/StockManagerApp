@@ -10,7 +10,7 @@ import Bookings from './pages/Bookings'
 import Sales from './pages/Sales'
 import Buyers from './pages/Buyers'
 import Expenses from './pages/Expenses'
-import Partners from './pages/Partners'
+import Batches from './pages/Batches'
 import Activity from './pages/Activity'
 
 const ImportExcel = lazy(() => import('./pages/ImportExcel'))
@@ -34,7 +34,7 @@ export default function App() {
             <Route path="/sales" element={<Sales />} />
             <Route path="/buyers" element={<Buyers />} />
             <Route path="/expenses" element={<Expenses />} />
-            <Route path="/partners" element={<Partners />} />
+            <Route path="/batches" element={<Batches />} />
             <Route path="/activity" element={<Activity />} />
             <Route
               path="/import"

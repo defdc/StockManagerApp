@@ -101,6 +101,7 @@ export default function Inventory() {
   useEffect(() => {
     if (!historyItem) return
 
+    const historyItemId = historyItem.id
     let cancelled = false
     setHistoryLoading(true)
     async function loadHistory() {
@@ -108,12 +109,12 @@ export default function Inventory() {
         supabase
           .from('bookings')
           .select('*')
-          .eq('inventory_item_id', historyItem.id)
+          .eq('inventory_item_id', historyItemId)
           .order('created_at', { ascending: false }),
         supabase
           .from('sales')
           .select('*')
-          .eq('inventory_item_id', historyItem.id)
+          .eq('inventory_item_id', historyItemId)
           .order('sale_date', { ascending: false }),
       ])
 
@@ -305,7 +306,7 @@ export default function Inventory() {
 
     setShowBulkBookingModal(false)
     setSelectedItemIds([])
-    await logActivity({
+    void logActivity({
       action: 'Bulk Booking',
       entity: 'inventory_items',
       userId: user?.id,
@@ -319,7 +320,7 @@ export default function Inventory() {
     const { error } = await supabase.from('inventory_items').delete().eq('id', item.id)
     if (error) alert(error.message)
     else {
-      await logActivity({
+      void logActivity({
         action: 'Delete',
         entity: 'inventory_items',
         entityId: item.id,

@@ -10,6 +10,7 @@ export type Platform =
   | 'Event'
   | 'Other'
 export type ExpenseType = 'packing' | 'shipping' | 'marketplace_fee' | 'event_fee' | 'other'
+export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'delivered'
 
 export interface Profile {
   id: string
@@ -88,6 +89,7 @@ export interface Sale {
   gross_profit: number
   net_profit: number
   sale_date: string
+  fulfillment_status: FulfillmentStatus | null
   notes: string | null
   created_by: string | null
   created_at: string

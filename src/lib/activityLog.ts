@@ -16,13 +16,17 @@ export async function logActivity({
   details = {},
 }: ActivityLogInput): Promise<void> {
   try {
-    await supabase.from('activity_logs').insert({
+    const { error } = await supabase.from('activity_logs').insert({
       action,
       entity,
       entity_id: entityId,
       created_by: userId,
       details,
     })
+
+    if (error) {
+      console.warn('Activity log failed', error)
+    }
   } catch (error) {
     console.warn('Activity log failed', error)
   }

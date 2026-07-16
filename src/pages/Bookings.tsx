@@ -55,6 +55,7 @@ export default function Bookings() {
   const [bulkSaleForm, setBulkSaleForm] = useState(emptyBulkSaleForm)
   const [bulkSaleSaving, setBulkSaleSaving] = useState(false)
   const [bulkSaleError, setBulkSaleError] = useState<string | null>(null)
+  const [bulkPurchase, setBulkPurchase] = useState(false)
 
   async function loadBookings() {
     setLoading(true)
@@ -144,6 +145,7 @@ export default function Bookings() {
       sale_date: todayISO(),
     })
     setBulkSaleError(null)
+    setBulkPurchase(false)
     setShowBulkSaleModal(true)
   }
 
@@ -226,7 +228,7 @@ export default function Bookings() {
         return
       }
       await supabase.from('inventory_items').update({ status: 'booked' }).eq('id', form.inventory_item_id)
-      await logActivity({
+      void logActivity({
         action: 'Booking',
         entity: 'bookings',
         userId: user?.id,
@@ -253,7 +255,7 @@ export default function Bookings() {
         .eq('id', b.inventory_item_id)
         .eq('status', 'booked')
     }
-    await logActivity({
+    void logActivity({
       action: 'Delete',
       entity: 'bookings',
       entityId: b.id,
@@ -309,7 +311,7 @@ export default function Bookings() {
 
     await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', b.inventory_item_id)
     await supabase.from('bookings').update({ status: 'converted_to_sale' }).eq('id', b.id)
-    await logActivity({
+    void logActivity({
       action: 'Sale',
       entity: 'sales',
       userId: user?.id,
@@ -358,14 +360,15 @@ export default function Bookings() {
 
     const salesPayload = selectedBookings.map((booking) => {
       const modalPrice = booking.inventory_items?.modal_price ?? 0
-      const grossProfit = salePricePerItem - modalPrice
+      const salePrice = bulkPurchase ? salePricePerItem : booking.deal_price
+      const grossProfit = salePrice - modalPrice
       return {
         inventory_item_id: booking.inventory_item_id,
         customer_id: booking.customer_id,
-        booking_group_id: bookingGroupId,
-        buyer_name: bulkSaleForm.buyer_name.trim(),
+        booking_group_id: bulkPurchase ? bookingGroupId : booking.booking_group_id,
+        buyer_name: bulkPurchase ? bulkSaleForm.buyer_name.trim() : booking.buyer_name.trim(),
         platform: bulkSaleForm.platform,
-        sale_price: salePricePerItem,
+        sale_price: salePrice,
         modal_price: modalPrice,
         marketplace_fee: 0,
         packing_cost: 0,
@@ -403,8 +406,12 @@ export default function Bookings() {
       .from('bookings')
       .update({
         status: 'converted_to_sale',
-        booking_group_id: bookingGroupId,
-        group_total_deal_price: groupTotalDealPrice,
+        ...(bulkPurchase
+          ? {
+              booking_group_id: bookingGroupId,
+              group_total_deal_price: groupTotalDealPrice,
+            }
+          : {}),
         updated_at: new Date().toISOString(),
       })
       .in(
@@ -420,7 +427,7 @@ export default function Bookings() {
 
     setShowBulkSaleModal(false)
     setSelectedBookingIds([])
-    await logActivity({
+    void logActivity({
       action: 'Bulk Sale',
       entity: 'sales',
       userId: user?.id,
@@ -503,6 +510,9 @@ export default function Bookings() {
   const dealPrice = Number(form.deal_price) || 0
   const dpAmount = Number(form.dp_amount) || 0
   const remainingPreview = Math.max(dealPrice - dpAmount, 0)
+  const bulkSaleHelperText = bulkPurchase
+    ? 'This transaction will be treated as one bulk purchase.'
+    : 'This will convert every booking using its own booking deal price.'
 
   return (
     <div className="space-y-4">
@@ -732,19 +742,31 @@ export default function Bookings() {
                 />
               </div>
             </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Total sale price (Rp)</label>
+            <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
               <input
-                type="number"
-                min="0"
-                value={bulkSaleForm.total_sale_price}
-                onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, total_sale_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                id="bulk-purchase-toggle"
+                type="checkbox"
+                checked={bulkPurchase}
+                onChange={(event) => setBulkPurchase(event.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
               />
+              <label htmlFor="bulk-purchase-toggle" className="text-sm font-medium text-gray-700">
+                Bulk Purchase (Borongan)
+              </label>
             </div>
-            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
-              This creates grouped sale rows with one shared booking group ID. The Sales page will show them as one expandable transaction.
-            </div>
+            {bulkPurchase && (
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={bulkSaleForm.total_sale_price}
+                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, total_sale_price: e.target.value })}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+            )}
+            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">{bulkSaleHelperText}</div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
               <textarea
