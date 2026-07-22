@@ -7,20 +7,20 @@ import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
-import { PLATFORMS, STATUS_BADGE_CLASSES } from '../lib/constants'
-import type { Booking, BookingStatus, Platform } from '../types/database'
+import { PLATFORMS, STATUS_BADGE_CLASSES, FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
+import type { Booking, BookingStatus, FulfillmentStatus, Platform } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 
 type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number } | null }
+type BookingItemSelection = { inventory_item_id: string }
 
 const emptyForm = {
   inventory_item_id: '',
   buyer_name: '',
   deal_price: '0',
-  dp_amount: '0',
   deadline: '',
   status: 'active' as BookingStatus,
   notes: '',
@@ -48,6 +48,11 @@ export default function Bookings() {
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
   const [editingItemName, setEditingItemName] = useState('')
   const [form, setForm] = useState(emptyForm)
+  const [newBookingItems, setNewBookingItems] = useState<BookingItemSelection[]>([{ inventory_item_id: '' }])
+  const [newBookingBuyer, setNewBookingBuyer] = useState('')
+  const [newBookingBundlePrice, setNewBookingBundlePrice] = useState('0')
+  const [newBookingDeadline, setNewBookingDeadline] = useState('')
+  const [newBookingNotes, setNewBookingNotes] = useState('')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [selectedBookingIds, setSelectedBookingIds] = useState<string[]>([])
@@ -56,6 +61,11 @@ export default function Bookings() {
   const [bulkSaleSaving, setBulkSaleSaving] = useState(false)
   const [bulkSaleError, setBulkSaleError] = useState<string | null>(null)
   const [bulkPurchase, setBulkPurchase] = useState(false)
+  const [bulkFulfillmentStatus, setBulkFulfillmentStatus] = useState<FulfillmentStatus>('parking')
+
+  const [singleConvertTarget, setSingleConvertTarget] = useState<BookingRow | null>(null)
+  const [singleConvertFulfillment, setSingleConvertFulfillment] = useState<FulfillmentStatus>('parking')
+  const [singleConvertSaving, setSingleConvertSaving] = useState(false)
 
   async function loadBookings() {
     setLoading(true)
@@ -146,6 +156,7 @@ export default function Bookings() {
     })
     setBulkSaleError(null)
     setBulkPurchase(false)
+    setBulkFulfillmentStatus('parking')
     setShowBulkSaleModal(true)
   }
 
@@ -153,6 +164,11 @@ export default function Bookings() {
     setEditingId(null)
     setEditingItemId(null)
     setForm(emptyForm)
+    setNewBookingItems([{ inventory_item_id: '' }])
+    setNewBookingBuyer('')
+    setNewBookingBundlePrice('0')
+    setNewBookingDeadline('')
+    setNewBookingNotes('')
     setFormError(null)
     setShowModal(true)
   }
@@ -165,7 +181,6 @@ export default function Bookings() {
       inventory_item_id: b.inventory_item_id ?? '',
       buyer_name: b.buyer_name,
       deal_price: String(b.deal_price),
-      dp_amount: String(b.dp_amount),
       deadline: b.deadline ?? '',
       status: b.status === 'converted_to_sale' ? 'active' : b.status,
       notes: b.notes ?? '',
@@ -174,36 +189,61 @@ export default function Bookings() {
     setShowModal(true)
   }
 
+  function openSingleConvertModal(b: BookingRow) {
+    if (!b.inventory_item_id) {
+      alert('This booking has no linked inventory item.')
+      return
+    }
+    setSingleConvertTarget(b)
+    setSingleConvertFulfillment('parking')
+  }
+
+  function addNewBookingItem() {
+    setNewBookingItems((current) => [...current, { inventory_item_id: '' }])
+  }
+
+  function updateNewBookingItem(index: number, inventoryItemId: string) {
+    setNewBookingItems((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, inventory_item_id: inventoryItemId } : item)))
+  }
+
+  function removeNewBookingItem(index: number) {
+    if (newBookingItems.length === 1) return
+    setNewBookingItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
+  }
+
+  function distributeBundlePrice(total: number, itemCount: number) {
+    if (itemCount <= 0) return []
+    const baseAmount = Math.floor(total / itemCount)
+    const remainder = total % itemCount
+    return Array.from({ length: itemCount }, (_, index) => baseAmount + (index === itemCount - 1 ? remainder : 0))
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    if (!form.inventory_item_id) {
-      setFormError('Please select an item.')
-      return
-    }
-    if (!form.buyer_name.trim()) {
-      setFormError('Buyer name is required.')
-      return
-    }
-    setSaving(true)
-    setFormError(null)
-
-    const dealPrice = Number(form.deal_price) || 0
-    const dpAmount = Number(form.dp_amount) || 0
-    const remaining = Math.max(dealPrice - dpAmount, 0)
-
-    const payload = {
-      inventory_item_id: form.inventory_item_id,
-      buyer_name: form.buyer_name.trim(),
-      deal_price: dealPrice,
-      dp_amount: dpAmount,
-      remaining_amount: remaining,
-      deadline: form.deadline || null,
-      status: form.status,
-      notes: form.notes.trim() || null,
-      updated_at: new Date().toISOString(),
-    }
 
     if (editingId) {
+      if (!form.inventory_item_id) {
+        setFormError('Please select an item.')
+        return
+      }
+      if (!form.buyer_name.trim()) {
+        setFormError('Buyer name is required.')
+        return
+      }
+      setSaving(true)
+      setFormError(null)
+
+      const dealPrice = Number(form.deal_price) || 0
+      const payload = {
+        inventory_item_id: form.inventory_item_id,
+        buyer_name: form.buyer_name.trim(),
+        deal_price: dealPrice,
+        deadline: form.deadline || null,
+        status: form.status,
+        notes: form.notes.trim() || null,
+        updated_at: new Date().toISOString(),
+      }
+
       const { error } = await supabase.from('bookings').update(payload).eq('id', editingId)
       if (error) {
         setSaving(false)
@@ -218,26 +258,79 @@ export default function Bookings() {
           .eq('id', editingItemId)
           .eq('status', 'booked')
       }
-    } else {
-      const { error } = await supabase
-        .from('bookings')
-        .insert({ ...payload, created_by: user?.id })
-      if (error) {
-        setSaving(false)
-        setFormError(error.message)
-        return
-      }
-      await supabase.from('inventory_items').update({ status: 'booked' }).eq('id', form.inventory_item_id)
-      void logActivity({
-        action: 'Booking',
-        entity: 'bookings',
-        userId: user?.id,
-        details: { buyer_name: form.buyer_name.trim(), inventory_item_id: form.inventory_item_id },
-      })
+
+      setSaving(false)
+      setShowModal(false)
+      loadBookings()
+      return
     }
+
+    const selectedItems = newBookingItems.filter((item) => item.inventory_item_id)
+    if (selectedItems.length === 0) {
+      setFormError('Please select at least one item.')
+      return
+    }
+    if (!newBookingBuyer.trim()) {
+      setFormError('Buyer name is required.')
+      return
+    }
+
+    setSaving(true)
+    setFormError(null)
+
+    const bookingGroupId = crypto.randomUUID()
+    const bundleDealPrice = Number(newBookingBundlePrice) || 0
+    const splitPrices = distributeBundlePrice(bundleDealPrice, selectedItems.length)
+    const bookingPayloads = selectedItems.map((item, index) => ({
+      inventory_item_id: item.inventory_item_id,
+      booking_group_id: bookingGroupId,
+      group_total_deal_price: bundleDealPrice,
+      buyer_name: newBookingBuyer.trim(),
+      deal_price: splitPrices[index] ?? 0,
+      dp_amount: 0,
+      remaining_amount: 0,
+      deadline: newBookingDeadline || null,
+      status: 'active' as BookingStatus,
+      notes: newBookingNotes.trim() || null,
+      created_by: user?.id,
+    }))
+
+    const { error } = await supabase.from('bookings').insert(bookingPayloads)
+    if (error) {
+      setSaving(false)
+      setFormError(error.message)
+      return
+    }
+
+    const inventoryItemIds = selectedItems.map((item) => item.inventory_item_id)
+    const { error: itemError } = await supabase
+      .from('inventory_items')
+      .update({ status: 'booked', updated_at: new Date().toISOString() })
+      .in('id', inventoryItemIds)
+    if (itemError) {
+      setSaving(false)
+      setFormError(itemError.message)
+      return
+    }
+
+    void logActivity({
+      action: 'Booking',
+      entity: 'bookings',
+      userId: user?.id,
+      details: {
+        buyer_name: newBookingBuyer.trim(),
+        booking_group_id: bookingGroupId,
+        count: selectedItems.length,
+      },
+    })
 
     setSaving(false)
     setShowModal(false)
+    setNewBookingItems([{ inventory_item_id: '' }])
+    setNewBookingBuyer('')
+    setNewBookingBundlePrice('0')
+    setNewBookingDeadline('')
+    setNewBookingNotes('')
     loadBookings()
   }
 
@@ -265,12 +358,12 @@ export default function Bookings() {
     loadBookings()
   }
 
-  async function handleConvertToSale(b: BookingRow) {
-    if (!b.inventory_item_id) {
-      alert('This booking has no linked inventory item.')
-      return
-    }
-    if (!confirm(`Convert booking for "${b.buyer_name}" into a sale?`)) return
+  async function handleSingleConvertSubmit(e: FormEvent) {
+    e.preventDefault()
+    const b = singleConvertTarget
+    if (!b) return
+
+    setSingleConvertSaving(true)
 
     const { data: item, error: itemError } = await supabase
       .from('inventory_items')
@@ -278,6 +371,7 @@ export default function Bookings() {
       .eq('id', b.inventory_item_id)
       .single()
     if (itemError || !item) {
+      setSingleConvertSaving(false)
       alert(itemError?.message ?? 'Inventory item not found.')
       return
     }
@@ -301,10 +395,12 @@ export default function Bookings() {
       gross_profit: grossProfit,
       net_profit: netProfit,
       sale_date: todayISO(),
+      fulfillment_status: singleConvertFulfillment,
       notes: 'Converted from booking',
       created_by: user?.id,
     })
     if (saleError) {
+      setSingleConvertSaving(false)
       alert(saleError.message)
       return
     }
@@ -318,6 +414,8 @@ export default function Bookings() {
       details: { buyer_name: b.buyer_name, booking_id: b.id, inventory_item_id: b.inventory_item_id },
     })
 
+    setSingleConvertSaving(false)
+    setSingleConvertTarget(null)
     alert('Booking converted to sale. You can edit fees/costs in the Sales page.')
     loadBookings()
     navigate('/sales')
@@ -376,6 +474,7 @@ export default function Bookings() {
         gross_profit: grossProfit,
         net_profit: grossProfit,
         sale_date: bulkSaleForm.sale_date || todayISO(),
+        fulfillment_status: bulkFulfillmentStatus,
         notes: bulkSaleForm.notes.trim() || null,
         created_by: user?.id,
       }
@@ -450,8 +549,6 @@ export default function Bookings() {
         booking_group: bookingGroupDisplayId(b.booking_group_id, knownGroupIds),
         group_total_deal_price: b.group_total_deal_price,
         deal_price: b.deal_price,
-        dp_amount: b.dp_amount,
-        remaining_amount: b.remaining_amount,
         deadline: b.deadline,
         status: b.status,
         created_at: b.created_at,
@@ -476,8 +573,6 @@ export default function Bookings() {
     { header: 'Group', render: (b) => bookingGroupDisplayId(b.booking_group_id, knownGroupIds) },
     { header: 'Buyer', render: (b) => b.buyer_name },
     { header: 'Deal price', render: (b) => formatIDR(b.deal_price) },
-    { header: 'DP', render: (b) => formatIDR(b.dp_amount) },
-    { header: 'Remaining', render: (b) => formatIDR(b.remaining_amount) },
     { header: 'Deadline', render: (b) => formatDate(b.deadline) },
     {
       header: 'Status',
@@ -492,7 +587,7 @@ export default function Bookings() {
       render: (b) => (
         <div className="flex flex-wrap gap-2">
           {b.status === 'active' && (
-            <button onClick={() => handleConvertToSale(b)} className="text-green-700 hover:underline">
+            <button onClick={() => openSingleConvertModal(b)} className="text-green-700 hover:underline">
               Convert to sale
             </button>
           )}
@@ -507,9 +602,6 @@ export default function Bookings() {
     },
   ]
 
-  const dealPrice = Number(form.deal_price) || 0
-  const dpAmount = Number(form.dp_amount) || 0
-  const remainingPreview = Math.max(dealPrice - dpAmount, 0)
   const bulkSaleHelperText = bulkPurchase
     ? 'This transaction will be treated as one bulk purchase.'
     : 'This will convert every booking using its own booking deal price.'
@@ -591,114 +683,187 @@ export default function Bookings() {
         <DataTable columns={columns} data={filtered} keyField={(b) => b.id} />
       )}
 
-      {showModal && (
-        <Modal title={editingId ? 'Edit booking' : 'Add booking'} onClose={() => setShowModal(false)}>
-          <form onSubmit={handleSubmit} className="space-y-3">
+      {/* Single Convert to Sale Modal */}
+      {singleConvertTarget && (
+        <Modal title={`Convert to sale — ${singleConvertTarget.buyer_name}`} onClose={() => setSingleConvertTarget(null)}>
+          <form onSubmit={handleSingleConvertSubmit} className="space-y-3">
+            <p className="text-sm text-gray-600">
+              Item: <span className="font-medium">{singleConvertTarget.inventory_items?.item_name ?? '-'}</span>
+              <br />
+              Deal price: <span className="font-medium">{formatIDR(singleConvertTarget.deal_price)}</span>
+            </p>
             <div>
-              {editingId ? (
-                <>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
-                <input
-                  disabled
-                  value={editingItemName}
-                  className="w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm"
-                />
-                </>
-              ) : (
-                <ItemCombobox
-                  required
-                  label="Item *"
-                  value={form.inventory_item_id || null}
-                  onChange={(item) =>
-                    setForm((current) => ({ ...current, inventory_item_id: item?.id ?? '' }))
-                  }
-                  placeholder="Search ready items..."
-                />
-              )}
-            </div>
-            <div>
-              <BuyerAutocomplete
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping option *</label>
+              <select
+                value={singleConvertFulfillment}
+                onChange={(e) => setSingleConvertFulfillment(e.target.value as FulfillmentStatus)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                 required
-                label="Buyer name *"
-                value={form.buyer_name}
-                onChange={(buyerName) => setForm({ ...form, buyer_name: buyerName })}
-              />
+              >
+                {FULFILLMENT_STATUSES.filter((s) => s !== 'delivered').map((status) => (
+                  <option key={status} value={status}>
+                    {FULFILLMENT_LABELS[status]}
+                  </option>
+                ))}
+              </select>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Deal price (Rp)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={form.deal_price}
-                  onChange={(e) => setForm({ ...form, deal_price: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">DP amount (Rp)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={form.dp_amount}
-                  onChange={(e) => setForm({ ...form, dp_amount: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                />
-              </div>
-            </div>
-            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
-              Remaining payment: <span className="font-medium">{formatIDR(remainingPreview)}</span>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
-              <input
-                type="date"
-                value={form.deadline}
-                onChange={(e) => setForm({ ...form, deadline: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            {editingId && (
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Status</label>
-                <select
-                  value={form.status}
-                  onChange={(e) => setForm({ ...form, status: e.target.value as BookingStatus })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                >
-                  <option value="active">{formatStatus('active')}</option>
-                  <option value="cancelled">{formatStatus('cancelled')}</option>
-                </select>
-                <p className="mt-1 text-xs text-gray-400">
-                  Use the "Convert to sale" action on the list to mark this as sold.
-                </p>
-              </div>
-            )}
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                rows={2}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-
-            {formError && <p className="text-sm text-red-600">{formError}</p>}
-
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setShowModal(false)}
+                onClick={() => setSingleConvertTarget(null)}
                 className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={saving}
+                disabled={singleConvertSaving}
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
+                {singleConvertSaving ? 'Converting...' : 'Convert to sale'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showModal && (
+        <Modal title={editingId ? 'Edit booking' : 'Add booking'} onClose={() => setShowModal(false)}>
+          <form onSubmit={handleSubmit} className="space-y-3">
+            {!editingId && (
+              <>
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="block text-sm font-medium text-gray-700">Items</label>
+                    <button type="button" onClick={addNewBookingItem} className="text-sm font-medium text-blue-700 hover:underline">
+                      + Add Item
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {newBookingItems.map((item, index) => (
+                      <div key={`${item.inventory_item_id}-${index}`} className="flex items-start gap-2">
+                        <div className="flex-1">
+                          <ItemCombobox
+                            required
+                            value={item.inventory_item_id || null}
+                            onChange={(selectedItem) => updateNewBookingItem(index, selectedItem?.id ?? '')}
+                            placeholder="Search ready items..."
+                          />
+                        </div>
+                        {newBookingItems.length > 1 && (
+                          <button type="button" onClick={() => removeNewBookingItem(index)} className="rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-600 hover:bg-gray-50">
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <BuyerAutocomplete
+                    required
+                    label="Buyer name *"
+                    value={newBookingBuyer}
+                    onChange={(buyerName) => setNewBookingBuyer(buyerName)}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Bundle deal price (Rp) *</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newBookingBundlePrice}
+                    onChange={(event) => setNewBookingBundlePrice(event.target.value)}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Each selected item receives an equal split of the total bundle price. Any remainder is applied to the final item.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
+                  <input
+                    type="date"
+                    value={newBookingDeadline}
+                    onChange={(event) => setNewBookingDeadline(event.target.value)}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+                  <textarea
+                    value={newBookingNotes}
+                    onChange={(event) => setNewBookingNotes(event.target.value)}
+                    rows={2}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+              </>
+            )}
+
+            {editingId && (
+              <>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Item *</label>
+                  <input disabled value={editingItemName} className="w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <BuyerAutocomplete
+                    required
+                    label="Buyer name *"
+                    value={form.buyer_name}
+                    onChange={(buyerName) => setForm({ ...form, buyer_name: buyerName })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Deal price (Rp)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={form.deal_price}
+                    onChange={(event) => setForm({ ...form, deal_price: event.target.value })}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
+                  <input
+                    type="date"
+                    value={form.deadline}
+                    onChange={(event) => setForm({ ...form, deadline: event.target.value })}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Status</label>
+                  <select
+                    value={form.status}
+                    onChange={(event) => setForm({ ...form, status: event.target.value as BookingStatus })}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  >
+                    <option value="active">{formatStatus('active')}</option>
+                    <option value="cancelled">{formatStatus('cancelled')}</option>
+                  </select>
+                  <p className="mt-1 text-xs text-gray-400">Use the "Convert to sale" action on the list to mark this as sold.</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+                  <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} rows={2} className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm" />
+                </div>
+              </>
+            )}
+
+            {formError && <p className="text-sm text-red-600">{formError}</p>}
+
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowModal(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">
+                Cancel
+              </button>
+              <button type="submit" disabled={saving} className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50">
                 {saving ? 'Saving...' : 'Save'}
               </button>
             </div>
@@ -741,6 +906,21 @@ export default function Bookings() {
                   className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                 />
               </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping option *</label>
+              <select
+                value={bulkFulfillmentStatus}
+                onChange={(e) => setBulkFulfillmentStatus(e.target.value as FulfillmentStatus)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                required
+              >
+                {FULFILLMENT_STATUSES.filter((s) => s !== 'delivered').map((status) => (
+                  <option key={status} value={status}>
+                    {FULFILLMENT_LABELS[status]}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
               <input

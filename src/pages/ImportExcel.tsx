@@ -279,7 +279,7 @@ export default function ImportExcel() {
                 buyer_name: booking.buyerName,
                 deal_price: booking.dealPrice,
                 dp_amount: 0,
-                remaining_amount: booking.dealPrice,
+                remaining_amount: 0,
                 deadline: null,
                 status: 'active',
                 notes: 'Created from legacy Excel Booked column during import',

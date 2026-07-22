@@ -30,7 +30,6 @@ const emptyForm = {
 const emptyBulkBookingForm = {
   buyer_name: '',
   total_deal_price: '0',
-  dp_amount: '0',
   deadline: '',
   notes: '',
 }
@@ -263,11 +262,8 @@ export default function Inventory() {
 
     const groupId = crypto.randomUUID()
     const totalDealPrice = Number(bulkBookingForm.total_deal_price) || 0
-    const totalDp = Number(bulkBookingForm.dp_amount) || 0
     const itemCount = selectedItems.length
     const dealPricePerItem = totalDealPrice / itemCount
-    const dpPerItem = totalDp / itemCount
-    const remainingPerItem = Math.max(dealPricePerItem - dpPerItem, 0)
 
     const bookingsPayload = selectedItems.map((item) => ({
       inventory_item_id: item.id,
@@ -275,8 +271,8 @@ export default function Inventory() {
       group_total_deal_price: totalDealPrice,
       buyer_name: bulkBookingForm.buyer_name.trim(),
       deal_price: dealPricePerItem,
-      dp_amount: dpPerItem,
-      remaining_amount: remainingPerItem,
+      dp_amount: 0,
+      remaining_amount: 0,
       deadline: bulkBookingForm.deadline || null,
       status: 'active',
       notes: bulkBookingForm.notes.trim() || null,
@@ -669,27 +665,15 @@ export default function Inventory() {
                 onChange={(buyerName) => setBulkBookingForm({ ...bulkBookingForm, buyer_name: buyerName })}
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={bulkBookingForm.total_deal_price}
-                  onChange={(e) => setBulkBookingForm({ ...bulkBookingForm, total_deal_price: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">DP (Rp)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={bulkBookingForm.dp_amount}
-                  onChange={(e) => setBulkBookingForm({ ...bulkBookingForm, dp_amount: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                />
-              </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
+              <input
+                type="number"
+                min="0"
+                value={bulkBookingForm.total_deal_price}
+                onChange={(e) => setBulkBookingForm({ ...bulkBookingForm, total_deal_price: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
             </div>
             <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
               This creates one shared booking group. Existing item rows receive split bookkeeping values internally, but you do not need to enter per-item prices.
