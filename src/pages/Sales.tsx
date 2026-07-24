@@ -254,11 +254,11 @@ export default function Sales() {
       inventory_item_id: s.inventory_item_id ?? '',
       buyer_name: s.buyer_name,
       platform: s.platform,
-      sale_price: String(s.sale_price),
-      modal_price: String(s.modal_price),
-      marketplace_fee: String(s.marketplace_fee),
-      packing_cost: String(s.packing_cost),
-      shipping_subsidy: String(s.shipping_subsidy),
+      sale_price: String(Math.round(s.sale_price)),
+      modal_price: String(Math.round(s.modal_price)),
+      marketplace_fee: String(Math.round(s.marketplace_fee)),
+      packing_cost: String(Math.round(s.packing_cost)),
+      shipping_subsidy: String(Math.round(s.shipping_subsidy)),
       sale_date: s.sale_date,
       fulfillment_status: s.fulfillment_status ?? 'parking',
       notes: s.notes ?? '',
@@ -806,7 +806,7 @@ export default function Sales() {
                     setForm((current) => ({
                       ...current,
                       inventory_item_id: item?.id ?? '',
-                      modal_price: item ? String(item.modal_price) : current.modal_price,
+                      modal_price: item ? String(Math.round(item.modal_price)) : current.modal_price,
                     }))
                   }
                   placeholder="Search ready or booked items..."
@@ -838,8 +838,8 @@ export default function Sales() {
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Sale price (Rp)</label>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={form.sale_price}
                 onChange={(e) => setForm({ ...form, sale_price: e.target.value })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
@@ -850,8 +850,8 @@ export default function Sales() {
                 Modal price (Rp) <span className="text-gray-400">(auto-filled, editable)</span>
               </label>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={form.modal_price}
                 onChange={(e) => setForm({ ...form, modal_price: e.target.value })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
@@ -860,8 +860,8 @@ export default function Sales() {
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Marketplace fee (Rp)</label>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={form.marketplace_fee}
                 onChange={(e) => setForm({ ...form, marketplace_fee: e.target.value })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
@@ -870,8 +870,8 @@ export default function Sales() {
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Packing cost (Rp)</label>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={form.packing_cost}
                 onChange={(e) => setForm({ ...form, packing_cost: e.target.value })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
@@ -880,8 +880,8 @@ export default function Sales() {
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Shipping subsidy (Rp)</label>
               <input
-                type="number"
-                min="0"
+                type="text"
+                inputMode="numeric"
                 value={form.shipping_subsidy}
                 onChange={(e) => setForm({ ...form, shipping_subsidy: e.target.value })}
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"

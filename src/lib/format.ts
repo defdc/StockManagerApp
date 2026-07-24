@@ -40,3 +40,20 @@ export function formatStatus(value: string): string {
 export function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
 }
+
+/**
+ * Splits `total` (integer Rupiah) evenly across `count` slots.
+ * Any remainder (from integer division) is added to the last slot,
+ * so the values always sum exactly to `total` with no decimals.
+ *
+ * @example
+ * splitAmount(100000, 3) // → [33333, 33333, 33334]
+ */
+export function splitAmount(total: number, count: number): number[] {
+  if (count <= 0) return []
+  const base = Math.floor(total / count)
+  const remainder = total - base * count
+  return Array.from({ length: count }, (_, i) =>
+    i === count - 1 ? base + remainder : base
+  )
+}

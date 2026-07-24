@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
-import { formatIDR, formatDate, formatStatus, todayISO } from '../lib/format'
+import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId } from '../lib/bookingGroups'
@@ -34,6 +34,57 @@ const emptyBulkSaleForm = {
   notes: '',
 }
 
+function BundlePriceInput({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (raw: string) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const display = value ? parseInt(value, 10).toLocaleString('id-ID') : ''
+
+  function handleInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const raw = e.target.value.replace(/\D/g, '')
+    const cursor = e.target.selectionStart ?? 0
+    const digitsBeforeCursor = (e.target.value.slice(0, cursor).match(/\d/g) || []).length
+
+    onChange(raw)
+
+    requestAnimationFrame(() => {
+      if (inputRef.current) {
+        const fv = inputRef.current.value
+        let pos = 0
+        let digitsSeen = 0
+        for (let i = 0; i < fv.length && digitsSeen < digitsBeforeCursor; i++) {
+          if (/\d/.test(fv[i])) digitsSeen++
+          pos = i + 1
+        }
+        if (digitsBeforeCursor >= raw.length || raw.length === 0) pos = fv.length
+        inputRef.current.setSelectionRange(pos, pos)
+      }
+    })
+  }
+
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 select-none text-sm font-medium text-gray-500">
+        Rp
+      </span>
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        value={display}
+        onChange={handleInput}
+        placeholder="0"
+        className="w-full rounded-md border border-gray-300 px-3 py-2 pl-10 text-sm focus:border-gray-500 focus:outline-none"
+      />
+    </div>
+  )
+}
+
 export default function Bookings() {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -50,7 +101,7 @@ export default function Bookings() {
   const [form, setForm] = useState(emptyForm)
   const [newBookingItems, setNewBookingItems] = useState<BookingItemSelection[]>([{ inventory_item_id: '' }])
   const [newBookingBuyer, setNewBookingBuyer] = useState('')
-  const [newBookingBundlePrice, setNewBookingBundlePrice] = useState('0')
+  const [newBookingBundlePrice, setNewBookingBundlePrice] = useState('')
   const [newBookingDeadline, setNewBookingDeadline] = useState('')
   const [newBookingNotes, setNewBookingNotes] = useState('')
   const [saving, setSaving] = useState(false)
@@ -166,7 +217,7 @@ export default function Bookings() {
     setForm(emptyForm)
     setNewBookingItems([{ inventory_item_id: '' }])
     setNewBookingBuyer('')
-    setNewBookingBundlePrice('0')
+    setNewBookingBundlePrice('')
     setNewBookingDeadline('')
     setNewBookingNotes('')
     setFormError(null)
@@ -211,12 +262,79 @@ export default function Bookings() {
     setNewBookingItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
   }
 
-  function distributeBundlePrice(total: number, itemCount: number) {
-    if (itemCount <= 0) return []
-    const baseAmount = Math.floor(total / itemCount)
-    const remainder = total % itemCount
-    return Array.from({ length: itemCount }, (_, index) => baseAmount + (index === itemCount - 1 ? remainder : 0))
-  }
+
+
+  const canSave = useMemo(() => {
+    if (editingId) return true
+    const selectedCount = newBookingItems.filter((item) => item.inventory_item_id).length
+    if (selectedCount === 0) return false
+    if (!newBookingBuyer.trim()) return false
+    if (newBookingBundlePrice === '') return false
+    if (parseInt(newBookingBundlePrice, 10) <= 0) return false
+    return true
+  }, [editingId, newBookingItems, newBookingBuyer, newBookingBundlePrice])
+
+  const bundleSummary = useMemo(() => {
+    const selectedCount = newBookingItems.filter((item) => item.inventory_item_id).length
+    const rawPrice = parseInt(newBookingBundlePrice, 10) || 0
+
+    if (editingId) return null
+
+    if (selectedCount === 0) {
+      return (
+        <p className="text-xs italic text-gray-400">
+          Select at least one item to see the price distribution.
+        </p>
+      )
+    }
+
+    if (selectedCount === 1) {
+      return (
+        <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+          <p className="font-medium">1 item selected</p>
+          <p className="mt-1 text-xs text-gray-500">
+            This item will receive the full bundle price.
+          </p>
+        </div>
+      )
+    }
+
+    if (rawPrice <= 0) {
+      return (
+        <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+          <p className="font-medium">{selectedCount} items selected</p>
+          <p className="mt-1 text-xs italic text-gray-400">
+            Enter a price to see the distribution.
+          </p>
+        </div>
+      )
+    }
+
+    const [firstSlot] = splitAmount(rawPrice, selectedCount)
+    const base = firstSlot
+    const remainder = rawPrice - base * selectedCount
+    const perItemFormatted = base.toLocaleString('id-ID')
+    const bundleFormatted = rawPrice.toLocaleString('id-ID')
+
+    return (
+      <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+        <p className="font-medium">{selectedCount} items selected</p>
+        <div className="mt-1 space-y-0.5 text-xs">
+          <p>
+            Bundle price: <span className="font-medium">Rp {bundleFormatted}</span>
+          </p>
+          <p>
+            ≈ <span className="font-medium">Rp {perItemFormatted}</span> per item
+          </p>
+          {remainder > 0 && (
+            <p className="text-gray-400">
+              Remaining Rp {remainder.toLocaleString('id-ID')} is automatically assigned to the last item.
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }, [newBookingItems, newBookingBundlePrice, editingId])
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -279,8 +397,8 @@ export default function Bookings() {
     setFormError(null)
 
     const bookingGroupId = crypto.randomUUID()
-    const bundleDealPrice = Number(newBookingBundlePrice) || 0
-    const splitPrices = distributeBundlePrice(bundleDealPrice, selectedItems.length)
+    const bundleDealPrice = parseInt(newBookingBundlePrice, 10) || 0
+    const splitPrices = splitAmount(bundleDealPrice, selectedItems.length)
     const bookingPayloads = selectedItems.map((item, index) => ({
       inventory_item_id: item.inventory_item_id,
       booking_group_id: bookingGroupId,
@@ -328,7 +446,7 @@ export default function Bookings() {
     setShowModal(false)
     setNewBookingItems([{ inventory_item_id: '' }])
     setNewBookingBuyer('')
-    setNewBookingBundlePrice('0')
+    setNewBookingBundlePrice('')
     setNewBookingDeadline('')
     setNewBookingNotes('')
     loadBookings()
@@ -451,14 +569,14 @@ export default function Bookings() {
 
     const bookingGroupId = existingGroupIds[0] ?? crypto.randomUUID()
     const totalSalePrice = Number(bulkSaleForm.total_sale_price) || 0
-    const salePricePerItem = totalSalePrice / selectedBookings.length
+    const splitSalePrices = splitAmount(totalSalePrice, selectedBookings.length)
     const groupTotalDealPrice =
       selectedBookings.find((booking) => booking.group_total_deal_price !== null)?.group_total_deal_price ??
       selectedBookings.reduce((sum, booking) => sum + booking.deal_price, 0)
 
-    const salesPayload = selectedBookings.map((booking) => {
+    const salesPayload = selectedBookings.map((booking, index) => {
       const modalPrice = booking.inventory_items?.modal_price ?? 0
-      const salePrice = bulkPurchase ? salePricePerItem : booking.deal_price
+      const salePrice = bulkPurchase ? splitSalePrices[index] : booking.deal_price
       const grossProfit = salePrice - modalPrice
       return {
         inventory_item_id: booking.inventory_item_id,
@@ -770,18 +888,14 @@ export default function Bookings() {
                 </div>
 
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Bundle deal price (Rp) *</label>
-                  <input
-                    type="number"
-                    min="0"
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Bundle deal price *</label>
+                  <BundlePriceInput
                     value={newBookingBundlePrice}
-                    onChange={(event) => setNewBookingBundlePrice(event.target.value)}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                    onChange={setNewBookingBundlePrice}
                   />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Each selected item receives an equal split of the total bundle price. Any remainder is applied to the final item.
-                  </p>
                 </div>
+
+                {bundleSummary}
 
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
@@ -863,7 +977,11 @@ export default function Bookings() {
               <button type="button" onClick={() => setShowModal(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">
                 Cancel
               </button>
-              <button type="submit" disabled={saving} className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50">
+              <button
+                type="submit"
+                disabled={saving || (!editingId && !canSave)}
+                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+              >
                 {saving ? 'Saving...' : 'Save'}
               </button>
             </div>
