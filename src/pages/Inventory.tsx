@@ -5,25 +5,22 @@ import { formatIDR, formatDate, formatStatus } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { smartSearchRank } from '../lib/search'
-import { CATEGORIES, ITEM_CONDITIONS, ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
-import type { Booking, InventoryItem, ItemCondition, ItemStatus, Partner, Sale } from '../types/database'
-import DataTable, { type Column } from '../components/DataTable'
+import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
+import type { Booking, InventoryItem, Sale } from '../types/database'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
+import BatchAutocomplete from '../components/BatchAutocomplete'
+import CategoryAutocomplete from '../components/CategoryAutocomplete'
+import { getLiveModalPrice } from '../lib/inventoryModal'
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type BookingRow = Booking & { inventory_items: { item_name: string } | null }
 
 const emptyForm = {
-  item_code: '',
   item_name: '',
-  brand: '',
-  category: CATEGORIES[0],
-  condition: 'unknown' as ItemCondition,
-  quantity: '1',
-  modal_price: '0',
-  target_price: '0',
+  category: '',
   batch_name: '',
-  batch_modal_total: '',
-  status: 'ready' as ItemStatus,
-  owner: 'shared',
   notes: '',
 }
 
@@ -34,30 +31,60 @@ const emptyBulkBookingForm = {
   notes: '',
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const COLLAPSED_KEY = 'inventory_collapsed_categories'
+
+function loadCollapsed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY)
+    return raw ? new Set<string>(JSON.parse(raw) as string[]) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function saveCollapsed(set: Set<string>) {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...set]))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function Inventory() {
   const { user } = useAuth()
   const [items, setItems] = useState<InventoryItem[]>([])
-  const [partners, setPartners] = useState<Partner[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
 
+  // Category collapse state — persisted in localStorage
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(loadCollapsed)
+
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([])
   const [showBulkBookingModal, setShowBulkBookingModal] = useState(false)
   const [bulkBookingForm, setBulkBookingForm] = useState(emptyBulkBookingForm)
   const [bulkBookingSaving, setBulkBookingSaving] = useState(false)
   const [bulkBookingError, setBulkBookingError] = useState<string | null>(null)
-  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null)
-  const [historyBookings, setHistoryBookings] = useState<Booking[]>([])
-  const [historySales, setHistorySales] = useState<Sale[]>([])
-  const [historyLoading, setHistoryLoading] = useState(false)
+
+  // Detail drawer
+  const [drawerItem, setDrawerItem] = useState<InventoryItem | null>(null)
+  const [drawerBookings, setDrawerBookings] = useState<BookingRow[]>([])
+  const [drawerSales, setDrawerSales] = useState<Sale[]>([])
+  const [drawerLoading, setDrawerLoading] = useState(false)
+
+  // ── Data loading ─────────────────────────────────────────────────────────
 
   async function loadItems() {
     setLoading(true)
@@ -71,15 +98,42 @@ export default function Inventory() {
     setLoading(false)
   }
 
-  async function loadPartners() {
-    const { data } = await supabase.from('partners').select('*').order('name')
-    setPartners(data ?? [])
-  }
-
   useEffect(() => {
     loadItems()
-    loadPartners()
   }, [])
+
+  // Load drawer history when an item is selected
+  useEffect(() => {
+    if (!drawerItem) return
+
+    const itemId = drawerItem.id
+    let cancelled = false
+    setDrawerLoading(true)
+
+    async function loadHistory() {
+      const [bookingsRes, salesRes] = await Promise.all([
+        supabase
+          .from('bookings')
+          .select('*, inventory_items(item_name)')
+          .eq('inventory_item_id', itemId)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('sales')
+          .select('*')
+          .eq('inventory_item_id', itemId)
+          .order('sale_date', { ascending: false }),
+      ])
+      if (cancelled) return
+      setDrawerBookings((bookingsRes.data as BookingRow[]) ?? [])
+      setDrawerSales((salesRes.data as Sale[]) ?? [])
+      setDrawerLoading(false)
+    }
+
+    loadHistory()
+    return () => { cancelled = true }
+  }, [drawerItem])
+
+  // ── Filtering & grouping ─────────────────────────────────────────────────
 
   const filtered = useMemo(() => {
     return items
@@ -87,8 +141,8 @@ export default function Inventory() {
         item,
         rank: smartSearchRank(search, [
           { value: item.item_name },
-          { value: item.item_code },
           { value: item.category },
+          { value: item.batch_name },
           { value: item.notes, kind: 'notes' },
         ]),
       }))
@@ -97,37 +151,24 @@ export default function Inventory() {
       .map(({ item }) => item)
   }, [items, search, statusFilter])
 
-  useEffect(() => {
-    if (!historyItem) return
-
-    const historyItemId = historyItem.id
-    let cancelled = false
-    setHistoryLoading(true)
-    async function loadHistory() {
-      const [bookingsRes, salesRes] = await Promise.all([
-        supabase
-          .from('bookings')
-          .select('*')
-          .eq('inventory_item_id', historyItemId)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('sales')
-          .select('*')
-          .eq('inventory_item_id', historyItemId)
-          .order('sale_date', { ascending: false }),
-      ])
-
-      if (cancelled) return
-      setHistoryBookings((bookingsRes.data as Booking[]) ?? [])
-      setHistorySales((salesRes.data as Sale[]) ?? [])
-      setHistoryLoading(false)
+  // Group items by category for the collapsible view
+  const grouped = useMemo(() => {
+    const map = new Map<string, InventoryItem[]>()
+    for (const item of filtered) {
+      const key = item.category?.trim() || 'Uncategorised'
+      const arr = map.get(key) ?? []
+      arr.push(item)
+      map.set(key, arr)
     }
+    // Sort groups alphabetically; 'Uncategorised' goes last
+    return [...map.entries()].sort(([a], [b]) => {
+      if (a === 'Uncategorised') return 1
+      if (b === 'Uncategorised') return -1
+      return a.localeCompare(b)
+    })
+  }, [filtered])
 
-    loadHistory()
-    return () => {
-      cancelled = true
-    }
-  }, [historyItem])
+  // ── Selection helpers ────────────────────────────────────────────────────
 
   const selectedItems = useMemo(
     () => items.filter((item) => selectedItemIds.includes(item.id)),
@@ -152,6 +193,20 @@ export default function Inventory() {
     setSelectedItemIds((current) => Array.from(new Set([...current, ...filteredIds])))
   }
 
+  // ── Category collapse ────────────────────────────────────────────────────
+
+  function toggleCategory(cat: string) {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev)
+      if (next.has(cat)) next.delete(cat)
+      else next.add(cat)
+      saveCollapsed(next)
+      return next
+    })
+  }
+
+  // ── Modals ───────────────────────────────────────────────────────────────
+
   function openBulkBookingModal() {
     if (selectedItems.length === 0) return
     const nonReadyItems = selectedItems.filter((item) => item.status !== 'ready')
@@ -174,26 +229,51 @@ export default function Inventory() {
   function openEditModal(item: InventoryItem) {
     setEditingId(item.id)
     setForm({
-      item_code: item.item_code ?? '',
       item_name: item.item_name,
-      brand: item.brand ?? '',
-      category: item.category ?? CATEGORIES[0],
-      condition: item.condition,
-      quantity: String(item.quantity),
-      modal_price: String(item.modal_price),
-      target_price: String(item.target_price),
+      category: item.category ?? '',
       batch_name: item.batch_name ?? '',
-      batch_modal_total:
-        item.batch_modal_total === null || item.batch_modal_total === undefined
-          ? ''
-          : String(item.batch_modal_total),
-      status: item.status,
-      owner: item.owner,
       notes: item.notes ?? '',
     })
     setFormError(null)
     setShowModal(true)
   }
+
+  // ── Compute modal_price at save time ─────────────────────────────────────
+  // modal_price = batch_modal_total / total items in that batch (at save moment)
+
+  async function computeModalPrice(
+    batchName: string,
+    isNew: boolean
+  ): Promise<number> {
+    if (!batchName.trim()) return 0
+
+    const { count } = await supabase
+      .from('inventory_items')
+      .select('id', { count: 'exact', head: true })
+      .eq('batch_name', batchName.trim())
+
+    // For a new item, sibling count doesn't yet include it — add 1
+    // For an edit, the item is already counted
+    const siblingCount = (count ?? 0) + (isNew ? 1 : 0)
+    if (siblingCount <= 0) return 0
+
+    // Fetch batch_modal_total from any existing item in this batch
+    const { data: batchItems } = await supabase
+      .from('inventory_items')
+      .select('batch_modal_total')
+      .eq('batch_name', batchName.trim())
+      .not('batch_modal_total', 'is', null)
+      .limit(1)
+
+    // If editing current item, we don't have updated batch_modal_total from form here.
+    // We need to fetch it separately when editing — caller must pass it.
+    const batchModalTotal = batchItems?.[0]?.batch_modal_total as number | null | undefined
+    if (!batchModalTotal) return 0
+
+    return Math.floor(batchModalTotal / siblingCount)
+  }
+
+  // ── Submit handlers ──────────────────────────────────────────────────────
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -204,20 +284,14 @@ export default function Inventory() {
     setSaving(true)
     setFormError(null)
 
+    // Compute modal_price from batch at save time (Step 3)
+    const modalPrice = await computeModalPrice(form.batch_name, !editingId)
+
     const payload = {
-      item_code: form.item_code.trim() || null,
       item_name: form.item_name.trim(),
-      brand: form.brand.trim() || null,
-      category: form.category || null,
-      condition: form.condition,
-      quantity: Number(form.quantity) || 0,
-      modal_price: Number(form.modal_price) || 0,
-      target_price: Number(form.target_price) || 0,
+      category: form.category.trim() || null,
       batch_name: form.batch_name.trim() || null,
-      batch_modal_total:
-        form.batch_modal_total.trim() === '' ? null : Number(form.batch_modal_total) || 0,
-      status: form.status,
-      owner: form.owner.trim() || 'shared',
+      modal_price: modalPrice,
       notes: form.notes.trim() || null,
       updated_at: new Date().toISOString(),
     }
@@ -228,7 +302,7 @@ export default function Inventory() {
     } else {
       ;({ error } = await supabase
         .from('inventory_items')
-        .insert({ ...payload, created_by: user?.id }))
+        .insert({ ...payload, quantity: 1, status: 'ready', created_by: user?.id }))
     }
 
     setSaving(false)
@@ -263,14 +337,17 @@ export default function Inventory() {
     const groupId = crypto.randomUUID()
     const totalDealPrice = Number(bulkBookingForm.total_deal_price) || 0
     const itemCount = selectedItems.length
-    const dealPricePerItem = totalDealPrice / itemCount
+    const base = Math.floor(totalDealPrice / itemCount)
+    const remainder = totalDealPrice - base * itemCount
 
-    const bookingsPayload = selectedItems.map((item) => ({
+    const bookingsPayload = selectedItems.map((item, index) => ({
       inventory_item_id: item.id,
       booking_group_id: groupId,
       group_total_deal_price: totalDealPrice,
       buyer_name: bulkBookingForm.buyer_name.trim(),
-      deal_price: dealPricePerItem,
+      deal_price: index === itemCount - 1 ? base + remainder : base,
+      // Snapshot modal_price at booking-creation time (Step 1)
+      modal_price: getLiveModalPrice(item, items),
       dp_amount: 0,
       remaining_amount: 0,
       deadline: bulkBookingForm.deadline || null,
@@ -289,10 +366,7 @@ export default function Inventory() {
     const { error: itemError } = await supabase
       .from('inventory_items')
       .update({ status: 'booked', updated_at: new Date().toISOString() })
-      .in(
-        'id',
-        selectedItems.map((item) => item.id)
-      )
+      .in('id', selectedItems.map((item) => item.id))
 
     setBulkBookingSaving(false)
     if (itemError) {
@@ -331,89 +405,23 @@ export default function Inventory() {
     exportToCSV(
       'inventory.csv',
       items.map((item) => ({
-        item_code: item.item_code,
         item_name: item.item_name,
-        brand: item.brand,
         category: item.category,
-        condition: item.condition,
-        quantity: item.quantity,
-        modal_price: item.modal_price,
-        target_price: item.target_price,
         batch_name: item.batch_name,
         batch_modal_total: item.batch_modal_total,
+        modal_price: item.modal_price,
         status: item.status,
-        owner: item.owner,
         notes: item.notes,
         created_at: item.created_at,
       }))
     )
   }
 
-  const columns: Column<InventoryItem>[] = [
-    {
-      header: 'Select',
-      render: (i) => (
-        <input
-          type="checkbox"
-          checked={selectedItemIds.includes(i.id)}
-          onChange={() => toggleItemSelection(i.id)}
-          aria-label={`Select ${i.item_name}`}
-          className="h-4 w-4 rounded border-gray-300"
-        />
-      ),
-    },
-    { header: 'Code', render: (i) => i.item_code ?? '-' },
-    {
-      header: 'Item name',
-      render: (i) => (
-        <button onClick={() => setHistoryItem(i)} className="font-medium text-blue-700 hover:underline">
-          {i.item_name}
-        </button>
-      ),
-    },
-    { header: 'Brand', render: (i) => i.brand ?? '-' },
-    { header: 'Category', render: (i) => i.category ?? '-' },
-    { header: 'Condition', render: (i) => i.condition },
-    { header: 'Qty', render: (i) => i.quantity },
-    { header: 'Batch', render: (i) => i.batch_name ?? '-' },
-    {
-      header: 'Batch Modal',
-      render: (i) =>
-        i.batch_modal_total === null || i.batch_modal_total === undefined
-          ? '-'
-          : formatIDR(i.batch_modal_total),
-    },
-    { header: 'Modal', render: (i) => formatIDR(i.modal_price) },
-    { header: 'Target price', render: (i) => formatIDR(i.target_price) },
-    {
-      header: 'Status',
-      render: (i) => (
-        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[i.status]}`}>
-          {formatStatus(i.status)}
-        </span>
-      ),
-    },
-    { header: 'Owner', render: (i) => i.owner },
-    { header: 'Created', render: (i) => formatDate(i.created_at) },
-    {
-      header: 'Actions',
-      render: (i) => (
-        <div className="flex gap-2">
-          <button onClick={() => openEditModal(i)} className="text-blue-600 hover:underline">
-            Edit
-          </button>
-          <button onClick={() => handleDelete(i)} className="text-red-600 hover:underline">
-            Delete
-          </button>
-        </div>
-      ),
-    },
-  ]
-
-  const ownerOptions = ['shared', ...partners.map((p) => p.name)]
+  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-4">
+      {/* Page header */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-gray-900">Inventory</h1>
         <div className="flex gap-2">
@@ -432,10 +440,11 @@ export default function Inventory() {
         </div>
       </div>
 
+      {/* Search + filter bar */}
       <div className="flex flex-wrap gap-2">
         <input
           type="text"
-          placeholder="Search name, code, category, or notes..."
+          placeholder="Search item, category, batch, or notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
@@ -454,6 +463,7 @@ export default function Inventory() {
         </select>
       </div>
 
+      {/* Bulk-action bar */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
         <label className="flex items-center gap-2 text-gray-700">
           <input
@@ -485,157 +495,136 @@ export default function Inventory() {
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {/* Grouped inventory table */}
       {loading ? (
         <p className="text-gray-500">Loading inventory...</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-gray-400">No items found.</p>
       ) : (
-        <DataTable columns={columns} data={filtered} keyField={(i) => i.id} />
+        <div className="space-y-3">
+          {grouped.map(([category, catItems]) => {
+            const isCollapsed = collapsedCategories.has(category)
+            return (
+              <div key={category} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+                {/* Category header */}
+                <button
+                  type="button"
+                  onClick={() => toggleCategory(category)}
+                  className="flex w-full items-center justify-between bg-gray-50 px-3 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-100"
+                >
+                  <span>
+                    {isCollapsed ? '▶' : '▼'} {category}
+                    <span className="ml-2 font-normal text-gray-500">({catItems.length})</span>
+                  </span>
+                </button>
+
+                {/* Item rows */}
+                {!isCollapsed && (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-100 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {catItems.map((item) => (
+                          <tr key={item.id} className="hover:bg-gray-50">
+                            <td className="whitespace-nowrap px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedItemIds.includes(item.id)}
+                                onChange={() => toggleItemSelection(item.id)}
+                                aria-label={`Select ${item.item_name}`}
+                                className="h-4 w-4 rounded border-gray-300"
+                              />
+                            </td>
+                            <td className="px-3 py-2">
+                              <button
+                                onClick={() => setDrawerItem(item)}
+                                className="font-medium text-blue-700 hover:underline"
+                              >
+                                {item.item_name}
+                              </button>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                              {item.batch_name ?? '-'}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2">
+                              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
+                                {formatStatus(item.status)}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 text-gray-500">
+                              {formatDate(item.created_at)}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2">
+                              <div className="flex gap-2">
+                                <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
+                                  Edit
+                                </button>
+                                <button onClick={() => handleDelete(item)} className="text-red-600 hover:underline">
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
 
+      {/* Add / Edit Item Modal */}
       {showModal && (
-        <Modal title={editingId ? 'Edit item' : 'Add item'} onClose={() => setShowModal(false)} wide>
-          <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Item code</label>
-              <input
-                value={form.item_code}
-                onChange={(e) => setForm({ ...form, item_code: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
+        <Modal title={editingId ? 'Edit item' : 'Add item'} onClose={() => setShowModal(false)}>
+          <form onSubmit={handleSubmit} className="space-y-3">
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Item name *</label>
               <input
                 required
                 value={form.item_name}
                 onChange={(e) => setForm({ ...form, item_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+                placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
               />
             </div>
+
+            <CategoryAutocomplete
+              required
+              value={form.category}
+              onChange={(cat) => setForm({ ...form, category: cat })}
+            />
+
+            <BatchAutocomplete
+              value={form.batch_name}
+              onChange={(batch) => setForm({ ...form, batch_name: batch })}
+            />
+
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Brand</label>
-              <input
-                value={form.brand}
-                onChange={(e) => setForm({ ...form, brand: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Category</label>
-              <select
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Condition</label>
-              <select
-                value={form.condition}
-                onChange={(e) => setForm({ ...form, condition: e.target.value as ItemCondition })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {ITEM_CONDITIONS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Quantity</label>
-              <input
-                type="number"
-                min="0"
-                value={form.quantity}
-                onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Modal price (Rp)</label>
-              <input
-                type="number"
-                min="0"
-                value={form.modal_price}
-                onChange={(e) => setForm({ ...form, modal_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Target price (Rp)</label>
-              <input
-                type="number"
-                min="0"
-                value={form.target_price}
-                onChange={(e) => setForm({ ...form, target_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Batch name</label>
-              <input
-                value={form.batch_name}
-                onChange={(e) => setForm({ ...form, batch_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Batch modal total (Rp)</label>
-              <input
-                type="number"
-                min="0"
-                value={form.batch_modal_total}
-                onChange={(e) => setForm({ ...form, batch_modal_total: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Status</label>
-              <select
-                value={form.status}
-                onChange={(e) => setForm({ ...form, status: e.target.value as ItemStatus })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {ITEM_STATUSES.map((s) => (
-                  <option key={s} value={s}>
-                    {formatStatus(s)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Owner</label>
-              <select
-                value={ownerOptions.includes(form.owner) ? form.owner : 'shared'}
-                onChange={(e) => setForm({ ...form, owner: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {ownerOptions.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="sm:col-span-2">
               <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
               <textarea
                 value={form.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 rows={2}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
               />
             </div>
 
-            {formError && <p className="text-sm text-red-600 sm:col-span-2">{formError}</p>}
+            {formError && <p className="text-sm text-red-600">{formError}</p>}
 
-            <div className="flex justify-end gap-2 sm:col-span-2">
+            <div className="flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowModal(false)}
@@ -655,16 +644,18 @@ export default function Inventory() {
         </Modal>
       )}
 
+      {/* Bulk Booking Modal */}
       {showBulkBookingModal && (
-        <Modal title={`Book ${selectedItems.length} selected item${selectedItems.length === 1 ? '' : 's'}`} onClose={() => setShowBulkBookingModal(false)}>
+        <Modal
+          title={`Book ${selectedItems.length} selected item${selectedItems.length === 1 ? '' : 's'}`}
+          onClose={() => setShowBulkBookingModal(false)}
+        >
           <form onSubmit={handleBulkBookingSubmit} className="space-y-3">
-            <div>
-              <BuyerAutocomplete
-                required
-                value={bulkBookingForm.buyer_name}
-                onChange={(buyerName) => setBulkBookingForm({ ...bulkBookingForm, buyer_name: buyerName })}
-              />
-            </div>
+            <BuyerAutocomplete
+              required
+              value={bulkBookingForm.buyer_name}
+              onChange={(buyerName) => setBulkBookingForm({ ...bulkBookingForm, buyer_name: buyerName })}
+            />
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
               <input
@@ -676,7 +667,7 @@ export default function Inventory() {
               />
             </div>
             <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
-              This creates one shared booking group. Existing item rows receive split bookkeeping values internally, but you do not need to enter per-item prices.
+              Creates one booking group. Price is split evenly across {selectedItems.length} item{selectedItems.length === 1 ? '' : 's'}.
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
@@ -696,9 +687,7 @@ export default function Inventory() {
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
               />
             </div>
-
             {bulkBookingError && <p className="text-sm text-red-600">{bulkBookingError}</p>}
-
             <div className="flex justify-end gap-2">
               <button
                 type="button"
@@ -719,42 +708,64 @@ export default function Inventory() {
         </Modal>
       )}
 
-      {historyItem && (
-        <div className="fixed inset-0 z-30 flex justify-end bg-black/30" onClick={() => setHistoryItem(null)}>
+      {/* Detail Drawer */}
+      {drawerItem && (
+        <div className="fixed inset-0 z-30 flex justify-end bg-black/30" onClick={() => setDrawerItem(null)}>
           <aside
             className="h-full w-full max-w-xl overflow-y-auto bg-white p-5 shadow-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="mb-4 flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">{historyItem.item_name}</h2>
-                <p className="text-sm text-gray-500">Current status: {formatStatus(historyItem.status)}</p>
-                <p className="text-sm text-gray-500">Imported date: {formatDate(historyItem.created_at)}</p>
+              <div className="space-y-0.5">
+                <h2 className="text-lg font-semibold text-gray-900">{drawerItem.item_name}</h2>
+                <p className="text-sm text-gray-500">
+                  Category: <span className="font-medium text-gray-700">{drawerItem.category ?? '-'}</span>
+                </p>
+                <p className="text-sm text-gray-500">
+                  Batch: <span className="font-medium text-gray-700">{drawerItem.batch_name ?? '-'}</span>
+                </p>
+                <p className="text-sm text-gray-500">
+                  Modal/item: <span className="font-medium text-gray-700">{formatIDR(getLiveModalPrice(drawerItem, items))}</span>
+                </p>
+                <p className="text-sm text-gray-500">
+                  Status:{' '}
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[drawerItem.status]}`}>
+                    {formatStatus(drawerItem.status)}
+                  </span>
+                </p>
+                <p className="text-sm text-gray-500">Added: {formatDate(drawerItem.created_at)}</p>
+                {drawerItem.notes && (
+                  <p className="text-sm text-gray-500">Notes: {drawerItem.notes}</p>
+                )}
               </div>
               <button
-                onClick={() => setHistoryItem(null)}
+                onClick={() => setDrawerItem(null)}
                 className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
               >
                 Close
               </button>
             </div>
 
-            {historyLoading ? (
-              <p className="text-sm text-gray-500">Loading item history...</p>
+            {drawerLoading ? (
+              <p className="text-sm text-gray-500">Loading history...</p>
             ) : (
               <div className="space-y-5">
                 <section>
                   <h3 className="mb-2 font-medium text-gray-900">Booking History</h3>
-                  {historyBookings.length === 0 ? (
+                  {drawerBookings.length === 0 ? (
                     <p className="text-sm text-gray-400">No bookings found.</p>
                   ) : (
                     <ul className="space-y-2 text-sm">
-                      {historyBookings.map((booking) => (
+                      {drawerBookings.map((booking) => (
                         <li key={booking.id} className="rounded-md border border-gray-200 p-3">
                           <p className="font-medium text-gray-800">{booking.buyer_name}</p>
+                          <p className="text-gray-500">Deal: {formatIDR(booking.deal_price)}</p>
                           <p className="text-gray-500">Booking date: {formatDate(booking.created_at)}</p>
                           <p className="text-gray-500">
-                            Converted to sale: {booking.status === 'converted_to_sale' ? 'Yes' : 'No'}
+                            Status:{' '}
+                            <span className={`rounded-full px-1.5 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[booking.status]}`}>
+                              {formatStatus(booking.status)}
+                            </span>
                           </p>
                         </li>
                       ))}
@@ -764,11 +775,11 @@ export default function Inventory() {
 
                 <section>
                   <h3 className="mb-2 font-medium text-gray-900">Sales History</h3>
-                  {historySales.length === 0 ? (
+                  {drawerSales.length === 0 ? (
                     <p className="text-sm text-gray-400">No sales found.</p>
                   ) : (
                     <ul className="space-y-2 text-sm">
-                      {historySales.map((sale) => (
+                      {drawerSales.map((sale) => (
                         <li key={sale.id} className="rounded-md border border-gray-200 p-3">
                           <p className="font-medium text-gray-800">{sale.buyer_name}</p>
                           <p className="text-gray-500">Sale date: {formatDate(sale.sale_date)}</p>

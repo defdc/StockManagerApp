@@ -25,8 +25,6 @@ type BatchSummary = {
   profit: number
   recoveryPercent: number
   status: BatchStatus
-  potentialRevenue: number
-  potentialProfit: number
   items: InventoryItemWithSale[]
 }
 
@@ -100,8 +98,6 @@ export default function Batches() {
             profit: 0,
             recoveryPercent: 0,
             status: 'No Sales',
-            potentialRevenue: 0,
-            potentialProfit: 0,
             items: [],
           }
 
@@ -139,7 +135,6 @@ export default function Batches() {
           else if (item.status === 'sold') batch.soldCount += 1
 
           batch.items.push(itemWithSale)
-          batch.potentialRevenue += item.status === 'ready' ? item.target_price : 0
         }
 
         for (const booking of bookings) {
@@ -152,8 +147,6 @@ export default function Batches() {
         for (const batch of batchMap.values()) {
           batch.totalRevenue = batch.bookedRevenue + batch.salesRevenue
           batch.profit = batch.totalRevenue - batch.batchModal
-          batch.potentialRevenue = batch.salesRevenue + batch.items.reduce((sum, item) => sum + (item.status === 'ready' ? item.target_price : 0), 0)
-          batch.potentialProfit = batch.potentialRevenue - batch.batchModal
           batch.recoveryPercent = batch.batchModal > 0 ? (batch.totalRevenue / batch.batchModal) * 100 : 0
 
           if (batch.totalRevenue === 0) batch.status = 'No Sales'
@@ -304,7 +297,7 @@ export default function Batches() {
       {selectedBatch && (
         <Modal title={selectedBatch.batchName} onClose={() => setSelectedBatch(null)} wide>
           <div className="space-y-5">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-md bg-gray-50 p-3 text-sm">
                 <p className="text-gray-500">Batch Modal</p>
                 <p className="font-medium text-gray-900">{formatIDR(selectedBatch.batchModal)}</p>
@@ -345,14 +338,6 @@ export default function Batches() {
                 <p className="text-gray-500">Sold</p>
                 <p className="font-medium text-gray-900">{selectedBatch.soldCount}</p>
               </div>
-              <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Potential Revenue</p>
-                <p className="font-medium text-gray-900">{formatIDR(selectedBatch.potentialRevenue)}</p>
-              </div>
-              <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Potential Profit</p>
-                <p className="font-medium text-gray-900">{formatIDR(selectedBatch.potentialProfit)}</p>
-              </div>
             </div>
 
             <section>
@@ -363,8 +348,7 @@ export default function Batches() {
                     <tr>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item Name</th>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
-                      <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal</th>
-                      <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Target Price</th>
+                      <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal/item</th>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sold Price</th>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created Date</th>
@@ -375,8 +359,11 @@ export default function Batches() {
                       <tr key={item.id} className="hover:bg-gray-50">
                         <td className="whitespace-nowrap px-3 py-2">{item.item_name}</td>
                         <td className="whitespace-nowrap px-3 py-2">{item.status}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(item.modal_price)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(item.target_price)}</td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {selectedBatch.totalItems > 0
+                            ? formatIDR(Math.floor(selectedBatch.batchModal / selectedBatch.totalItems))
+                            : '-'}
+                        </td>
                         <td className="whitespace-nowrap px-3 py-2">{formatIDR(item.salePrice ?? 0)}</td>
                         <td className="whitespace-nowrap px-3 py-2">{item.buyerName ?? '-'}</td>
                         <td className="whitespace-nowrap px-3 py-2">{formatDate(item.created_at)}</td>

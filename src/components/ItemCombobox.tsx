@@ -3,6 +3,7 @@ import { formatIDR, formatStatus } from '../lib/format'
 import { searchTokens, smartSearchRank } from '../lib/search'
 import { supabase } from '../lib/supabase'
 import type { InventoryItem } from '../types/database'
+import { getLiveModalPrice } from '../lib/inventoryModal'
 
 interface ItemComboboxProps {
   value: string | null
@@ -13,12 +14,12 @@ interface ItemComboboxProps {
   required?: boolean
 }
 
-const SEARCH_FIELDS = ['item_name', 'item_code', 'category', 'batch_name', 'notes'] as const
+const SEARCH_FIELDS = ['item_name', 'category', 'batch_name', 'notes'] as const
 const SUGGESTION_LIMIT = 20
 const DEFAULT_ALLOWED_STATUSES = ['ready']
 
 function itemLabel(item: InventoryItem): string {
-  return `${item.item_code ? `[${item.item_code}] ` : ''}${item.item_name}`
+  return item.item_name
 }
 
 async function findItems(search: string, statuses: string[]): Promise<InventoryItem[]> {
@@ -52,7 +53,6 @@ async function findItems(search: string, statuses: string[]): Promise<InventoryI
       item,
       rank: smartSearchRank(search, [
         { value: item.item_name },
-        { value: item.item_code },
         { value: item.category },
         { value: item.notes, kind: 'notes' },
       ]),
@@ -223,7 +223,7 @@ export default function ItemCombobox({
                 <span className="block text-xs text-gray-500">
                   {item.batch_name ? `${item.batch_name} · ` : ''}
                   {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} · Qty: {item.quantity} · Modal:{' '}
-                  {formatIDR(item.modal_price)} · Target: {formatIDR(item.target_price)}
+                  {formatIDR(getLiveModalPrice(item, suggestions))}
                 </span>
               </button>
             ))

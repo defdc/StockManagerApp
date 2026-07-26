@@ -243,14 +243,11 @@ export default function ImportExcel() {
           inventoryPayload.push({
             item_name: evalResult.itemName,
             category,
-            condition: 'unknown',
             quantity: evalResult.quantity,
             modal_price: evalResult.modalPrice,
-            target_price: 0,
             batch_name: evalResult.batchName,
             batch_modal_total: evalResult.batchModalTotal,
             status: evalResult.bookedAmount !== null ? 'booked' : 'ready',
-            owner: 'shared',
             notes:
               evalResult.legacyCuan !== null
                 ? `Legacy Cuan (profit) from import: ${evalResult.legacyCuan}`

@@ -23,6 +23,7 @@ import/
 *.xlsx
 *.xls
 *.csv
+*.sql
 
 # Supabase local files
 .supabase/

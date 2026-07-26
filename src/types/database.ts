@@ -1,5 +1,4 @@
 export type ItemStatus = 'ready' | 'booked' | 'sold' | 'cancelled'
-export type ItemCondition = 'carded' | 'loose' | 'damaged' | 'unknown'
 export type BookingStatus = 'active' | 'cancelled' | 'converted_to_sale'
 export type ExpenseType = 'packing' | 'shipping' | 'marketplace_fee' | 'event_fee' | 'other'
 export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'delivered'
@@ -20,18 +19,13 @@ export interface Partner {
 
 export interface InventoryItem {
   id: string
-  item_code: string | null
   item_name: string
-  brand: string | null
   category: string | null
-  condition: ItemCondition
   quantity: number
   modal_price: number
-  target_price: number
   batch_name?: string | null
   batch_modal_total?: number | null
   status: ItemStatus
-  owner: string
   notes: string | null
   legacy_import_id: string | null
   legacy_row_id: string | null
@@ -56,12 +50,14 @@ export interface Booking {
   group_total_deal_price: number | null
   buyer_name: string
   deal_price: number
+  modal_price: number
   dp_amount: number
   remaining_amount: number
   deadline: string | null
   status: BookingStatus
   notes: string | null
   created_by: string | null
+  is_backfilled?: boolean
   created_at: string
   updated_at: string
 }
@@ -82,6 +78,7 @@ export interface Sale {
   fulfillment_status: FulfillmentStatus | null
   notes: string | null
   created_by: string | null
+  is_backfilled?: boolean
   created_at: string
   updated_at: string
 }

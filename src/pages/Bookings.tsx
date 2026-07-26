@@ -412,12 +412,62 @@ export default function Bookings() {
     const bookingGroupId = crypto.randomUUID()
     const bundleDealPrice = parseInt(newBookingBundlePrice, 10) || 0
     const splitPrices = splitAmount(bundleDealPrice, selectedItems.length)
+    const selectedItemIds = selectedItems.map((item) => item.inventory_item_id)
+
+    // Fetch inventory item details (including batch info) to compute live modal_price snapshot
+    const { data: itemRows, error: fetchError } = await supabase
+      .from('inventory_items')
+      .select('id, batch_name, batch_modal_total, modal_price')
+      .in('id', selectedItemIds)
+    if (fetchError) {
+      setSaving(false)
+      setFormError(fetchError.message)
+      return
+    }
+
+    const batchNames = Array.from(
+      new Set(
+        (itemRows ?? [])
+          .map((r) => r.batch_name?.trim())
+          .filter((name): name is string => Boolean(name))
+      )
+    )
+
+    let allBatchItems: { batch_name: string | null; batch_modal_total: number | null }[] = []
+    if (batchNames.length > 0) {
+      const { data: bItems } = await supabase
+        .from('inventory_items')
+        .select('batch_name, batch_modal_total')
+        .in('batch_name', batchNames)
+      allBatchItems = bItems ?? []
+    }
+
+    const modalByItemId = new Map<string, number>()
+    for (const item of itemRows ?? []) {
+      const batchName = item.batch_name?.trim()
+      if (batchName) {
+        const siblings = allBatchItems.filter((i) => i.batch_name?.trim() === batchName)
+        const batchTotal =
+          siblings.find((i) => (i.batch_modal_total ?? 0) > 0)?.batch_modal_total ??
+          item.batch_modal_total ??
+          0
+        const liveModal =
+          batchTotal > 0 && siblings.length > 0
+            ? Math.floor(batchTotal / siblings.length)
+            : item.modal_price ?? 0
+        modalByItemId.set(item.id, liveModal)
+      } else {
+        modalByItemId.set(item.id, item.modal_price ?? 0)
+      }
+    }
+
     const bookingPayloads = selectedItems.map((item, index) => ({
       inventory_item_id: item.inventory_item_id,
       booking_group_id: bookingGroupId,
       group_total_deal_price: bundleDealPrice,
       buyer_name: newBookingBuyer.trim(),
       deal_price: splitPrices[index] ?? 0,
+      modal_price: modalByItemId.get(item.inventory_item_id) ?? 0,
       dp_amount: 0,
       remaining_amount: 0,
       deadline: newBookingDeadline || null,
@@ -496,18 +546,9 @@ export default function Bookings() {
 
     setSingleConvertSaving(true)
 
-    const { data: item, error: itemError } = await supabase
-      .from('inventory_items')
-      .select('*')
-      .eq('id', b.inventory_item_id)
-      .single()
-    if (itemError || !item) {
-      setSingleConvertSaving(false)
-      alert(itemError?.message ?? 'Inventory item not found.')
-      return
-    }
-
-    const modalPrice = item.modal_price
+    // Use the modal_price that was snapshotted at booking-creation time.
+    // Do NOT re-fetch the item's current modal_price — it may have changed.
+    const modalPrice = b.modal_price
     const salePrice = b.deal_price
     const grossProfit = salePrice - modalPrice
     const netProfit = grossProfit
@@ -585,7 +626,8 @@ export default function Bookings() {
     const splitSalePrices = splitAmount(totalSalePrice, selectedBookings.length)
 
     const salesPayload = selectedBookings.map((booking, index) => {
-      const modalPrice = booking.inventory_items?.modal_price ?? 0
+      // Use modal_price snapshotted at booking-creation time (frozen, never recalculated).
+      const modalPrice = booking.modal_price
       const salePrice = bulkPurchase ? splitSalePrices[index] : booking.deal_price
       const grossProfit = salePrice - modalPrice
       return {

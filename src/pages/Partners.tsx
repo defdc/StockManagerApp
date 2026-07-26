@@ -6,9 +6,8 @@ import DataTable, { type Column } from '../components/DataTable'
 import StatCard from '../components/StatCard'
 import Modal from '../components/Modal'
 
-interface SaleWithOwner {
+interface SaleProfit {
   net_profit: number
-  inventory_items: { owner: string } | null
 }
 
 interface PartnerSummary {
@@ -25,7 +24,7 @@ const emptyWithdrawalForm = { partner_id: '', amount: '0', withdrawal_date: toda
 export default function Partners() {
   const [partners, setPartners] = useState<Partner[]>([])
   const [items, setItems] = useState<InventoryItem[]>([])
-  const [sales, setSales] = useState<SaleWithOwner[]>([])
+  const [sales, setSales] = useState<SaleProfit[]>([])
   const [withdrawals, setWithdrawals] = useState<PartnerWithdrawal[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -46,7 +45,7 @@ export default function Partners() {
     const [partnersRes, itemsRes, salesRes, withdrawalsRes] = await Promise.all([
       supabase.from('partners').select('*').order('name'),
       supabase.from('inventory_items').select('*'),
-      supabase.from('sales').select('net_profit, inventory_items(owner)'),
+      supabase.from('sales').select('net_profit'),
       supabase.from('partner_withdrawals').select('*').order('withdrawal_date', { ascending: false }),
     ])
 
@@ -56,7 +55,7 @@ export default function Partners() {
 
     setPartners(partnersRes.data ?? [])
     setItems(itemsRes.data ?? [])
-    setSales((salesRes.data as unknown as SaleWithOwner[]) ?? [])
+    setSales((salesRes.data as unknown as SaleProfit[]) ?? [])
     setWithdrawals(withdrawalsRes.data ?? [])
     setLoading(false)
   }
@@ -68,26 +67,16 @@ export default function Partners() {
   const summaries: PartnerSummary[] = useMemo(() => {
     const partnerCount = partners.length || 1
 
-    const sharedModal = items
-      .filter((i) => i.owner === 'shared')
-      .reduce((sum, i) => sum + i.modal_price * i.quantity, 0)
-    const sharedProfit = sales
-      .filter((s) => s.inventory_items?.owner === 'shared')
-      .reduce((sum, s) => sum + s.net_profit, 0)
+    const sharedModal = items.reduce((sum, i) => sum + i.modal_price * i.quantity, 0)
+    const sharedProfit = sales.reduce((sum, s) => sum + s.net_profit, 0)
 
     return partners.map((partner) => {
-      const ownedModal = items
-        .filter((i) => i.owner === partner.name)
-        .reduce((sum, i) => sum + i.modal_price * i.quantity, 0)
-      const ownedProfit = sales
-        .filter((s) => s.inventory_items?.owner === partner.name)
-        .reduce((sum, s) => sum + s.net_profit, 0)
       const withdrawn = withdrawals
         .filter((w) => w.partner_id === partner.id)
         .reduce((sum, w) => sum + w.amount, 0)
 
-      const modalContribution = ownedModal + sharedModal / partnerCount
-      const profitShare = ownedProfit + sharedProfit / partnerCount
+      const modalContribution = sharedModal / partnerCount
+      const profitShare = sharedProfit / partnerCount
 
       return {
         partner,
@@ -122,7 +111,7 @@ export default function Partners() {
   }
 
   async function handleDeletePartner(p: Partner) {
-    if (!confirm(`Delete partner "${p.name}"? Existing items/sales owned by them will keep the text owner value.`)) return
+    if (!confirm(`Delete partner "${p.name}"? This cannot be undone.`)) return
     const { error } = await supabase.from('partners').delete().eq('id', p.id)
     if (error) alert(error.message)
     else loadAll()
@@ -220,8 +209,7 @@ export default function Partners() {
       </div>
 
       <p className="text-sm text-gray-500">
-        Profit belongs to an item's owner. Items with owner "shared" are split equally among all
-        partners. Remaining balance = profit share − withdrawn.
+        Inventory modal and profit share are split equally among all partners. Remaining balance = profit share − withdrawn.
       </p>
 
       {error && <p className="text-sm text-red-600">{error}</p>}

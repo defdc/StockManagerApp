@@ -5,6 +5,7 @@ import { formatIDR, formatDate } from '../lib/format'
 import StatCard from '../components/StatCard'
 import type { FulfillmentStatus, InventoryItem, Sale } from '../types/database'
 import { fetchAllRows } from '../lib/supabasePagination'
+import { getLiveModalPrice } from '../lib/inventoryModal'
 
 type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price' | 'batch_name' | 'batch_modal_total'>
 type SaleAggregate = Pick<Sale, 'id' | 'buyer_name' | 'sale_price' | 'gross_profit' | 'net_profit' | 'sale_date' | 'fulfillment_status'>
@@ -105,13 +106,13 @@ export default function Dashboard() {
         const soldQty = items.filter((i) => i.status === 'sold').reduce((s, i) => s + i.quantity, 0)
         const modalValue = items
           .filter((i) => i.status === 'ready' || i.status === 'booked')
-          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
         const readyInventoryValue = items
           .filter((i) => i.status === 'ready')
-          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
         const bookedInventoryValue = items
           .filter((i) => i.status === 'booked')
-          .reduce((s, i) => s + i.modal_price * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
 
         const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
         const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
