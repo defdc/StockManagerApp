@@ -1,18 +1,9 @@
-import type { BookingStatus, ExpenseType, FulfillmentStatus, ItemCondition, ItemStatus, Platform } from '../types/database'
+import type { BookingStatus, ExpenseType, FulfillmentStatus, ItemCondition, ItemStatus } from '../types/database'
 
 export const ITEM_STATUSES: ItemStatus[] = ['ready', 'booked', 'sold', 'cancelled']
 export const ITEM_CONDITIONS: ItemCondition[] = ['carded', 'loose', 'damaged', 'unknown']
 export const CATEGORIES = ['Hot Wheels', 'Tomica', 'Mini GT', 'Pop Race', 'Other']
 export const BOOKING_STATUSES: BookingStatus[] = ['active', 'cancelled', 'converted_to_sale']
-export const PLATFORMS: Platform[] = [
-  'Live',
-  'WhatsApp',
-  'Instagram',
-  'Tokopedia',
-  'Shopee',
-  'Event',
-  'Other',
-]
 export const EXPENSE_TYPES: ExpenseType[] = [
   'packing',
   'shipping',

@@ -184,7 +184,7 @@ export default function Buyers() {
             </div>
 
             <section>
-              <h2 className="mb-2 font-medium text-gray-900">Fulfillment overview</h2>
+              <h2 className="mb-2 font-medium text-gray-900">Shipping status overview</h2>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
                 <div className="rounded-md bg-gray-50 p-3 text-sm">
                   <p className="text-gray-500">Parking</p>

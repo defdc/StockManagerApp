@@ -7,8 +7,8 @@ import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
-import { PLATFORMS, STATUS_BADGE_CLASSES, FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
-import type { Booking, BookingStatus, FulfillmentStatus, Platform } from '../types/database'
+import { STATUS_BADGE_CLASSES, FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
+import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -28,11 +28,13 @@ const emptyForm = {
 
 const emptyBulkSaleForm = {
   buyer_name: '',
-  platform: 'Other' as Platform,
   total_sale_price: '0',
   sale_date: todayISO(),
   notes: '',
 }
+
+/** Priority order for default status sort: active first, then converted, then cancelled. */
+const STATUS_ORDER: Record<string, number> = { active: 0, converted_to_sale: 1, cancelled: 2 }
 
 function BundlePriceInput({
   value,
@@ -93,6 +95,7 @@ export default function Bookings() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [statusSort, setStatusSort] = useState<'asc' | 'desc'>('asc')
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -134,7 +137,10 @@ export default function Bookings() {
     loadBookings()
   }, [])
 
+  // Priority order for status when no search query drives ranking
   const filtered = useMemo(() => {
+    const hasQuery = search.trim().length > 0
+
     return bookings
       .map((b) => ({
         booking: b,
@@ -145,9 +151,24 @@ export default function Bookings() {
         ]),
       }))
       .filter(({ booking, rank }) => (statusFilter ? booking.status === statusFilter : true) && rank !== null)
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || a.booking.buyer_name.localeCompare(b.booking.buyer_name))
+      .sort((a, b) => {
+        // 1. If there's an active search query, rank takes first priority
+        if (hasQuery) {
+          const rankDiff = (a.rank ?? 0) - (b.rank ?? 0)
+          if (rankDiff !== 0) return rankDiff
+        }
+
+        // 2. Status ordering (respects sort direction toggle)
+        const aOrder = STATUS_ORDER[a.booking.status] ?? 99
+        const bOrder = STATUS_ORDER[b.booking.status] ?? 99
+        const statusDiff = statusSort === 'asc' ? aOrder - bOrder : bOrder - aOrder
+        if (statusDiff !== 0) return statusDiff
+
+        // 3. Within the same status: newest first
+        return b.booking.created_at.localeCompare(a.booking.created_at)
+      })
       .map(({ booking }) => booking)
-  }, [bookings, search, statusFilter])
+  }, [bookings, search, statusFilter, statusSort])
 
   const knownGroupIds = useMemo(
     () => bookings.map((booking) => booking.booking_group_id).filter((id): id is string => Boolean(id)),
@@ -184,14 +205,6 @@ export default function Bookings() {
     const invalidBookings = selectedBookings.filter((booking) => booking.status !== 'active' || !booking.inventory_item_id)
     if (invalidBookings.length > 0) {
       alert('Only active bookings with linked inventory items can be converted in bulk.')
-      return
-    }
-
-    const groupIds = Array.from(
-      new Set(selectedBookings.map((booking) => booking.booking_group_id).filter(Boolean))
-    )
-    if (groupIds.length > 1) {
-      alert('Please convert one booking group at a time.')
       return
     }
 
@@ -504,12 +517,10 @@ export default function Bookings() {
       customer_id: b.customer_id,
       booking_group_id: b.booking_group_id,
       buyer_name: b.buyer_name,
-      platform: 'Other',
       sale_price: salePrice,
       modal_price: modalPrice,
       marketplace_fee: 0,
       packing_cost: 0,
-      shipping_subsidy: 0,
       gross_profit: grossProfit,
       net_profit: netProfit,
       sale_date: todayISO(),
@@ -545,10 +556,6 @@ export default function Bookings() {
       setBulkSaleError('Please select at least one booking.')
       return
     }
-    if (!bulkSaleForm.buyer_name.trim()) {
-      setBulkSaleError('Buyer name is required.')
-      return
-    }
 
     const invalidBookings = selectedBookings.filter((booking) => booking.status !== 'active' || !booking.inventory_item_id)
     if (invalidBookings.length > 0) {
@@ -556,23 +563,26 @@ export default function Bookings() {
       return
     }
 
-    const existingGroupIds = Array.from(
-      new Set(selectedBookings.map((booking) => booking.booking_group_id).filter(Boolean))
-    )
-    if (existingGroupIds.length > 1) {
-      setBulkSaleError('Please convert one booking group at a time.')
-      return
+    // Bulk Purchase mode: all bookings must share the same buyer
+    if (bulkPurchase) {
+      if (!bulkSaleForm.buyer_name.trim()) {
+        setBulkSaleError('Buyer name is required for Bulk Purchase.')
+        return
+      }
+      const uniqueBuyers = new Set(selectedBookings.map((b) => b.buyer_name.trim().toLowerCase()))
+      if (uniqueBuyers.size > 1) {
+        setBulkSaleError(
+          'Bulk Purchase requires all selected bookings to belong to the same buyer.'
+        )
+        return
+      }
     }
 
     setBulkSaleSaving(true)
     setBulkSaleError(null)
 
-    const bookingGroupId = existingGroupIds[0] ?? crypto.randomUUID()
     const totalSalePrice = Number(bulkSaleForm.total_sale_price) || 0
     const splitSalePrices = splitAmount(totalSalePrice, selectedBookings.length)
-    const groupTotalDealPrice =
-      selectedBookings.find((booking) => booking.group_total_deal_price !== null)?.group_total_deal_price ??
-      selectedBookings.reduce((sum, booking) => sum + booking.deal_price, 0)
 
     const salesPayload = selectedBookings.map((booking, index) => {
       const modalPrice = booking.inventory_items?.modal_price ?? 0
@@ -581,14 +591,13 @@ export default function Bookings() {
       return {
         inventory_item_id: booking.inventory_item_id,
         customer_id: booking.customer_id,
-        booking_group_id: bulkPurchase ? bookingGroupId : booking.booking_group_id,
+        // Always preserve each booking's own group — never merge groups
+        booking_group_id: booking.booking_group_id,
         buyer_name: bulkPurchase ? bulkSaleForm.buyer_name.trim() : booking.buyer_name.trim(),
-        platform: bulkSaleForm.platform,
         sale_price: salePrice,
         modal_price: modalPrice,
         marketplace_fee: 0,
         packing_cost: 0,
-        shipping_subsidy: 0,
         gross_profit: grossProfit,
         net_profit: grossProfit,
         sale_date: bulkSaleForm.sale_date || todayISO(),
@@ -623,12 +632,6 @@ export default function Bookings() {
       .from('bookings')
       .update({
         status: 'converted_to_sale',
-        ...(bulkPurchase
-          ? {
-              booking_group_id: bookingGroupId,
-              group_total_deal_price: groupTotalDealPrice,
-            }
-          : {}),
         updated_at: new Date().toISOString(),
       })
       .in(
@@ -651,7 +654,6 @@ export default function Bookings() {
       details: {
         count: selectedBookings.length,
         buyer_name: bulkSaleForm.buyer_name.trim(),
-        booking_group_id: bookingGroupId,
       },
     })
     loadBookings()
@@ -694,6 +696,17 @@ export default function Bookings() {
     { header: 'Deadline', render: (b) => formatDate(b.deadline) },
     {
       header: 'Status',
+      headerNode: (
+        <button
+          type="button"
+          onClick={() => setStatusSort((s) => (s === 'asc' ? 'desc' : 'asc'))}
+          className="flex items-center gap-1 hover:text-gray-900"
+          title="Sort by status"
+        >
+          Status
+          <span className="text-xs">{statusSort === 'asc' ? '▲' : '▼'}</span>
+        </button>
+      ),
       render: (b) => (
         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[b.status]}`}>
           {formatStatus(b.status)}
@@ -721,8 +734,8 @@ export default function Bookings() {
   ]
 
   const bulkSaleHelperText = bulkPurchase
-    ? 'This transaction will be treated as one bulk purchase.'
-    : 'This will convert every booking using its own booking deal price.'
+    ? 'Total price will be split evenly across all selected items (remainder goes to last item).'
+    : 'Each booking will be converted at its own deal price, preserving all individual booking details.'
 
   return (
     <div className="space-y-4">
@@ -757,10 +770,10 @@ export default function Bookings() {
           onChange={(e) => setStatusFilter(e.target.value)}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
-          <option value="">All statuses</option>
-          <option value="active">{formatStatus('active')}</option>
-          <option value="cancelled">{formatStatus('cancelled')}</option>
-          <option value="converted_to_sale">{formatStatus('converted_to_sale')}</option>
+          <option value="">All</option>
+          <option value="active">Active</option>
+          <option value="converted_to_sale">Converted to Sale</option>
+          <option value="cancelled">Cancelled</option>
         </select>
       </div>
 
@@ -811,7 +824,7 @@ export default function Bookings() {
               Deal price: <span className="font-medium">{formatIDR(singleConvertTarget.deal_price)}</span>
             </p>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping option *</label>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status *</label>
               <select
                 value={singleConvertFulfillment}
                 onChange={(e) => setSingleConvertFulfillment(e.target.value as FulfillmentStatus)}
@@ -992,41 +1005,27 @@ export default function Bookings() {
       {showBulkSaleModal && (
         <Modal title={`Convert ${selectedBookings.length} booking${selectedBookings.length === 1 ? '' : 's'} to sale`} onClose={() => setShowBulkSaleModal(false)}>
           <form onSubmit={handleBulkConvertToSale} className="space-y-3">
-            <div>
-              <BuyerAutocomplete
-                required
-                label="Buyer *"
-                value={bulkSaleForm.buyer_name}
-                onChange={(buyerName) => setBulkSaleForm({ ...bulkSaleForm, buyer_name: buyerName })}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
+            {bulkPurchase && (
               <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Platform</label>
-                <select
-                  value={bulkSaleForm.platform}
-                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, platform: e.target.value as Platform })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                >
-                  {PLATFORMS.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Sale date</label>
-                <input
-                  type="date"
-                  value={bulkSaleForm.sale_date}
-                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, sale_date: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                <BuyerAutocomplete
+                  required
+                  label="Buyer *"
+                  value={bulkSaleForm.buyer_name}
+                  onChange={(buyerName) => setBulkSaleForm({ ...bulkSaleForm, buyer_name: buyerName })}
                 />
               </div>
+            )}
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Sale date</label>
+              <input
+                type="date"
+                value={bulkSaleForm.sale_date}
+                onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, sale_date: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping option *</label>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status *</label>
               <select
                 value={bulkFulfillmentStatus}
                 onChange={(e) => setBulkFulfillmentStatus(e.target.value as FulfillmentStatus)}

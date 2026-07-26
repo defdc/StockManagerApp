@@ -238,7 +238,7 @@ export default function Dashboard() {
           />
         </button>
         <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <p className="text-sm font-medium text-gray-500">Fulfillment</p>
+          <p className="text-sm font-medium text-gray-500">Shipping status</p>
           <p className="mt-2 text-sm text-gray-900">
             Parking: {data.fulfillmentSummary.parking} · Shipping: {data.fulfillmentSummary.shipping} · Delivered: {data.fulfillmentSummary.delivered}
           </p>

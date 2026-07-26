@@ -7,7 +7,7 @@ import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
-import type { FulfillmentStatus, Platform, Sale } from '../types/database'
+import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
@@ -21,7 +21,6 @@ interface SaleGroup {
   isGrouped: boolean
   itemCount: number
   buyerName: string
-  platform: Platform
   saleDate: string
   totalRevenue: number
   totalModal: number
@@ -42,12 +41,10 @@ interface DailySalesGroup {
 const emptyForm = {
   inventory_item_id: '',
   buyer_name: '',
-  platform: 'Other' as Platform,
   sale_price: '0',
   modal_price: '0',
   marketplace_fee: '0',
   packing_cost: '0',
-  shipping_subsidy: '0',
   sale_date: todayISO(),
   fulfillment_status: 'parking' as FulfillmentStatus,
   notes: '',
@@ -55,7 +52,6 @@ const emptyForm = {
 
 const emptyGroupEditForm = {
   buyer_name: '',
-  platform: 'Other' as Platform,
   sale_date: todayISO(),
   fulfillment_status: 'parking' as FulfillmentStatus,
   notes: '',
@@ -142,7 +138,6 @@ export default function Sales() {
           isGrouped: Boolean(firstSale.booking_group_id) && groupSales.length > 1,
           itemCount: groupSales.length,
           buyerName: firstSale.buyer_name,
-          platform: firstSale.platform,
           saleDate: firstSale.sale_date,
           totalRevenue: groupSales.reduce((sum, sale) => sum + sale.sale_price, 0),
           totalModal: groupSales.reduce((sum, sale) => sum + sale.modal_price, 0),
@@ -238,7 +233,6 @@ export default function Sales() {
     setGroupEditTarget(group)
     setGroupEditForm({
       buyer_name: firstSale.buyer_name,
-      platform: firstSale.platform,
       sale_date: firstSale.sale_date,
       fulfillment_status: firstSale.fulfillment_status ?? 'parking',
       notes: firstSale.notes ?? '',
@@ -253,12 +247,10 @@ export default function Sales() {
     setForm({
       inventory_item_id: s.inventory_item_id ?? '',
       buyer_name: s.buyer_name,
-      platform: s.platform,
       sale_price: String(Math.round(s.sale_price)),
       modal_price: String(Math.round(s.modal_price)),
       marketplace_fee: String(Math.round(s.marketplace_fee)),
       packing_cost: String(Math.round(s.packing_cost)),
-      shipping_subsidy: String(Math.round(s.shipping_subsidy)),
       sale_date: s.sale_date,
       fulfillment_status: s.fulfillment_status ?? 'parking',
       notes: s.notes ?? '',
@@ -271,9 +263,8 @@ export default function Sales() {
   const modalPrice = Number(form.modal_price) || 0
   const marketplaceFee = Number(form.marketplace_fee) || 0
   const packingCost = Number(form.packing_cost) || 0
-  const shippingSubsidy = Number(form.shipping_subsidy) || 0
   const grossProfitPreview = salePrice - modalPrice
-  const netProfitPreview = grossProfitPreview - marketplaceFee - packingCost - shippingSubsidy
+  const netProfitPreview = grossProfitPreview - marketplaceFee - packingCost
 
   async function handleGroupEditSubmit(e: FormEvent) {
     e.preventDefault()
@@ -293,7 +284,6 @@ export default function Sales() {
       .from('sales')
       .update({
         buyer_name: groupEditForm.buyer_name.trim(),
-        platform: groupEditForm.platform,
         sale_date: groupEditForm.sale_date || todayISO(),
         fulfillment_status: groupEditForm.fulfillment_status,
         notes: groupEditForm.notes.trim() || null,
@@ -327,12 +317,10 @@ export default function Sales() {
 
     const payload = {
       buyer_name: form.buyer_name.trim(),
-      platform: form.platform,
       sale_price: salePrice,
       modal_price: modalPrice,
       marketplace_fee: marketplaceFee,
       packing_cost: packingCost,
-      shipping_subsidy: shippingSubsidy,
       gross_profit: grossProfitPreview,
       net_profit: netProfitPreview,
       sale_date: form.sale_date || todayISO(),
@@ -463,12 +451,10 @@ export default function Sales() {
         item_name: s.inventory_items?.item_name ?? '',
         booking_group: bookingGroupDisplayId(s.booking_group_id, knownGroupIds),
         buyer_name: s.buyer_name,
-        platform: s.platform,
         sale_price: s.sale_price,
         modal_price: s.modal_price,
         marketplace_fee: s.marketplace_fee,
         packing_cost: s.packing_cost,
-        shipping_subsidy: s.shipping_subsidy,
         gross_profit: s.gross_profit,
         net_profit: s.net_profit,
         sale_date: s.sale_date,
@@ -545,7 +531,7 @@ export default function Sales() {
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Date</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Items</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Fulfillment</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Shipping status</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal</th>
@@ -726,7 +712,7 @@ export default function Sales() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Fulfillment status</label>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status</label>
               <select
                 value={groupEditForm.fulfillment_status}
                 onChange={(e) => setGroupEditForm({ ...groupEditForm, fulfillment_status: e.target.value as FulfillmentStatus })}
@@ -735,20 +721,6 @@ export default function Sales() {
                 {FULFILLMENT_STATUSES.map((status) => (
                   <option key={status} value={status}>
                     {FULFILLMENT_LABELS[status]}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Platform</label>
-              <select
-                value={groupEditForm.platform}
-                onChange={(e) => setGroupEditForm({ ...groupEditForm, platform: e.target.value as Platform })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {(['Live', 'Other'] as Platform[]).map((p) => (
-                  <option key={p} value={p}>
-                    {p}
                   </option>
                 ))}
               </select>
@@ -822,7 +794,7 @@ export default function Sales() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Fulfillment status</label>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status</label>
               <select
                 value={form.fulfillment_status}
                 onChange={(e) => setForm({ ...form, fulfillment_status: e.target.value as FulfillmentStatus })}
@@ -877,16 +849,7 @@ export default function Sales() {
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
               />
             </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Shipping subsidy (Rp)</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={form.shipping_subsidy}
-                onChange={(e) => setForm({ ...form, shipping_subsidy: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              />
-            </div>
+
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Sale date</label>
               <input

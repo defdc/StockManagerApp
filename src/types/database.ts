@@ -1,14 +1,6 @@
 export type ItemStatus = 'ready' | 'booked' | 'sold' | 'cancelled'
 export type ItemCondition = 'carded' | 'loose' | 'damaged' | 'unknown'
 export type BookingStatus = 'active' | 'cancelled' | 'converted_to_sale'
-export type Platform =
-  | 'Live'
-  | 'WhatsApp'
-  | 'Instagram'
-  | 'Tokopedia'
-  | 'Shopee'
-  | 'Event'
-  | 'Other'
 export type ExpenseType = 'packing' | 'shipping' | 'marketplace_fee' | 'event_fee' | 'other'
 export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'delivered'
 
@@ -80,12 +72,10 @@ export interface Sale {
   customer_id: string | null
   booking_group_id: string | null
   buyer_name: string
-  platform: Platform
   sale_price: number
   modal_price: number
   marketplace_fee: number
   packing_cost: number
-  shipping_subsidy: number
   gross_profit: number
   net_profit: number
   sale_date: string

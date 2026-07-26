@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 
 export interface Column<T> {
   header: string
+  headerNode?: ReactNode
   render: (row: T) => ReactNode
   className?: string
 }
@@ -29,7 +30,7 @@ export default function DataTable<T>({
                 key={col.header}
                 className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600"
               >
-                {col.header}
+                {col.headerNode ?? col.header}
               </th>
             ))}
           </tr>
