@@ -17,10 +17,20 @@ import { getLiveModalPrice } from '../lib/inventoryModal'
 
 type BookingRow = Booking & { inventory_items: { item_name: string } | null }
 
+type AddMode = 'single' | 'multiple'
+
+interface MultiItemRow {
+  id: string
+  item_name: string
+  category: string
+  notes: string
+}
+
 const emptyForm = {
   item_name: '',
   category: '',
   batch_name: '',
+  batch_modal_total: '',
   notes: '',
 }
 
@@ -68,7 +78,18 @@ export default function Inventory() {
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [addMode, setAddMode] = useState<AddMode>('single')
+
+  // Single item form state
   const [form, setForm] = useState(emptyForm)
+
+  // Multiple items form state
+  const [multiBatchName, setMultiBatchName] = useState('')
+  const [multiBatchModalTotal, setMultiBatchModalTotal] = useState('')
+  const [multiItems, setMultiItems] = useState<MultiItemRow[]>([
+    { id: crypto.randomUUID(), item_name: '', category: '', notes: '' },
+  ])
+
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -130,7 +151,9 @@ export default function Inventory() {
     }
 
     loadHistory()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [drawerItem])
 
   // ── Filtering & grouping ─────────────────────────────────────────────────
@@ -221,77 +244,139 @@ export default function Inventory() {
 
   function openAddModal() {
     setEditingId(null)
+    setAddMode('single')
     setForm(emptyForm)
+    setMultiBatchName('')
+    setMultiBatchModalTotal('')
+    setMultiItems([{ id: crypto.randomUUID(), item_name: '', category: '', notes: '' }])
     setFormError(null)
     setShowModal(true)
   }
 
   function openEditModal(item: InventoryItem) {
     setEditingId(item.id)
+    setAddMode('single')
     setForm({
       item_name: item.item_name,
       category: item.category ?? '',
       batch_name: item.batch_name ?? '',
+      batch_modal_total: item.batch_modal_total ? String(item.batch_modal_total) : '',
       notes: item.notes ?? '',
     })
     setFormError(null)
     setShowModal(true)
   }
 
-  // ── Compute modal_price at save time ─────────────────────────────────────
-  // modal_price = batch_modal_total / total items in that batch (at save moment)
+  // ── Dynamic multi-item row handlers ──────────────────────────────────────
 
-  async function computeModalPrice(
-    batchName: string,
-    isNew: boolean
-  ): Promise<number> {
-    if (!batchName.trim()) return 0
+  function addMultiRow() {
+    setMultiItems((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), item_name: '', category: '', notes: '' },
+    ])
+  }
 
-    const { count } = await supabase
-      .from('inventory_items')
-      .select('id', { count: 'exact', head: true })
-      .eq('batch_name', batchName.trim())
+  function updateMultiRow(id: string, field: keyof MultiItemRow, value: string) {
+    setMultiItems((prev) =>
+      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row))
+    )
+  }
 
-    // For a new item, sibling count doesn't yet include it — add 1
-    // For an edit, the item is already counted
-    const siblingCount = (count ?? 0) + (isNew ? 1 : 0)
-    if (siblingCount <= 0) return 0
-
-    // Fetch batch_modal_total from any existing item in this batch
-    const { data: batchItems } = await supabase
-      .from('inventory_items')
-      .select('batch_modal_total')
-      .eq('batch_name', batchName.trim())
-      .not('batch_modal_total', 'is', null)
-      .limit(1)
-
-    // If editing current item, we don't have updated batch_modal_total from form here.
-    // We need to fetch it separately when editing — caller must pass it.
-    const batchModalTotal = batchItems?.[0]?.batch_modal_total as number | null | undefined
-    if (!batchModalTotal) return 0
-
-    return Math.floor(batchModalTotal / siblingCount)
+  function removeMultiRow(id: string) {
+    if (multiItems.length === 1) return
+    setMultiItems((prev) => prev.filter((row) => row.id !== id))
   }
 
   // ── Submit handlers ──────────────────────────────────────────────────────
 
+  async function handleMultiSubmit() {
+    const batchName = multiBatchName.trim()
+    const modalTotal = multiBatchModalTotal.trim() ? Number(multiBatchModalTotal) : null
+
+    // Validate items
+    const validItems = multiItems.filter((i) => i.item_name.trim() || i.category.trim())
+    if (validItems.length === 0) {
+      setFormError('Please add at least one item.')
+      return
+    }
+
+    for (let i = 0; i < validItems.length; i++) {
+      const item = validItems[i]
+      if (!item.item_name.trim()) {
+        setFormError(`Item #${i + 1} is missing a name.`)
+        return
+      }
+      if (!item.category.trim()) {
+        setFormError(`Item #${i + 1} ("${item.item_name}") is missing a category.`)
+        return
+      }
+    }
+
+    setSaving(true)
+    setFormError(null)
+
+    const itemsPayload = validItems.map((item) => ({
+      item_name: item.item_name.trim(),
+      category: item.category.trim() || null,
+      batch_name: batchName || null,
+      batch_modal_total: batchName ? modalTotal : null,
+      modal_price: 0,
+      quantity: 1,
+      status: 'ready' as const,
+      notes: item.notes.trim() || null,
+      created_by: user?.id,
+    }))
+
+    const { error } = await supabase.from('inventory_items').insert(itemsPayload)
+
+    // Sync batch_modal_total across all items in that batch if provided
+    if (batchName && modalTotal !== null && !error) {
+      await supabase
+        .from('inventory_items')
+        .update({ batch_modal_total: modalTotal })
+        .eq('batch_name', batchName)
+    }
+
+    setSaving(false)
+    if (error) {
+      setFormError(error.message)
+      return
+    }
+
+    void logActivity({
+      action: 'Bulk Add Items',
+      entity: 'inventory_items',
+      userId: user?.id,
+      details: { count: validItems.length, batch_name: batchName || 'Unassigned' },
+    })
+
+    setShowModal(false)
+    loadItems()
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
+
+    if (addMode === 'multiple' && !editingId) {
+      return handleMultiSubmit()
+    }
+
     if (!form.item_name.trim()) {
       setFormError('Item name is required.')
       return
     }
+
+    const batchName = form.batch_name.trim()
+    const modalTotal = form.batch_modal_total.trim() ? Number(form.batch_modal_total) : null
+
     setSaving(true)
     setFormError(null)
 
-    // Compute modal_price from batch at save time (Step 3)
-    const modalPrice = await computeModalPrice(form.batch_name, !editingId)
-
-    const payload = {
+    const payload: Record<string, unknown> = {
       item_name: form.item_name.trim(),
       category: form.category.trim() || null,
-      batch_name: form.batch_name.trim() || null,
-      modal_price: modalPrice,
+      batch_name: batchName || null,
+      batch_modal_total: batchName ? modalTotal : null,
       notes: form.notes.trim() || null,
       updated_at: new Date().toISOString(),
     }
@@ -300,9 +385,21 @@ export default function Inventory() {
     if (editingId) {
       ;({ error } = await supabase.from('inventory_items').update(payload).eq('id', editingId))
     } else {
-      ;({ error } = await supabase
+      ;({ error } = await supabase.from('inventory_items').insert({
+        ...payload,
+        modal_price: 0,
+        quantity: 1,
+        status: 'ready',
+        created_by: user?.id,
+      }))
+    }
+
+    // Sync batch_modal_total across all items in that batch if provided
+    if (batchName && modalTotal !== null && !error) {
+      await supabase
         .from('inventory_items')
-        .insert({ ...payload, quantity: 1, status: 'ready', created_by: user?.id }))
+        .update({ batch_modal_total: modalTotal })
+        .eq('batch_name', batchName)
     }
 
     setSaving(false)
@@ -409,7 +506,7 @@ export default function Inventory() {
         category: item.category,
         batch_name: item.batch_name,
         batch_modal_total: item.batch_modal_total,
-        modal_price: item.modal_price,
+        modal_price: getLiveModalPrice(item, items),
         status: item.status,
         notes: item.notes,
         created_at: item.created_at,
@@ -435,7 +532,7 @@ export default function Inventory() {
             onClick={openAddModal}
             className="rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800"
           >
-            + Add item
+            + Add item(s)
           </button>
         </div>
       </div>
@@ -588,43 +685,192 @@ export default function Inventory() {
 
       {/* Add / Edit Item Modal */}
       {showModal && (
-        <Modal title={editingId ? 'Edit item' : 'Add item'} onClose={() => setShowModal(false)}>
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Item name *</label>
-              <input
-                required
-                value={form.item_name}
-                onChange={(e) => setForm({ ...form, item_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-                placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
-              />
+        <Modal
+          title={editingId ? 'Edit item' : 'Add inventory items'}
+          onClose={() => setShowModal(false)}
+          wide={addMode === 'multiple'}
+        >
+          {/* Mode Selector Tabs (only when adding new items) */}
+          {!editingId && (
+            <div className="mb-4 flex border-b border-gray-200 text-sm font-medium">
+              <button
+                type="button"
+                onClick={() => setAddMode('single')}
+                className={`border-b-2 px-4 py-2 text-sm font-medium ${
+                  addMode === 'single'
+                    ? 'border-gray-900 text-gray-900'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Single Item
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddMode('multiple')}
+                className={`border-b-2 px-4 py-2 text-sm font-medium ${
+                  addMode === 'multiple'
+                    ? 'border-gray-900 text-gray-900'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                Multiple Items (Bulk Add)
+              </button>
             </div>
+          )}
 
-            <CategoryAutocomplete
-              required
-              value={form.category}
-              onChange={(cat) => setForm({ ...form, category: cat })}
-            />
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {addMode === 'single' ? (
+              /* Single Item Form */
+              <>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Item name *</label>
+                  <input
+                    required
+                    value={form.item_name}
+                    onChange={(e) => setForm({ ...form, item_name: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+                    placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
+                  />
+                </div>
 
-            <BatchAutocomplete
-              value={form.batch_name}
-              onChange={(batch) => setForm({ ...form, batch_name: batch })}
-            />
+                <CategoryAutocomplete
+                  required
+                  value={form.category}
+                  onChange={(cat) => setForm({ ...form, category: cat })}
+                />
 
-            <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                rows={2}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-              />
-            </div>
+                <BatchAutocomplete
+                  value={form.batch_name}
+                  modalTotalValue={form.batch_modal_total}
+                  onChange={(batchName, modalTotal) =>
+                    setForm({
+                      ...form,
+                      batch_name: batchName,
+                      batch_modal_total: modalTotal ?? form.batch_modal_total,
+                    })
+                  }
+                />
+
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+                  <textarea
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    rows={2}
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+                  />
+                </div>
+              </>
+            ) : (
+              /* Multiple Items Form */
+              <div className="space-y-4">
+                {/* Shared Batch Header */}
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <BatchAutocomplete
+                    value={multiBatchName}
+                    modalTotalValue={multiBatchModalTotal}
+                    onChange={(batchName, modalTotal) => {
+                      setMultiBatchName(batchName)
+                      if (modalTotal !== undefined) setMultiBatchModalTotal(modalTotal)
+                    }}
+                    label="Batch for all items below"
+                    placeholder="Select or create a batch for these items..."
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    This batch and its modal total will be shared across all items added in this session.
+                  </p>
+                </div>
+
+                {/* Items Table */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-900">
+                      Items list ({multiItems.length})
+                    </label>
+                    <button
+                      type="button"
+                      onClick={addMultiRow}
+                      className="text-xs font-medium text-blue-600 hover:underline"
+                    >
+                      + Add another item
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {multiItems.map((itemRow, index) => (
+                      <div
+                        key={itemRow.id}
+                        className="grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
+                      >
+                        <div className="sm:col-span-4">
+                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                            Item Name *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={itemRow.item_name}
+                            onChange={(e) => updateMultiRow(itemRow.id, 'item_name', e.target.value)}
+                            placeholder={`Item #${index + 1} name *`}
+                            className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-4">
+                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                            Category *
+                          </label>
+                          <CategoryAutocomplete
+                            required
+                            label=""
+                            placeholder="Category *"
+                            value={itemRow.category}
+                            onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
+                          />
+                        </div>
+
+                        <div className="sm:col-span-3">
+                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                            Notes
+                          </label>
+                          <input
+                            type="text"
+                            value={itemRow.notes}
+                            onChange={(e) => updateMultiRow(itemRow.id, 'notes', e.target.value)}
+                            placeholder="Notes (optional)"
+                            className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div className="flex justify-end sm:col-span-1 sm:pt-1">
+                          <button
+                            type="button"
+                            onClick={() => removeMultiRow(itemRow.id)}
+                            disabled={multiItems.length === 1}
+                            aria-label="Remove item row"
+                            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:opacity-30"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={addMultiRow}
+                    className="w-full rounded-md border border-dashed border-gray-300 py-2 text-center text-xs font-medium text-gray-600 hover:border-gray-400 hover:bg-gray-50"
+                  >
+                    + Add another item row
+                  </button>
+                </div>
+              </div>
+            )}
 
             {formError && <p className="text-sm text-red-600">{formError}</p>}
 
-            <div className="flex justify-end gap-2">
+            <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setShowModal(false)}
@@ -637,7 +883,11 @@ export default function Inventory() {
                 disabled={saving}
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
-                {saving ? 'Saving...' : 'Save'}
+                {saving
+                  ? 'Saving...'
+                  : addMode === 'multiple' && !editingId
+                  ? `Save ${multiItems.filter((i) => i.item_name.trim()).length || multiItems.length} items`
+                  : 'Save item'}
               </button>
             </div>
           </form>

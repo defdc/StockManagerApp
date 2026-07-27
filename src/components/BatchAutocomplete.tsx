@@ -1,25 +1,31 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { smartSearchRank } from '../lib/search'
+import FormattedPriceInput from './FormattedPriceInput'
 
 interface BatchAutocompleteProps {
   value: string
-  onChange: (value: string) => void
+  modalTotalValue?: string
+  onChange: (batchName: string, batchModalTotal?: string) => void
   label?: string
   placeholder?: string
+  required?: boolean
 }
 
 interface BatchSuggestion {
   name: string
+  modalTotal: number | null
   itemCount: number
   latestAt: string
 }
 
 export default function BatchAutocomplete({
   value,
+  modalTotalValue = '',
   onChange,
   label = 'Batch',
   placeholder = 'Search or enter batch name...',
+  required,
 }: BatchAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -44,7 +50,7 @@ export default function BatchAutocomplete({
     async function loadBatches() {
       const { data } = await supabase
         .from('inventory_items')
-        .select('batch_name, created_at')
+        .select('batch_name, batch_modal_total, created_at')
         .not('batch_name', 'is', null)
         .order('created_at', { ascending: false })
         .limit(2000)
@@ -55,12 +61,19 @@ export default function BatchAutocomplete({
       for (const row of data ?? []) {
         const name = (row.batch_name as string).trim()
         if (!name) continue
+        const modalTotal = row.batch_modal_total as number | null
         const existing = batchMap.get(name)
         if (existing) {
           existing.itemCount += 1
           if (row.created_at > existing.latestAt) existing.latestAt = row.created_at as string
+          if (modalTotal && !existing.modalTotal) existing.modalTotal = modalTotal
         } else {
-          batchMap.set(name, { name, itemCount: 1, latestAt: row.created_at as string })
+          batchMap.set(name, {
+            name,
+            modalTotal,
+            itemCount: 1,
+            latestAt: row.created_at as string,
+          })
         }
       }
 
@@ -71,7 +84,9 @@ export default function BatchAutocomplete({
     }
 
     loadBatches()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [open])
 
   const filteredSuggestions = useMemo(() => {
@@ -87,20 +102,36 @@ export default function BatchAutocomplete({
       .map((entry) => entry.suggestion)
   }, [suggestions, value])
 
+  const existingMatch = useMemo(() => {
+    return suggestions.find((s) => s.name.trim().toLowerCase() === value.trim().toLowerCase())
+  }, [suggestions, value])
+
+  const isNewBatch = Boolean(value.trim()) && !existingMatch
+
   return (
     <div ref={containerRef} className="relative">
-      {label && <label className="mb-1 block text-sm font-medium text-gray-700">{label}</label>}
+      {label && (
+        <label className="mb-1 block text-sm font-medium text-gray-700">
+          {label}
+          {required && ' *'}
+        </label>
+      )}
       <input
         type="text"
         role="combobox"
         aria-autocomplete="list"
         aria-controls={listboxId}
         aria-expanded={open}
+        required={required}
         value={value}
         placeholder={placeholder}
         onFocus={() => setOpen(true)}
         onChange={(event) => {
-          onChange(event.target.value)
+          const newName = event.target.value
+          const match = suggestions.find(
+            (s) => s.name.trim().toLowerCase() === newName.trim().toLowerCase()
+          )
+          onChange(newName, match?.modalTotal ? String(match.modalTotal) : modalTotalValue)
           setOpen(true)
         }}
         className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
@@ -115,7 +146,9 @@ export default function BatchAutocomplete({
           {loading ? (
             <p className="px-3 py-3 text-sm text-gray-500">Loading batches...</p>
           ) : filteredSuggestions.length === 0 ? (
-            <p className="px-3 py-3 text-sm text-gray-500">Type a new batch name to create it</p>
+            <p className="px-3 py-3 text-sm text-gray-500">
+              Type a new batch name to create it
+            </p>
           ) : (
             filteredSuggestions.map((suggestion) => (
               <button
@@ -124,16 +157,41 @@ export default function BatchAutocomplete({
                 role="option"
                 aria-selected={suggestion.name === value}
                 onClick={() => {
-                  onChange(suggestion.name)
+                  onChange(
+                    suggestion.name,
+                    suggestion.modalTotal ? String(suggestion.modalTotal) : ''
+                  )
                   setOpen(false)
                 }}
                 className="block w-full border-b border-gray-100 px-3 py-2 text-left last:border-0 hover:bg-gray-50"
               >
                 <span className="block text-sm font-medium text-gray-900">{suggestion.name}</span>
-                <span className="block text-xs text-gray-500">{suggestion.itemCount} item{suggestion.itemCount === 1 ? '' : 's'}</span>
+                <span className="block text-xs text-gray-500">
+                  {suggestion.itemCount} item{suggestion.itemCount === 1 ? '' : 's'}
+                  {suggestion.modalTotal
+                    ? ` · Rp ${suggestion.modalTotal.toLocaleString('id-ID')}`
+                    : ''}
+                </span>
               </button>
             ))
           )}
+        </div>
+      )}
+
+      {isNewBatch && (
+        <div className="mt-2">
+          <label className="mb-1 block text-sm font-medium text-gray-700">
+            Batch Modal Total *
+          </label>
+          <FormattedPriceInput
+            required
+            value={modalTotalValue}
+            onChange={(newModalTotal) => onChange(value, newModalTotal)}
+            placeholder="Enter total modal for this batch"
+          />
+          <p className="mt-1 text-xs text-amber-600">
+            Creating new batch &quot;{value.trim()}&quot;. Batch modal total is required.
+          </p>
         </div>
       )}
     </div>

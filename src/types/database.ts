@@ -57,6 +57,7 @@ export interface Booking {
   status: BookingStatus
   notes: string | null
   created_by: string | null
+  legacy_import_id?: string | null
   is_backfilled?: boolean
   created_at: string
   updated_at: string
@@ -110,6 +111,8 @@ export interface LegacyImport {
   total_rows: number
   clean_rows_created: number
   skipped_rows: number
+  status?: 'active' | 'reverted' | null
+  reverted_at?: string | null
   created_at: string
 }
 

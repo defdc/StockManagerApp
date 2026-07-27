@@ -2,10 +2,11 @@ import { useEffect, useState, type ChangeEvent } from 'react'
 import type * as XLSX from 'xlsx'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
-import { formatDateTime, formatIDR } from '../lib/format'
+import { formatDateTime, formatIDR, formatStatus } from '../lib/format'
+import { STATUS_BADGE_CLASSES } from '../lib/constants'
 import { logActivity } from '../lib/activityLog'
+import Modal from '../components/Modal'
 import {
-  buildRawJson,
   detectBatchModals,
   detectStockColumns,
   evaluateStockRow,
@@ -13,8 +14,14 @@ import {
   guessCategoryFromSheetName,
   readWorkbook,
   sanitizeLegacyRows,
+  buildRawJson,
 } from '../lib/legacyImport'
-import type { LegacyImport } from '../types/database'
+import {
+  fetchExistingBuyerNames,
+  matchBuyerName,
+  type BuyerMatchResult,
+} from '../lib/buyers'
+import type { InventoryItem, LegacyImport } from '../types/database'
 
 const CHUNK_SIZE = 300
 
@@ -58,6 +65,27 @@ export default function ImportExcel() {
 
   const [pastImports, setPastImports] = useState<LegacyImport[]>([])
 
+  // Buyer resolution states
+  const [buyerMatches, setBuyerMatches] = useState<BuyerMatchResult[]>([])
+  const [resolvedBuyers, setResolvedBuyers] = useState<Map<string, string>>(new Map())
+  const [existingBuyerNames, setExistingBuyerNames] = useState<string[]>([])
+  const [loadingBuyerMatches, setLoadingBuyerMatches] = useState(false)
+
+  // View Items Modal state
+  const [viewImport, setViewImport] = useState<LegacyImport | null>(null)
+  const [viewItems, setViewItems] = useState<InventoryItem[]>([])
+  const [viewLoading, setViewLoading] = useState(false)
+
+  // Delete Import Modal state
+  const [deleteTargetImport, setDeleteTargetImport] = useState<LegacyImport | null>(null)
+  const [deletePreview, setDeletePreview] = useState<{
+    readyItems: InventoryItem[]
+    bookedItems: InventoryItem[]
+    soldItems: InventoryItem[]
+  } | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
   async function loadPastImports() {
     const { data } = await supabase
       .from('legacy_imports')
@@ -69,6 +97,174 @@ export default function ImportExcel() {
   useEffect(() => {
     loadPastImports()
   }, [])
+
+  async function fetchImportItems(imp: LegacyImport): Promise<InventoryItem[]> {
+    // 1. Try matching by legacy_import_id
+    const { data: directItems } = await supabase
+      .from('inventory_items')
+      .select('*')
+      .eq('legacy_import_id', imp.id)
+      .order('created_at', { ascending: true })
+
+    if (directItems && directItems.length > 0) return directItems
+
+    // 2. Legacy Fallback: Match by timestamp range (within 10 mins of import created_at)
+    const importTime = new Date(imp.created_at).getTime()
+    const startTime = new Date(importTime - 2 * 60 * 1000).toISOString()
+    const endTime = new Date(importTime + 10 * 60 * 1000).toISOString()
+
+    const { data: timeItems } = await supabase
+      .from('inventory_items')
+      .select('*')
+      .gte('created_at', startTime)
+      .lte('created_at', endTime)
+      .order('created_at', { ascending: true })
+
+    return timeItems ?? []
+  }
+
+  async function openViewItemsModal(imp: LegacyImport) {
+    setViewImport(imp)
+    setViewLoading(true)
+    const items = await fetchImportItems(imp)
+    setViewItems(items)
+    setViewLoading(false)
+  }
+
+  async function openDeleteModal(imp: LegacyImport) {
+    setDeleteTargetImport(imp)
+    setDeleteLoading(true)
+    setDeletePreview(null)
+
+    const itemList = await fetchImportItems(imp)
+    const itemIds = itemList.map((i) => i.id)
+
+    let salesItemIds = new Set<string>()
+    if (itemIds.length > 0) {
+      const { data: sales } = await supabase
+        .from('sales')
+        .select('inventory_item_id')
+        .in('inventory_item_id', itemIds)
+      salesItemIds = new Set((sales ?? []).map((s) => s.inventory_item_id as string))
+    }
+
+    const readyItems: InventoryItem[] = []
+    const bookedItems: InventoryItem[] = []
+    const soldItems: InventoryItem[] = []
+
+    for (const item of itemList) {
+      if (salesItemIds.has(item.id) || item.status === 'sold') {
+        soldItems.push(item)
+      } else if (item.status === 'booked') {
+        bookedItems.push(item)
+      } else {
+        readyItems.push(item)
+      }
+    }
+
+    setDeletePreview({ readyItems, bookedItems, soldItems })
+    setDeleteLoading(false)
+  }
+
+  async function confirmDeleteImport() {
+    if (!deleteTargetImport || !deletePreview) return
+    setDeleting(true)
+
+    const impId = deleteTargetImport.id
+    const deleteItemIds = [
+      ...deletePreview.readyItems.map((i) => i.id),
+      ...deletePreview.bookedItems.map((i) => i.id),
+    ]
+
+    try {
+      // Step 1: Delete linked bookings (both by inventory_item_id AND by legacy_import_id directly)
+      if (deleteItemIds.length > 0) {
+        const { error: bookingErr } = await supabase
+          .from('bookings')
+          .delete()
+          .in('inventory_item_id', deleteItemIds)
+
+        if (bookingErr) throw new Error(`Failed to delete bookings by item: ${bookingErr.message}`)
+      }
+
+      const { error: legacyBookingErr } = await supabase
+        .from('bookings')
+        .delete()
+        .eq('legacy_import_id', impId)
+
+      if (legacyBookingErr) {
+        console.warn('Could not delete bookings by legacy_import_id:', legacyBookingErr.message)
+      }
+
+      // Step 2: Unlink legacy_rows.mapped_inventory_item_id FIRST to prevent FK violations when inventory_items are deleted
+      const { error: rowsUnlinkErr } = await supabase
+        .from('legacy_rows')
+        .update({ mapped_inventory_item_id: null })
+        .eq('legacy_import_id', impId)
+
+      if (rowsUnlinkErr) {
+        console.warn('Could not unlink legacy_rows by import_id:', rowsUnlinkErr.message)
+      }
+
+      if (deleteItemIds.length > 0) {
+        const { error: rowsItemUnlinkErr } = await supabase
+          .from('legacy_rows')
+          .update({ mapped_inventory_item_id: null })
+          .in('mapped_inventory_item_id', deleteItemIds)
+
+        if (rowsItemUnlinkErr) {
+          console.warn('Could not unlink legacy_rows by mapped_inventory_item_id:', rowsItemUnlinkErr.message)
+        }
+
+        // Step 3: Unlink inventory_items own FKs (legacy_row_id = null, legacy_import_id = null)
+        const { error: unlinkErr } = await supabase
+          .from('inventory_items')
+          .update({ legacy_row_id: null, legacy_import_id: null })
+          .in('id', deleteItemIds)
+
+        if (unlinkErr) throw new Error(`Failed to unlink inventory items: ${unlinkErr.message}`)
+
+        // Step 4: Delete inventory_items
+        const { error: itemErr } = await supabase
+          .from('inventory_items')
+          .delete()
+          .in('id', deleteItemIds)
+
+        if (itemErr) throw new Error(`Failed to delete inventory items: ${itemErr.message}`)
+      }
+
+      // Step 5: Mark legacy_imports as status = 'reverted' (reverted_at = now())
+      const { error: impUpdateErr } = await supabase
+        .from('legacy_imports')
+        .update({
+          status: 'reverted',
+          reverted_at: new Date().toISOString(),
+        })
+        .eq('id', impId)
+
+      if (impUpdateErr) throw new Error(`Failed to update import history record: ${impUpdateErr.message}`)
+
+      void logActivity({
+        action: 'Revert Import',
+        entity: 'legacy_imports',
+        entityId: impId,
+        userId: user?.id,
+        details: {
+          file_name: deleteTargetImport.file_name,
+          deleted_items: deleteItemIds.length,
+          skipped_sold: deletePreview.soldItems.length,
+        },
+      })
+
+      setDeleteTargetImport(null)
+      loadPastImports()
+    } catch (err) {
+      console.error('Revert import failed:', err)
+      alert(err instanceof Error ? err.message : 'Failed to revert import')
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   async function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -82,20 +278,25 @@ export default function ImportExcel() {
       setSheetNames(wb.SheetNames)
       const firstSheet = wb.SheetNames[0]
       setSelectedSheet(firstSheet)
-      loadPreview(wb, firstSheet)
+      void loadPreview(wb, firstSheet)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to read the Excel file.')
     }
   }
 
-  function loadPreview(wb: XLSX.WorkBook, sheetName: string) {
+  async function loadPreview(wb: XLSX.WorkBook, sheetName: string) {
     const { header, rows, merges } = getSheetGrid(wb, sheetName)
     const stockIdx = detectStockColumns(header)
     const batchByRow = detectBatchModals(rows, merges, stockIdx)
+
+    const uniqueBuyerNames = new Set<string>()
     const pricedRows = rows.flatMap((row, index): PricedPreviewRow[] => {
       const evaluation = evaluateStockRow(row, stockIdx, batchByRow.get(index) ?? null)
       if (evaluation.skip || (evaluation.missingModal && !evaluation.bookedAmount && !evaluation.batchName)) {
         return []
+      }
+      if (evaluation.buyerName && evaluation.buyerName !== 'Imported booking') {
+        uniqueBuyerNames.add(evaluation.buyerName)
       }
       return [
         {
@@ -115,12 +316,39 @@ export default function ImportExcel() {
     setPreviewHeader(header)
     setPreviewRows(rows.slice(0, 20))
     setPricedPreviewRows([...bookedRows, ...otherPricedRows].slice(0, 10))
+
+    if (stockIdx.buyerName >= 0 && uniqueBuyerNames.size > 0) {
+      setLoadingBuyerMatches(true)
+      try {
+        const existing = await fetchExistingBuyerNames()
+        setExistingBuyerNames(existing)
+
+        const matches: BuyerMatchResult[] = []
+        const initialResolved = new Map<string, string>()
+
+        for (const importedName of uniqueBuyerNames) {
+          const res = matchBuyerName(importedName, existing)
+          matches.push(res)
+          initialResolved.set(importedName, res.selectedName)
+        }
+
+        setBuyerMatches(matches)
+        setResolvedBuyers(initialResolved)
+      } catch (e) {
+        console.error('Failed to match buyers:', e)
+      } finally {
+        setLoadingBuyerMatches(false)
+      }
+    } else {
+      setBuyerMatches([])
+      setResolvedBuyers(new Map())
+    }
   }
 
   function handleSheetSelect(name: string) {
     setSelectedSheet(name)
     setResult(null)
-    if (workbook) loadPreview(workbook, name)
+    if (workbook) void loadPreview(workbook, name)
   }
 
   async function handleImport() {
@@ -234,8 +462,9 @@ export default function ImportExcel() {
             throw new Error(`Cannot create imported booking: legacy row ${rowNumber} was not linked.`)
           }
           if (legacyRowId && evalResult.bookedAmount !== null) {
+            const confirmedBuyer = resolvedBuyers.get(evalResult.buyerName) ?? evalResult.buyerName
             bookingByLegacyRowId.set(legacyRowId, {
-              buyerName: evalResult.buyerName,
+              buyerName: confirmedBuyer,
               dealPrice: evalResult.bookedAmount,
             })
           }
@@ -280,6 +509,7 @@ export default function ImportExcel() {
                 deadline: null,
                 status: 'active',
                 notes: 'Created from legacy Excel Booked column during import',
+                legacy_import_id: importRow.id,
                 created_by: user.id,
               },
             ]
@@ -475,6 +705,117 @@ export default function ImportExcel() {
           </div>
         )}
 
+        {loadingBuyerMatches && (
+          <p className="text-xs text-gray-500">Matching buyers against database...</p>
+        )}
+
+        {buyerMatches.length > 0 && (
+          <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-medium text-gray-900">Buyer Linking & Resolution</h3>
+                <p className="text-xs text-gray-500">
+                  Review fuzzy matched buyers before committing import to the database.
+                </p>
+              </div>
+              <div className="flex gap-1.5 text-xs font-medium">
+                <span className="rounded-full bg-green-100 px-2 py-0.5 text-green-700">
+                  {buyerMatches.filter((m) => m.status === 'exact').length} Exact
+                </span>
+                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700">
+                  {buyerMatches.filter((m) => m.status === 'single_match').length} Matched
+                </span>
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
+                  {buyerMatches.filter((m) => m.status === 'ambiguous').length} Ambiguous
+                </span>
+                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                  {buyerMatches.filter((m) => m.status === 'new').length} New
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-md border border-gray-200">
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600">Imported Buyer Name</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600">Match Status</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600">Target Buyer (Action)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {buyerMatches.map((m) => {
+                    const currentTarget = resolvedBuyers.get(m.importedName) ?? m.selectedName
+                    return (
+                      <tr key={m.importedName} className="hover:bg-gray-50">
+                        <td className="whitespace-nowrap px-3 py-2 font-medium text-gray-900">
+                          {m.importedName}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {m.status === 'exact' && (
+                            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                              Exact Match
+                            </span>
+                          )}
+                          {m.status === 'single_match' && (
+                            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                              Matched ({Math.round(m.confidence * 100)}%)
+                            </span>
+                          )}
+                          {m.status === 'ambiguous' && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+                              Ambiguous ({m.candidates.length} options)
+                            </span>
+                          )}
+                          {m.status === 'new' && (
+                            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                              New Buyer
+                            </span>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          <select
+                            value={currentTarget}
+                            onChange={(e) => {
+                              const val = e.target.value
+                              setResolvedBuyers((prev) => new Map(prev).set(m.importedName, val))
+                            }}
+                            className="w-full max-w-xs rounded-md border border-gray-300 px-2 py-1 text-xs focus:border-gray-500 focus:outline-none"
+                          >
+                            {m.candidates.length > 0 && (
+                              <optgroup label="Suggested Matches">
+                                {m.candidates.map((c) => (
+                                  <option key={c.name} value={c.name}>
+                                    Link to &quot;{c.name}&quot; ({Math.round(c.similarity * 100)}% match)
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                            <option value={m.importedName}>
+                              + Create as new buyer &quot;{m.importedName}&quot;
+                            </option>
+                            {existingBuyerNames.length > 0 && (
+                              <optgroup label="All Existing Buyers">
+                                {existingBuyerNames
+                                  .filter((name) => !m.candidates.some((c) => c.name === name))
+                                  .map((name) => (
+                                    <option key={name} value={name}>
+                                      Link to &quot;{name}&quot;
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            )}
+                          </select>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {sheetNames.length > 0 && (
           <button
             onClick={handleImport}
@@ -520,31 +861,181 @@ export default function ImportExcel() {
                 <th className="px-3 py-2 text-left font-medium text-gray-600">Clean rows</th>
                 <th className="px-3 py-2 text-left font-medium text-gray-600">Skipped</th>
                 <th className="px-3 py-2 text-left font-medium text-gray-600">Imported at</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-600">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {pastImports.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
                     No imports yet.
                   </td>
                 </tr>
               ) : (
-                pastImports.map((imp) => (
-                  <tr key={imp.id}>
-                    <td className="px-3 py-2">{imp.file_name}</td>
-                    <td className="px-3 py-2">{imp.sheet_name}</td>
-                    <td className="px-3 py-2">{imp.total_rows}</td>
-                    <td className="px-3 py-2">{imp.clean_rows_created}</td>
-                    <td className="px-3 py-2">{imp.skipped_rows}</td>
-                    <td className="px-3 py-2">{formatDateTime(imp.created_at)}</td>
-                  </tr>
-                ))
+                pastImports.map((imp) => {
+                  const isReverted = imp.status === 'reverted'
+                  return (
+                    <tr key={imp.id} className={isReverted ? 'bg-gray-50/50 text-gray-400' : ''}>
+                      <td className="px-3 py-2 font-medium text-gray-900 flex items-center gap-2">
+                        {imp.file_name}
+                        {isReverted && (
+                          <span className="rounded-full bg-gray-200 px-2 py-0.5 text-xs font-normal text-gray-600">
+                            Reverted
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-gray-600">{imp.sheet_name}</td>
+                      <td className="px-3 py-2 text-gray-600">{imp.total_rows}</td>
+                      <td className="px-3 py-2 text-gray-600">{imp.clean_rows_created}</td>
+                      <td className="px-3 py-2 text-gray-600">{imp.skipped_rows}</td>
+                      <td className="px-3 py-2 text-gray-500">{formatDateTime(imp.created_at)}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => openViewItemsModal(imp)}
+                            className="text-xs font-medium text-blue-600 hover:underline"
+                          >
+                            View items
+                          </button>
+                          {!isReverted ? (
+                            <button
+                              onClick={() => openDeleteModal(imp)}
+                              className="text-xs font-medium text-red-600 hover:underline"
+                            >
+                              Delete import
+                            </button>
+                          ) : (
+                            <span className="text-xs text-gray-400">Reverted</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* View Items Modal */}
+      {viewImport && (
+        <Modal title={`Items from ${viewImport.file_name}`} onClose={() => setViewImport(null)} wide>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-500">
+              Sheet: <span className="font-medium text-gray-700">{viewImport.sheet_name}</span> ·
+              Imported: <span className="font-medium text-gray-700">{formatDateTime(viewImport.created_at)}</span>
+            </p>
+            {viewLoading ? (
+              <p className="text-sm text-gray-500">Loading items...</p>
+            ) : viewItems.length === 0 ? (
+              <p className="text-sm text-gray-400">No items found for this import.</p>
+            ) : (
+              <div className="max-h-96 overflow-y-auto rounded-md border border-gray-200">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Item Name</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Category</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Modal Price</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {viewItems.map((item) => (
+                      <tr key={item.id}>
+                        <td className="px-3 py-2 font-medium text-gray-900">{item.item_name}</td>
+                        <td className="px-3 py-2 text-gray-600">{item.category ?? '-'}</td>
+                        <td className="px-3 py-2 text-gray-600">{item.batch_name ?? '-'}</td>
+                        <td className="px-3 py-2">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
+                            {formatStatus(item.status)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-gray-700">{formatIDR(item.modal_price)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setViewImport(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete Import Modal */}
+      {deleteTargetImport && (
+        <Modal title={`Delete import "${deleteTargetImport.file_name}"`} onClose={() => setDeleteTargetImport(null)}>
+          <div className="space-y-4">
+            {deleteLoading ? (
+              <p className="text-sm text-gray-500">Analyzing items in this import...</p>
+            ) : !deletePreview ? (
+              <p className="text-sm text-gray-500">Failed to analyze import items.</p>
+            ) : (
+              <>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2 text-sm">
+                  <p className="font-medium text-gray-900">Import Safety Summary</p>
+                  <ul className="space-y-1 text-xs text-gray-700">
+                    <li className="flex items-center justify-between">
+                      <span>Ready Items (will be deleted directly):</span>
+                      <span className="font-semibold text-green-700">{deletePreview.readyItems.length}</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Booked Items (item + linked booking will be deleted):</span>
+                      <span className="font-semibold text-blue-700">{deletePreview.bookedItems.length}</span>
+                    </li>
+                    {deletePreview.soldItems.length > 0 && (
+                      <li className="flex items-center justify-between font-semibold text-amber-700">
+                        <span>Sold Items (FLAGGED / BLOCKED from auto-deletion):</span>
+                        <span>{deletePreview.soldItems.length}</span>
+                      </li>
+                    )}
+                  </ul>
+                </div>
+
+                {deletePreview.soldItems.length > 0 && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                    <strong>Warning:</strong> {deletePreview.soldItems.length} item(s) from this import have already been converted to Sales and will <strong>NOT</strong> be deleted automatically to preserve financial transaction history.
+                  </div>
+                )}
+
+                <p className="text-xs text-gray-500">
+                  Confirming will delete {deletePreview.readyItems.length + deletePreview.bookedItems.length} unsold item(s) and their linked bookings from the database.
+                </p>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTargetImport(null)}
+                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmDeleteImport}
+                    disabled={deleting || (deletePreview.readyItems.length === 0 && deletePreview.bookedItems.length === 0)}
+                    className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {deleting
+                      ? 'Deleting...'
+                      : `Confirm Delete (${deletePreview.readyItems.length + deletePreview.bookedItems.length} items)`}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
