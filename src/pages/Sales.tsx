@@ -4,7 +4,7 @@ import { useAuth } from '../lib/auth'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
-import { bookingGroupDisplayId } from '../lib/bookingGroups'
+import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
 import type { FulfillmentStatus, Sale } from '../types/database'
@@ -79,6 +79,15 @@ export default function Sales() {
   const [groupEditForm, setGroupEditForm] = useState(emptyGroupEditForm)
   const [groupEditError, setGroupEditError] = useState<string | null>(null)
   const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | FulfillmentStatus>('all')
+
+  // ── Bulk selection state ─────────────────────────────────────────────────────
+  const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
+  const [showBulkShippingModal, setShowBulkShippingModal] = useState(false)
+  const [bulkShippingStatus, setBulkShippingStatus] = useState<FulfillmentStatus>('parking')
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
+  const [showBulkUndoConfirm, setShowBulkUndoConfirm] = useState(false)
+  const [bulkActionSaving, setBulkActionSaving] = useState(false)
+  const [bulkActionError, setBulkActionError] = useState<string | null>(null)
 
   async function loadSales() {
     setLoading(true)
@@ -182,6 +191,89 @@ export default function Sales() {
 
   function getBatchSummary(sales: SaleRow[]) {
     return Array.from(new Set(sales.map((sale) => getBatchLabel(sale)).filter(Boolean))).join(', ') || 'Unassigned'
+  }
+
+  // ── Bulk selection helpers ─────────────────────────────────────────────────
+  // All individual sale IDs currently visible (including inside expanded groups)
+  const allVisibleSaleIds = useMemo(
+    () => filtered.map((s) => s.id),
+    [filtered]
+  )
+  const selectedSales = useMemo(
+    () => sales.filter((s) => selectedSaleIds.includes(s.id)),
+    [sales, selectedSaleIds]
+  )
+
+  function toggleSaleSelection(saleId: string) {
+    setSelectedSaleIds((cur) => cur.includes(saleId) ? cur.filter((id) => id !== saleId) : [...cur, saleId])
+  }
+
+  function toggleSelectAll() {
+    const allSelected = allVisibleSaleIds.every((id) => selectedSaleIds.includes(id))
+    if (allSelected) {
+      setSelectedSaleIds((cur) => cur.filter((id) => !allVisibleSaleIds.includes(id)))
+    } else {
+      setSelectedSaleIds((cur) => Array.from(new Set([...cur, ...allVisibleSaleIds])))
+    }
+  }
+
+  async function handleBulkShippingStatus(e: React.FormEvent) {
+    e.preventDefault()
+    setBulkActionSaving(true)
+    setBulkActionError(null)
+    const { error } = await supabase
+      .from('sales')
+      .update({ fulfillment_status: bulkShippingStatus, updated_at: new Date().toISOString() })
+      .in('id', selectedSaleIds)
+    setBulkActionSaving(false)
+    if (error) { setBulkActionError(error.message); return }
+    setShowBulkShippingModal(false)
+    setSelectedSaleIds([])
+    loadSales()
+  }
+
+  async function handleBulkDelete() {
+    setBulkActionSaving(true)
+    setBulkActionError(null)
+    for (const sale of selectedSales) {
+      const { error } = await supabase.from('sales').delete().eq('id', sale.id)
+      if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
+      if (sale.inventory_item_id) {
+        await supabase.from('inventory_items').update({ status: 'ready' }).eq('id', sale.inventory_item_id).eq('status', 'sold')
+      }
+    }
+    setBulkActionSaving(false)
+    setShowBulkDeleteConfirm(false)
+    setSelectedSaleIds([])
+    loadSales()
+  }
+
+  async function handleBulkUndo() {
+    setBulkActionSaving(true)
+    setBulkActionError(null)
+    for (const sale of selectedSales) {
+      let originatingBookingId: string | null = null
+      if (sale.inventory_item_id) {
+        let q = supabase.from('bookings').select('id').eq('inventory_item_id', sale.inventory_item_id).eq('status', 'converted_to_sale').order('updated_at', { ascending: false }).limit(1)
+        if (sale.booking_group_id) q = q.eq('booking_group_id', sale.booking_group_id)
+        const { data: bks } = await q
+        originatingBookingId = bks?.[0]?.id ?? null
+      }
+      const { error } = await supabase.from('sales').delete().eq('id', sale.id)
+      if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
+      if (originatingBookingId) {
+        await supabase.from('bookings').update({ status: 'active', updated_at: new Date().toISOString() }).eq('id', originatingBookingId)
+        if (sale.inventory_item_id) {
+          await supabase.from('inventory_items').update({ status: 'booked', updated_at: new Date().toISOString() }).eq('id', sale.inventory_item_id)
+        }
+      } else if (sale.inventory_item_id) {
+        await supabase.from('inventory_items').update({ status: 'ready', updated_at: new Date().toISOString() }).eq('id', sale.inventory_item_id).eq('status', 'sold')
+      }
+    }
+    setBulkActionSaving(false)
+    setShowBulkUndoConfirm(false)
+    setSelectedSaleIds([])
+    loadSales()
   }
 
   async function copySummary(group: DailySalesGroup) {
@@ -520,6 +612,49 @@ export default function Sales() {
         </select>
       </div>
 
+      {/* Bulk action toolbar — appears when rows are selected */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
+        <label className="flex items-center gap-2 text-gray-700">
+          <input
+            type="checkbox"
+            checked={allVisibleSaleIds.length > 0 && allVisibleSaleIds.every((id) => selectedSaleIds.includes(id))}
+            onChange={toggleSelectAll}
+            disabled={allVisibleSaleIds.length === 0}
+            className="h-4 w-4 rounded border-gray-300"
+          />
+          Select all visible
+        </label>
+        {selectedSaleIds.length > 0 && (
+          <>
+            <span className="text-gray-500">{selectedSaleIds.length} selected</span>
+            <button
+              onClick={() => { setBulkShippingStatus('parking'); setBulkActionError(null); setShowBulkShippingModal(true) }}
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Change Shipping Status
+            </button>
+            <button
+              onClick={() => { setBulkActionError(null); setShowBulkUndoConfirm(true) }}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+            >
+              Undo Sale
+            </button>
+            <button
+              onClick={() => { setBulkActionError(null); setShowBulkDeleteConfirm(true) }}
+              className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setSelectedSaleIds([])}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Clear
+            </button>
+          </>
+        )}
+      </div>
+
       {error && <p className="text-sm text-red-600">{error}</p>}
       {loading ? (
         <p className="text-gray-500">Loading sales...</p>
@@ -528,6 +663,7 @@ export default function Sales() {
           <table className="min-w-full divide-y divide-gray-200 text-sm">
             <thead className="bg-gray-50">
               <tr>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Date</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Items</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
@@ -542,18 +678,18 @@ export default function Sales() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {dailySalesGroups.length === 0 ? (
-                <tr>
-                  <td colSpan={10} className="px-3 py-6 text-center text-gray-400">
+                  <tr>
+                    <td colSpan={11} className="px-3 py-6 text-center text-gray-400">
                     No data found.
-                  </td>
-                </tr>
+                    </td>
+                  </tr>
               ) : (
                 dailySalesGroups.map((dayGroup) => {
                   const isDateExpanded = expandedDateKeys.includes(dayGroup.key)
                   return (
                     <Fragment key={dayGroup.key}>
                       <tr className="bg-gray-50">
-                        <td colSpan={9} className="px-3 py-3">
+                    <td colSpan={11} className="px-3 py-3">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <button
                               type="button"
@@ -603,6 +739,21 @@ export default function Sales() {
                             return (
                               <Fragment key={group.key}>
                                 <tr className="hover:bg-gray-50">
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={group.sales.every((s) => selectedSaleIds.includes(s.id))}
+                                      onChange={() => {
+                                        const allSel = group.sales.every((s) => selectedSaleIds.includes(s.id))
+                                        if (allSel) {
+                                          setSelectedSaleIds((cur) => cur.filter((id) => !group.sales.map((s) => s.id).includes(id)))
+                                        } else {
+                                          setSelectedSaleIds((cur) => Array.from(new Set([...cur, ...group.sales.map((s) => s.id)])))
+                                        }
+                                      }}
+                                      className="h-4 w-4 rounded border-gray-300"
+                                    />
+                                  </td>
                                   <td className="whitespace-nowrap px-3 py-2">{formatDate(group.saleDate)}</td>
                                   <td className="whitespace-nowrap px-3 py-2">
                                     {group.isGrouped ? (
@@ -614,7 +765,7 @@ export default function Sales() {
                                           onClick={() => toggleGroupExpanded(group.key)}
                                           className="block font-medium text-blue-700 hover:underline"
                                         >
-                                          {bookingGroupDisplayId(group.bookingGroupId, knownGroupIds)} ·{' '}
+                                          {bookingGroupFriendlyLabel(group.bookingGroupId, sales, knownGroupIds)} ·{' '}
                                           {isExpanded ? 'Hide' : 'Show'} {group.itemCount} items
                                         </button>
                                       </div>
@@ -654,6 +805,14 @@ export default function Sales() {
                                   isExpanded &&
                                   group.sales.map((sale) => (
                                     <tr key={sale.id} className="bg-gray-50 text-xs">
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedSaleIds.includes(sale.id)}
+                                          onChange={() => toggleSaleSelection(sale.id)}
+                                          className="h-4 w-4 rounded border-gray-300"
+                                        />
+                                      </td>
                                       <td className="whitespace-nowrap px-3 py-2"></td>
                                       <td className="whitespace-nowrap px-3 py-2 pl-8">
                                         {sale.inventory_items?.item_name ?? '-'}
@@ -690,6 +849,80 @@ export default function Sales() {
         </div>
       )}
 
+      {/* Bulk Shipping Status Modal */}
+      {showBulkShippingModal && (
+        <Modal title={`Change shipping status — ${selectedSaleIds.length} sale${selectedSaleIds.length === 1 ? '' : 's'}`} onClose={() => setShowBulkShippingModal(false)}>
+          <form onSubmit={handleBulkShippingStatus} className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">New shipping status</label>
+              <select
+                value={bulkShippingStatus}
+                onChange={(e) => setBulkShippingStatus(e.target.value as FulfillmentStatus)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              >
+                {FULFILLMENT_STATUSES.map((status) => (
+                  <option key={status} value={status}>{FULFILLMENT_LABELS[status]}</option>
+                ))}
+              </select>
+            </div>
+            {bulkActionError && <p className="text-sm text-red-600">{bulkActionError}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowBulkShippingModal(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">Cancel</button>
+              <button type="submit" disabled={bulkActionSaving} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                {bulkActionSaving ? 'Saving...' : 'Apply to all selected'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* Bulk Undo Sale Confirm */}
+      {showBulkUndoConfirm && (
+        <Modal title={`Undo ${selectedSaleIds.length} sale${selectedSaleIds.length === 1 ? '' : 's'}?`} onClose={() => setShowBulkUndoConfirm(false)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">This will revert the following sales back to Booking status and restore inventory:</p>
+            <div className="max-h-40 overflow-y-auto rounded-md border border-gray-100 bg-gray-50 p-2 text-xs space-y-1">
+              {selectedSales.map((s) => (
+                <div key={s.id} className="flex justify-between">
+                  <span>{s.inventory_items?.item_name ?? s.id}</span>
+                  <span className="text-gray-500">{s.buyer_name}</span>
+                </div>
+              ))}
+            </div>
+            {bulkActionError && <p className="text-sm text-red-600">{bulkActionError}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowBulkUndoConfirm(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">Cancel</button>
+              <button onClick={() => void handleBulkUndo()} disabled={bulkActionSaving} className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50">
+                {bulkActionSaving ? 'Processing...' : 'Undo all selected'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Bulk Delete Confirm */}
+      {showBulkDeleteConfirm && (
+        <Modal title={`Delete ${selectedSaleIds.length} sale${selectedSaleIds.length === 1 ? '' : 's'}?`} onClose={() => setShowBulkDeleteConfirm(false)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">The following sale records will be permanently deleted and inventory will be restored to Ready:</p>
+            <div className="max-h-40 overflow-y-auto rounded-md border border-gray-100 bg-gray-50 p-2 text-xs space-y-1">
+              {selectedSales.map((s) => (
+                <div key={s.id} className="flex justify-between">
+                  <span>{s.inventory_items?.item_name ?? s.id}</span>
+                  <span className="text-gray-500">{s.buyer_name}</span>
+                </div>
+              ))}
+            </div>
+            {bulkActionError && <p className="text-sm text-red-600">{bulkActionError}</p>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowBulkDeleteConfirm(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">Cancel</button>
+              <button onClick={() => void handleBulkDelete()} disabled={bulkActionSaving} className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">
+                {bulkActionSaving ? 'Deleting...' : 'Delete all selected'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {showGroupEditModal && groupEditTarget && (
         <Modal title="Edit group sale" onClose={() => setShowGroupEditModal(false)} wide>
           <form onSubmit={handleGroupEditSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">

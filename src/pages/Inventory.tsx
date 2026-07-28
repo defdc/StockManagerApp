@@ -431,7 +431,7 @@ export default function Inventory() {
     setBulkBookingSaving(true)
     setBulkBookingError(null)
 
-    const groupId = crypto.randomUUID()
+    const groupId = selectedItems.length > 1 ? crypto.randomUUID() : null
     const totalDealPrice = Number(bulkBookingForm.total_deal_price) || 0
     const itemCount = selectedItems.length
     const base = Math.floor(totalDealPrice / itemCount)

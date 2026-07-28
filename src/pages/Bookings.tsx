@@ -1,22 +1,21 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
-import { bookingGroupDisplayId } from '../lib/bookingGroups'
+import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
-import { STATUS_BADGE_CLASSES, FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
+import { FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
 import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
-import DataTable, { type Column } from '../components/DataTable'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 
-type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number } | null }
-type BookingItemSelection = { inventory_item_id: string }
+type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number; batch_name: string | null } | null }
+type BookingItemSelection = { inventory_item_id: string; deal_price: string }
 
 const emptyForm = {
   inventory_item_id: '',
@@ -36,8 +35,29 @@ const emptyBulkSaleForm = {
 
 /** Priority order for default status sort: active first, then converted, then cancelled. */
 const STATUS_ORDER: Record<string, number> = { active: 0, converted_to_sale: 1, cancelled: 2 }
+const BOOKING_STATUSES: BookingStatus[] = ['active', 'converted_to_sale', 'cancelled']
 
 const BundlePriceInput = FormattedPriceInput
+
+// ── Collapse state helpers (status sections) ──────────────────────────────────
+const BOOKINGS_COLLAPSED_KEY = 'bookings_collapsed_statuses'
+
+function loadCollapsedStatuses(): Set<string> {
+  try {
+    const raw = localStorage.getItem(BOOKINGS_COLLAPSED_KEY)
+    return raw ? new Set<string>(JSON.parse(raw) as string[]) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function saveCollapsedStatuses(set: Set<string>) {
+  try {
+    localStorage.setItem(BOOKINGS_COLLAPSED_KEY, JSON.stringify([...set]))
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export default function Bookings() {
   const { user } = useAuth()
@@ -47,16 +67,18 @@ export default function Bookings() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
-  const [statusSort, setStatusSort] = useState<'asc' | 'desc'>('asc')
+  // Status sort is fixed at 'asc' (active first); the sort toggle was removed with the old DataTable.
+  const statusSort = 'asc' as const
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
   const [editingItemName, setEditingItemName] = useState('')
   const [form, setForm] = useState(emptyForm)
-  const [newBookingItems, setNewBookingItems] = useState<BookingItemSelection[]>([{ inventory_item_id: '' }])
+  const [newBookingItems, setNewBookingItems] = useState<BookingItemSelection[]>([{ inventory_item_id: '', deal_price: '' }])
   const [newBookingBuyer, setNewBookingBuyer] = useState('')
   const [newBookingBundlePrice, setNewBookingBundlePrice] = useState('')
+  const [newBookingIsBorongan, setNewBookingIsBorongan] = useState(false)
   const [newBookingDeadline, setNewBookingDeadline] = useState('')
   const [newBookingNotes, setNewBookingNotes] = useState('')
   const [saving, setSaving] = useState(false)
@@ -69,16 +91,20 @@ export default function Bookings() {
   const [bulkPurchase, setBulkPurchase] = useState(false)
   const [bulkFulfillmentStatus, setBulkFulfillmentStatus] = useState<FulfillmentStatus>('parking')
 
-  const [singleConvertTarget, setSingleConvertTarget] = useState<BookingRow | null>(null)
+  // Collapse state for status sections — persisted in localStorage
+  const [collapsedStatuses, setCollapsedStatuses] = useState<Set<string>>(loadCollapsedStatuses)
+  // Expanded booking group keys (for Bulk Transaction expand/collapse)
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([])
   const [singleConvertFulfillment, setSingleConvertFulfillment] = useState<FulfillmentStatus>('parking')
   const [singleConvertSaving, setSingleConvertSaving] = useState(false)
+  const [singleConvertTarget, setSingleConvertTarget] = useState<BookingRow | null>(null)
 
   async function loadBookings() {
     setLoading(true)
     setError(null)
     const { data, error } = await supabase
       .from('bookings')
-      .select('*, inventory_items(item_name, modal_price)')
+      .select('*, inventory_items(item_name, modal_price, batch_name)')
       .order('created_at', { ascending: false })
     if (error) setError(error.message)
     else setBookings((data as unknown as BookingRow[]) ?? [])
@@ -121,6 +147,50 @@ export default function Bookings() {
       })
       .map(({ booking }) => booking)
   }, [bookings, search, statusFilter, statusSort])
+
+  // Group filtered bookings by status for collapsible sections
+  const groupedByStatus = useMemo(() => {
+    const map = new Map<string, BookingRow[]>()
+    for (const b of filtered) {
+      const arr = map.get(b.status) ?? []
+      arr.push(b)
+      map.set(b.status, arr)
+    }
+    // Return in fixed order, omitting empty sections
+    return BOOKING_STATUSES
+      .filter((s) => (statusFilter ? s === statusFilter : true) && (map.get(s)?.length ?? 0) > 0)
+      .map((s) => [s, map.get(s) ?? []] as [string, BookingRow[]])
+  }, [filtered, statusFilter])
+
+  // Group bookings within a section by booking_group_id
+  function groupBookingRows(rows: BookingRow[]) {
+    const groups = new Map<string, BookingRow[]>()
+    rows.forEach((b) => {
+      const key = b.booking_group_id ? `group:${b.booking_group_id}` : `solo:${b.id}`
+      const arr = groups.get(key) ?? []
+      arr.push(b)
+      groups.set(key, arr)
+    })
+    return Array.from(groups.entries())
+  }
+
+  function toggleStatusCollapse(status: string) {
+    setCollapsedStatuses((prev) => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      saveCollapsedStatuses(next)
+      return next
+    })
+  }
+
+  function toggleGroupExpand(groupKey: string) {
+    setExpandedGroupKeys((current) =>
+      current.includes(groupKey)
+        ? current.filter((k) => k !== groupKey)
+        : [...current, groupKey]
+    )
+  }
 
   const knownGroupIds = useMemo(
     () => bookings.map((booking) => booking.booking_group_id).filter((id): id is string => Boolean(id)),
@@ -180,9 +250,10 @@ export default function Bookings() {
     setEditingId(null)
     setEditingItemId(null)
     setForm(emptyForm)
-    setNewBookingItems([{ inventory_item_id: '' }])
+    setNewBookingItems([{ inventory_item_id: '', deal_price: '' }])
     setNewBookingBuyer('')
     setNewBookingBundlePrice('')
+    setNewBookingIsBorongan(false)
     setNewBookingDeadline('')
     setNewBookingNotes('')
     setFormError(null)
@@ -215,11 +286,15 @@ export default function Bookings() {
   }
 
   function addNewBookingItem() {
-    setNewBookingItems((current) => [...current, { inventory_item_id: '' }])
+    setNewBookingItems((current) => [...current, { inventory_item_id: '', deal_price: '' }])
   }
 
   function updateNewBookingItem(index: number, inventoryItemId: string) {
     setNewBookingItems((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, inventory_item_id: inventoryItemId } : item)))
+  }
+
+  function updateNewBookingItemPrice(index: number, price: string) {
+    setNewBookingItems((current) => current.map((item, itemIndex) => (itemIndex === index ? { ...item, deal_price: price } : item)))
   }
 
   function removeNewBookingItem(index: number) {
@@ -227,17 +302,48 @@ export default function Bookings() {
     setNewBookingItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
   }
 
+  function handleBoronganToggle(checked: boolean) {
+    if (checked) {
+      // Seed bundle price from sum of per-item prices (or keep existing bundle price if already set)
+      const sum = newBookingItems.reduce((acc, item) => acc + (parseInt(item.deal_price, 10) || 0), 0)
+      if (sum > 0 && !newBookingBundlePrice) {
+        setNewBookingBundlePrice(String(sum))
+      }
+    } else {
+      // Distribute bundle total evenly back to per-item fields
+      const bundleTotal = parseInt(newBookingBundlePrice, 10) || 0
+      if (bundleTotal > 0) {
+        const count = newBookingItems.length
+        const base = Math.floor(bundleTotal / count)
+        const remainder = bundleTotal - base * count
+        setNewBookingItems((current) =>
+          current.map((item, idx) => ({
+            ...item,
+            deal_price: String(idx === count - 1 ? base + remainder : base),
+          }))
+        )
+      }
+    }
+    setNewBookingIsBorongan(checked)
+  }
+
 
 
   const canSave = useMemo(() => {
     if (editingId) return true
-    const selectedCount = newBookingItems.filter((item) => item.inventory_item_id).length
-    if (selectedCount === 0) return false
+    const selectedItems = newBookingItems.filter((item) => item.inventory_item_id)
+    if (selectedItems.length === 0) return false
     if (!newBookingBuyer.trim()) return false
-    if (newBookingBundlePrice === '') return false
-    if (parseInt(newBookingBundlePrice, 10) <= 0) return false
+    if (newBookingIsBorongan) {
+      // Borongan mode: single bundle price required
+      if (!newBookingBundlePrice || parseInt(newBookingBundlePrice, 10) <= 0) return false
+    } else {
+      // Per-item mode: every selected item must have a price > 0
+      const allPriced = selectedItems.every((item) => parseInt(item.deal_price, 10) > 0)
+      if (!allPriced) return false
+    }
     return true
-  }, [editingId, newBookingItems, newBookingBuyer, newBookingBundlePrice])
+  }, [editingId, newBookingItems, newBookingBuyer, newBookingBundlePrice, newBookingIsBorongan])
 
   const bundleSummary = useMemo(() => {
     const selectedCount = newBookingItems.filter((item) => item.inventory_item_id).length
@@ -361,9 +467,20 @@ export default function Bookings() {
     setSaving(true)
     setFormError(null)
 
-    const bookingGroupId = crypto.randomUUID()
-    const bundleDealPrice = parseInt(newBookingBundlePrice, 10) || 0
-    const splitPrices = splitAmount(bundleDealPrice, selectedItems.length)
+    const isGrouped = selectedItems.length > 1 || newBookingIsBorongan
+    const bookingGroupId = isGrouped ? crypto.randomUUID() : null
+
+    // In borongan mode: split a single bundle price; in per-item mode: use each item's own price
+    const bundleDealPrice = newBookingIsBorongan ? (parseInt(newBookingBundlePrice, 10) || 0) : 0
+    const splitPrices = newBookingIsBorongan
+      ? splitAmount(bundleDealPrice, selectedItems.length)
+      : selectedItems.map((item) => parseInt(item.deal_price, 10) || 0)
+
+    // In per-item mode, group_total_deal_price is the sum of individual prices
+    const groupTotalPrice = newBookingIsBorongan
+      ? bundleDealPrice
+      : splitPrices.reduce((a, b) => a + b, 0)
+
     const selectedItemIds = selectedItems.map((item) => item.inventory_item_id)
 
     // Fetch inventory item details (including batch info) to compute live modal_price snapshot
@@ -416,7 +533,7 @@ export default function Bookings() {
     const bookingPayloads = selectedItems.map((item, index) => ({
       inventory_item_id: item.inventory_item_id,
       booking_group_id: bookingGroupId,
-      group_total_deal_price: bundleDealPrice,
+      group_total_deal_price: groupTotalPrice,
       buyer_name: newBookingBuyer.trim(),
       deal_price: splitPrices[index] ?? 0,
       modal_price: modalByItemId.get(item.inventory_item_id) ?? 0,
@@ -459,9 +576,10 @@ export default function Bookings() {
 
     setSaving(false)
     setShowModal(false)
-    setNewBookingItems([{ inventory_item_id: '' }])
+    setNewBookingItems([{ inventory_item_id: '', deal_price: '' }])
     setNewBookingBuyer('')
     setNewBookingBundlePrice('')
+    setNewBookingIsBorongan(false)
     setNewBookingDeadline('')
     setNewBookingNotes('')
     loadBookings()
@@ -670,66 +788,28 @@ export default function Bookings() {
     )
   }
 
-  const columns: Column<BookingRow>[] = [
-    {
-      header: 'Select',
-      render: (b) => (
-        <input
-          type="checkbox"
-          checked={selectedBookingIds.includes(b.id)}
-          onChange={() => toggleBookingSelection(b.id)}
-          aria-label={`Select booking for ${b.buyer_name}`}
-          className="h-4 w-4 rounded border-gray-300"
-        />
-      ),
-    },
-    { header: 'Item', render: (b) => b.inventory_items?.item_name ?? '-' },
-    { header: 'Group', render: (b) => bookingGroupDisplayId(b.booking_group_id, knownGroupIds) },
-    { header: 'Buyer', render: (b) => b.buyer_name },
-    { header: 'Deal price', render: (b) => formatIDR(b.deal_price) },
-    { header: 'Deadline', render: (b) => formatDate(b.deadline) },
-    {
-      header: 'Status',
-      headerNode: (
-        <button
-          type="button"
-          onClick={() => setStatusSort((s) => (s === 'asc' ? 'desc' : 'asc'))}
-          className="flex items-center gap-1 hover:text-gray-900"
-          title="Sort by status"
-        >
-          Status
-          <span className="text-xs">{statusSort === 'asc' ? '▲' : '▼'}</span>
-        </button>
-      ),
-      render: (b) => (
-        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[b.status]}`}>
-          {formatStatus(b.status)}
-        </span>
-      ),
-    },
-    {
-      header: 'Actions',
-      render: (b) => (
-        <div className="flex flex-wrap gap-2">
-          {b.status === 'active' && (
-            <button onClick={() => openSingleConvertModal(b)} className="text-green-700 hover:underline">
-              Convert to sale
-            </button>
-          )}
-          <button onClick={() => openEditModal(b)} className="text-blue-600 hover:underline">
-            Edit
-          </button>
-          <button onClick={() => handleDelete(b)} className="text-red-600 hover:underline">
-            Delete
-          </button>
-        </div>
-      ),
-    },
-  ]
-
   const bulkSaleHelperText = bulkPurchase
     ? 'Total price will be split evenly across all selected items (remainder goes to last item).'
     : 'Each booking will be converted at its own deal price, preserving all individual booking details.'
+
+  // Render one booking row's action buttons
+  function renderBookingActions(b: BookingRow) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        {b.status === 'active' && (
+          <button onClick={() => openSingleConvertModal(b)} className="text-green-700 hover:underline">
+            Convert to sale
+          </button>
+        )}
+        <button onClick={() => openEditModal(b)} className="text-blue-600 hover:underline">
+          Edit
+        </button>
+        <button onClick={() => handleDelete(b)} className="text-red-600 hover:underline">
+          Delete
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -804,8 +884,143 @@ export default function Bookings() {
       {error && <p className="text-sm text-red-600">{error}</p>}
       {loading ? (
         <p className="text-gray-500">Loading bookings...</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-gray-400">No bookings found.</p>
       ) : (
-        <DataTable columns={columns} data={filtered} keyField={(b) => b.id} />
+        <div className="space-y-3">
+          {groupedByStatus.map(([status, statusBookings]) => {
+            const isCollapsed = collapsedStatuses.has(status)
+            const groupRows = groupBookingRows(statusBookings)
+
+            return (
+              <div key={status} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+                {/* Status section header */}
+                <button
+                  type="button"
+                  onClick={() => toggleStatusCollapse(status)}
+                  className="flex w-full items-center justify-between bg-gray-50 px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                  <span>
+                    {isCollapsed ? '▶' : '▼'} {formatStatus(status)}
+                    <span className="ml-2 font-normal text-gray-500">({statusBookings.length})</span>
+                  </span>
+                </button>
+
+                {/* Booking rows */}
+                {!isCollapsed && (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-100 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deal price</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deadline</th>
+                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {groupRows.map(([groupKey, groupBookings]) => {
+                          const firstBooking = groupBookings[0]
+                          const isGrouped = groupKey.startsWith('group:') && groupBookings.length > 1
+                          const isExpanded = expandedGroupKeys.includes(groupKey)
+                          const friendlyLabel = firstBooking.booking_group_id
+                            ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
+                            : null
+                          const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+
+                          return (
+                            <Fragment key={groupKey}>
+                              {/* Summary row */}
+                              <tr className="hover:bg-gray-50">
+                                <td className="whitespace-nowrap px-3 py-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={groupBookings.every((b) => selectedBookingIds.includes(b.id))}
+                                    onChange={() => {
+                                      const allSelected = groupBookings.every((b) => selectedBookingIds.includes(b.id))
+                                      if (allSelected) {
+                                        setSelectedBookingIds((cur) => cur.filter((id) => !groupBookings.map((b) => b.id).includes(id)))
+                                      } else {
+                                        setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...groupBookings.map((b) => b.id)])))
+                                      }
+                                    }}
+                                    aria-label={`Select booking group`}
+                                    className="h-4 w-4 rounded border-gray-300"
+                                  />
+                                </td>
+                                <td className="px-3 py-2">
+                                  {isGrouped ? (
+                                    <div className="space-y-1">
+                                      <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                        🧾 Bulk Transaction
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleGroupExpand(groupKey)}
+                                        className="block font-medium text-blue-700 hover:underline"
+                                      >
+                                        {friendlyLabel} · {isExpanded ? 'Hide' : 'Show'} {groupBookings.length} items
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    firstBooking.inventory_items?.item_name ?? '-'
+                                  )}
+                                </td>
+                                <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                                  {isGrouped
+                                    ? Array.from(new Set(groupBookings.map((b) => b.inventory_items?.batch_name ?? '-').filter((n) => n !== '-'))).join(', ') || '-'
+                                    : (firstBooking.inventory_items?.batch_name ?? '-')}
+                                </td>
+                                <td className="whitespace-nowrap px-3 py-2">{firstBooking.buyer_name}</td>
+                                <td className="whitespace-nowrap px-3 py-2">
+                                  {isGrouped ? (
+                                    <span className="text-gray-600">{formatIDR(totalDealPrice)} total</span>
+                                  ) : (
+                                    formatIDR(firstBooking.deal_price)
+                                  )}
+                                </td>
+                                <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
+                                <td className="whitespace-nowrap px-3 py-2">
+                                  {!isGrouped && renderBookingActions(firstBooking)}
+                                </td>
+                              </tr>
+                              {/* Expanded item rows for grouped bookings */}
+                              {isGrouped && isExpanded && groupBookings.map((b) => (
+                                <tr key={b.id} className="bg-gray-50 text-xs">
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedBookingIds.includes(b.id)}
+                                      onChange={() => toggleBookingSelection(b.id)}
+                                      className="h-4 w-4 rounded border-gray-300"
+                                    />
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 pl-8">
+                                    {b.inventory_items?.item_name ?? '-'}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 text-gray-500">
+                                    {b.inventory_items?.batch_name ?? '-'}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2">{b.buyer_name}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{formatIDR(b.deal_price)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{formatDate(b.deadline)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{renderBookingActions(b)}</td>
+                                </tr>
+                              ))}
+                            </Fragment>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
 
       {/* Single Convert to Sale Modal */}
@@ -857,6 +1072,7 @@ export default function Bookings() {
           <form onSubmit={handleSubmit} className="space-y-3">
             {!editingId && (
               <>
+                {/* Items list — each row has its own price input unless Borongan mode is on */}
                 <div>
                   <div className="mb-2 flex items-center justify-between">
                     <label className="block text-sm font-medium text-gray-700">Items</label>
@@ -867,7 +1083,7 @@ export default function Bookings() {
                   <div className="space-y-2">
                     {newBookingItems.map((item, index) => (
                       <div key={`${item.inventory_item_id}-${index}`} className="flex items-start gap-2">
-                        <div className="flex-1">
+                        <div className="min-w-0 flex-1">
                           <ItemCombobox
                             required
                             value={item.inventory_item_id || null}
@@ -875,9 +1091,23 @@ export default function Bookings() {
                             placeholder="Search ready items..."
                           />
                         </div>
+                        {/* Per-item price — hidden in Borongan mode */}
+                        {!newBookingIsBorongan && (
+                          <div className="w-32 shrink-0">
+                            <BundlePriceInput
+                              value={item.deal_price}
+                              onChange={(price) => updateNewBookingItemPrice(index, price)}
+                              placeholder="Price"
+                            />
+                          </div>
+                        )}
                         {newBookingItems.length > 1 && (
-                          <button type="button" onClick={() => removeNewBookingItem(index)} className="rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-600 hover:bg-gray-50">
-                            Remove
+                          <button
+                            type="button"
+                            onClick={() => removeNewBookingItem(index)}
+                            className="shrink-0 rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-600 hover:bg-gray-50"
+                          >
+                            ✕
                           </button>
                         )}
                       </div>
@@ -894,15 +1124,33 @@ export default function Bookings() {
                   />
                 </div>
 
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Bundle deal price *</label>
-                  <BundlePriceInput
-                    value={newBookingBundlePrice}
-                    onChange={setNewBookingBundlePrice}
+                {/* Borongan toggle */}
+                <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+                  <input
+                    id="new-booking-borongan-toggle"
+                    type="checkbox"
+                    checked={newBookingIsBorongan}
+                    onChange={(e) => handleBoronganToggle(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300"
                   />
+                  <label htmlFor="new-booking-borongan-toggle" className="text-sm font-medium text-gray-700">
+                    Bulk Purchase (Borongan) — split one total price across all items
+                  </label>
                 </div>
 
-                {bundleSummary}
+                {/* Bundle price field — only visible in Borongan mode */}
+                {newBookingIsBorongan && (
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-gray-700">Bundle deal price *</label>
+                    <BundlePriceInput
+                      value={newBookingBundlePrice}
+                      onChange={setNewBookingBundlePrice}
+                    />
+                  </div>
+                )}
+
+                {/* Price split summary — only shown in Borongan mode with 2+ items */}
+                {newBookingIsBorongan && bundleSummary}
 
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
@@ -999,6 +1247,33 @@ export default function Bookings() {
       {showBulkSaleModal && (
         <Modal title={`Convert ${selectedBookings.length} booking${selectedBookings.length === 1 ? '' : 's'} to sale`} onClose={() => setShowBulkSaleModal(false)}>
           <form onSubmit={handleBulkConvertToSale} className="space-y-3">
+            {/* Selected Bookings Item List */}
+            <div className="max-h-40 overflow-y-auto rounded-md border border-gray-200 bg-gray-50 p-2.5 space-y-1.5 text-xs text-gray-700">
+              <p className="font-semibold text-gray-900">Selected Bookings ({selectedBookings.length}):</p>
+              {selectedBookings.map((b) => {
+                const groupLabel = b.booking_group_id
+                  ? bookingGroupFriendlyLabel(b.booking_group_id, bookings, knownGroupIds)
+                  : null
+                return (
+                  <div key={b.id} className="flex items-center justify-between rounded bg-white p-1.5 border border-gray-100">
+                    <span className="truncate max-w-[200px] font-medium text-gray-800">
+                      {b.inventory_items?.item_name ?? 'Unknown item'} ({b.buyer_name})
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {groupLabel ? (
+                        <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-800">
+                          {groupLabel}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-gray-400">Standalone</span>
+                      )}
+                      <span className="font-semibold text-gray-900">{formatIDR(b.deal_price)}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
             {bulkPurchase && (
               <div>
                 <BuyerAutocomplete
