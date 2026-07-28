@@ -162,6 +162,12 @@ export default function Bookings() {
       .map((s) => [s, map.get(s) ?? []] as [string, BookingRow[]])
   }, [filtered, statusFilter])
 
+  const selectedBookingsTotal = useMemo(() => {
+    return bookings
+      .filter((b) => selectedBookingIds.includes(b.id))
+      .reduce((sum, b) => sum + b.deal_price, 0)
+  }, [bookings, selectedBookingIds])
+
   // Group bookings within a section by booking_group_id
   function groupBookingRows(rows: BookingRow[]) {
     const groups = new Map<string, BookingRow[]>()
@@ -881,7 +887,9 @@ export default function Bookings() {
         </label>
         {selectedBookingIds.length > 0 && (
           <>
-            <span className="text-gray-500">{selectedBookingIds.length} selected</span>
+            <span className="font-medium text-gray-900">
+              {selectedBookingIds.length} selected · Total {formatIDR(selectedBookingsTotal)}
+            </span>
             <button
               onClick={openBulkSaleModal}
               className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800"
@@ -912,16 +920,59 @@ export default function Bookings() {
             return (
               <div key={status} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
                 {/* Status section header */}
-                <button
-                  type="button"
-                  onClick={() => toggleStatusCollapse(status)}
-                  className="flex w-full items-center justify-between bg-gray-50 px-3 py-2 text-left text-sm font-semibold text-gray-700 hover:bg-gray-100"
-                >
-                  <span>
-                    {isCollapsed ? '▶' : '▼'} {formatStatus(status)}
-                    <span className="ml-2 font-normal text-gray-500">({statusBookings.length})</span>
-                  </span>
-                </button>
+                <div className="flex flex-wrap items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={
+                        statusBookings.length > 0 &&
+                        statusBookings.every((b) => selectedBookingIds.includes(b.id))
+                      }
+                      onChange={() => {
+                        const secIds = statusBookings.map((b) => b.id)
+                        const allSelected = secIds.length > 0 && secIds.every((id) => selectedBookingIds.includes(id))
+                        if (allSelected) {
+                          setSelectedBookingIds((cur) => cur.filter((id) => !secIds.includes(id)))
+                        } else {
+                          setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...secIds])))
+                        }
+                      }}
+                      aria-label={`Select all ${formatStatus(status)} bookings`}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => toggleStatusCollapse(status)}
+                      className="flex items-center gap-1 font-semibold text-gray-800 hover:text-gray-900"
+                    >
+                      <span>{isCollapsed ? '▶' : '▼'}</span>
+                      <span>{formatStatus(status)}</span>
+                      <span className="ml-1 font-normal text-gray-500">({statusBookings.length})</span>
+                    </button>
+                  </div>
+
+                  {status === 'active' && (
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
+                      <span>
+                        Items booked: <strong className="font-semibold text-gray-900">{statusBookings.length}</strong>
+                      </span>
+                      <span className="h-3 w-[1px] bg-gray-300" />
+                      <span>
+                        Potential Revenue:{' '}
+                        <strong className="font-semibold text-gray-900">
+                          {formatIDR(statusBookings.reduce((sum, b) => sum + b.deal_price, 0))}
+                        </strong>
+                      </span>
+                      <span className="h-3 w-[1px] bg-gray-300" />
+                      <span>
+                        Potential Profit:{' '}
+                        <strong className="font-semibold text-green-700">
+                          {formatIDR(statusBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0))}
+                        </strong>
+                      </span>
+                    </div>
+                  )}
+                </div>
 
                 {/* Booking rows */}
                 {!isCollapsed && (

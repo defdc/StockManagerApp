@@ -167,6 +167,12 @@ export default function Sales() {
     })
   }, [filtered])
 
+  const selectedSalesTotal = useMemo(() => {
+    return sales
+      .filter((s) => selectedSaleIds.includes(s.id))
+      .reduce((sum, s) => sum + s.sale_price, 0)
+  }, [sales, selectedSaleIds])
+
   useEffect(() => {
     if (dailySalesGroups.length > 0 && expandedDateKeys.length === 0) {
       setExpandedDateKeys(dailySalesGroups.map((group) => group.key))
@@ -626,7 +632,9 @@ export default function Sales() {
         </label>
         {selectedSaleIds.length > 0 && (
           <>
-            <span className="text-gray-500">{selectedSaleIds.length} selected</span>
+            <span className="font-medium text-gray-900">
+              {selectedSaleIds.length} selected · Total {formatIDR(selectedSalesTotal)}
+            </span>
             <button
               onClick={() => { setBulkShippingStatus('parking'); setBulkActionError(null); setShowBulkShippingModal(true) }}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
