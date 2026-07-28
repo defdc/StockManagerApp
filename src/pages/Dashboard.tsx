@@ -6,11 +6,16 @@ import StatCard from '../components/StatCard'
 import type { FulfillmentStatus, InventoryItem, Sale } from '../types/database'
 import { fetchAllRows } from '../lib/supabasePagination'
 import { getLiveModalPrice } from '../lib/inventoryModal'
+import {
+  calculatePeriodSummary,
+  getMonthBounds,
+  getWeekBounds,
+  type ExpenseSummaryInput,
+  type PeriodSummary,
+  type SaleSummaryInput,
+} from '../lib/salesSummary'
 
 type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price' | 'batch_name' | 'batch_modal_total'>
-type SaleAggregate = Pick<Sale, 'id' | 'buyer_name' | 'sale_price' | 'gross_profit' | 'net_profit' | 'sale_date' | 'fulfillment_status'>
-type ExpenseAggregate = { id: string; amount: number }
-
 type SaleWithItem = Sale & { inventory_items: { item_name: string } | null }
 type SaleWithBatch = Pick<Sale, 'id' | 'net_profit' | 'sale_price'> & {
   inventory_items: { batch_name: string | null } | null
@@ -40,6 +45,8 @@ interface DashboardData {
     noSalesBatches: number
   }
   fulfillmentSummary: Record<FulfillmentStatus, number>
+  weekSummary: PeriodSummary
+  monthSummary: PeriodSummary
 }
 
 export default function Dashboard() {
@@ -65,15 +72,15 @@ export default function Dashboard() {
                 .order('id')
                 .range(from, to)
             ),
-            fetchAllRows<SaleAggregate>((from, to) =>
+            fetchAllRows<SaleSummaryInput>((from, to) =>
               supabase
                 .from('sales')
                 .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status')
                 .order('id')
                 .range(from, to)
             ),
-            fetchAllRows<ExpenseAggregate>((from, to) =>
-              supabase.from('expenses').select('id, amount').order('id').range(from, to)
+            fetchAllRows<ExpenseSummaryInput>((from, to) =>
+              supabase.from('expenses').select('id, amount, expense_date').order('id').range(from, to)
             ),
             supabase
               .from('sales')
@@ -99,20 +106,18 @@ export default function Dashboard() {
           itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error || batchSalesRes.error
         if (firstError) throw new Error(firstError.message)
 
-        const readyQty = items.filter((i) => i.status === 'ready').reduce((s, i) => s + i.quantity, 0)
-        const bookedQty = items
-          .filter((i) => i.status === 'booked')
-          .reduce((s, i) => s + i.quantity, 0)
-        const soldQty = items.filter((i) => i.status === 'sold').reduce((s, i) => s + i.quantity, 0)
+        const readyQty = items.filter((i) => i.status === 'ready').length
+        const bookedQty = items.filter((i) => i.status === 'booked').length
+        const soldQty = items.filter((i) => i.status === 'sold').length
         const modalValue = items
           .filter((i) => i.status === 'ready' || i.status === 'booked')
-          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
         const readyInventoryValue = items
           .filter((i) => i.status === 'ready')
-          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
         const bookedInventoryValue = items
           .filter((i) => i.status === 'booked')
-          .reduce((s, i) => s + getLiveModalPrice(i, items) * i.quantity, 0)
+          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
 
         const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
         const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
@@ -167,6 +172,13 @@ export default function Dashboard() {
           { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 }
         )
 
+        // Calculate Period Summaries using shared logic
+        const weekBounds = getWeekBounds(0)
+        const monthBounds = getMonthBounds(0)
+
+        const weekSummary = calculatePeriodSummary(sales, expenses, weekBounds.start, weekBounds.end, weekBounds.label, 'week')
+        const monthSummary = calculatePeriodSummary(sales, expenses, monthBounds.start, monthBounds.end, monthBounds.label, 'month')
+
         setData({
           totalItems: itemCountRes.count ?? 0,
           readyQty,
@@ -188,6 +200,8 @@ export default function Dashboard() {
           topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
           batchSummary,
           fulfillmentSummary,
+          weekSummary,
+          monthSummary,
         })
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.')
@@ -206,16 +220,105 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-gray-900">Dashboard</h1>
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          Low stock threshold
-          <input
-            type="number"
-            min="0"
-            value={lowStockThreshold}
-            onChange={(event) => setLowStockThreshold(Number(event.target.value) || 0)}
-            className="w-20 rounded-md border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => navigate('/reports')}
+            className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-800"
+          >
+            Sales Reports & Reports Page →
+          </button>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            Low stock threshold
+            <input
+              type="number"
+              min="0"
+              value={lowStockThreshold}
+              onChange={(event) => setLowStockThreshold(Number(event.target.value) || 0)}
+              className="w-20 rounded-md border border-gray-300 px-2 py-1 text-sm"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Current Week & Current Month Performance Widgets */}
+      <div className="rounded-xl border border-blue-100 bg-gradient-to-r from-blue-50/50 to-indigo-50/50 p-4 space-y-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-semibold text-gray-900">Current Sales Summary Widgets</h2>
+          <button
+            type="button"
+            onClick={() => navigate('/reports')}
+            className="text-xs font-semibold text-blue-700 hover:underline"
+          >
+            View Historical Reports & Period Navigator →
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {/* Current Week Widget */}
+          <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-2">
+              <div>
+                <span className="text-xs font-semibold uppercase tracking-wider text-blue-700 bg-blue-50 px-2 py-0.5 rounded">
+                  Current Week
+                </span>
+                <p className="mt-1 text-sm font-semibold text-gray-900">{data.weekSummary.label}</p>
+              </div>
+              <span className="text-xs text-gray-500">{data.weekSummary.itemsSold} items sold</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 text-sm">
+              <div>
+                <p className="text-xs text-gray-500">Revenue</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.weekSummary.revenue)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Gross Profit</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.weekSummary.grossProfit)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Expenses</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.weekSummary.expenses)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Net Profit</p>
+                <p className="font-semibold text-green-700">{formatIDR(data.weekSummary.netProfit)}</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500">Top Buyer: <span className="font-medium text-gray-800">{data.weekSummary.topBuyer}</span></p>
+          </div>
+
+          {/* Current Month Widget */}
+          <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-2">
+              <div>
+                <span className="text-xs font-semibold uppercase tracking-wider text-purple-700 bg-purple-50 px-2 py-0.5 rounded">
+                  Current Month
+                </span>
+                <p className="mt-1 text-sm font-semibold text-gray-900">{data.monthSummary.label}</p>
+              </div>
+              <span className="text-xs text-gray-500">{data.monthSummary.itemsSold} items sold</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 text-sm">
+              <div>
+                <p className="text-xs text-gray-500">Revenue</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.monthSummary.revenue)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Gross Profit</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.monthSummary.grossProfit)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Expenses</p>
+                <p className="font-semibold text-gray-900">{formatIDR(data.monthSummary.expenses)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Net Profit</p>
+                <p className="font-semibold text-green-700">{formatIDR(data.monthSummary.netProfit)}</p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500">Top Buyer: <span className="font-medium text-gray-800">{data.monthSummary.topBuyer}</span></p>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

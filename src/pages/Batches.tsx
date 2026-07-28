@@ -233,7 +233,7 @@ export default function Batches() {
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sales Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Revenue</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Profit</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery Profit</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery %</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Items</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Ready</th>
@@ -315,7 +315,7 @@ export default function Batches() {
                 <p className="font-medium text-gray-900">{formatIDR(selectedBatch.totalRevenue)}</p>
               </div>
               <div className="rounded-md bg-gray-50 p-3 text-sm">
-                <p className="text-gray-500">Profit</p>
+                <p className="text-gray-500">Recovery Profit</p>
                 <p className="font-medium text-gray-900">{formatIDR(selectedBatch.profit)}</p>
               </div>
               <div className="rounded-md bg-gray-50 p-3 text-sm">

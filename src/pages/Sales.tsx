@@ -686,10 +686,28 @@ export default function Sales() {
               ) : (
                 dailySalesGroups.map((dayGroup) => {
                   const isDateExpanded = expandedDateKeys.includes(dayGroup.key)
+                  const daySaleIds = dayGroup.transactionGroups.flatMap((tg) => tg.sales).map((s) => s.id)
+                  const isAllDaySelected = daySaleIds.length > 0 && daySaleIds.every((id) => selectedSaleIds.includes(id))
+
                   return (
                     <Fragment key={dayGroup.key}>
                       <tr className="bg-gray-50">
-                    <td colSpan={11} className="px-3 py-3">
+                        <td className="whitespace-nowrap px-3 py-3">
+                          <input
+                            type="checkbox"
+                            checked={isAllDaySelected}
+                            onChange={() => {
+                              if (isAllDaySelected) {
+                                setSelectedSaleIds((cur) => cur.filter((id) => !daySaleIds.includes(id)))
+                              } else {
+                                setSelectedSaleIds((cur) => Array.from(new Set([...cur, ...daySaleIds])))
+                              }
+                            }}
+                            aria-label={`Select all sales for ${formatDate(dayGroup.saleDate)}`}
+                            className="h-4 w-4 rounded border-gray-300"
+                          />
+                        </td>
+                        <td colSpan={10} className="px-3 py-3">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <button
                               type="button"
@@ -712,7 +730,7 @@ export default function Sales() {
                       {isDateExpanded && (
                         <>
                           <tr className="bg-white">
-                            <td colSpan={10} className="px-3 py-3">
+                            <td colSpan={11} className="px-3 py-3">
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                                   <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Revenue</p>

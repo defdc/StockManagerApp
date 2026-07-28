@@ -67,7 +67,7 @@ export default function Partners() {
   const summaries: PartnerSummary[] = useMemo(() => {
     const partnerCount = partners.length || 1
 
-    const sharedModal = items.reduce((sum, i) => sum + i.modal_price * i.quantity, 0)
+    const sharedModal = items.reduce((sum, i) => sum + i.modal_price, 0)
     const sharedProfit = sales.reduce((sum, s) => sum + s.net_profit, 0)
 
     return partners.map((partner) => {

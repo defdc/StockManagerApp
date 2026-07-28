@@ -11,6 +11,7 @@ import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import BatchAutocomplete from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
+import ItemNameAutocomplete from '../components/ItemNameAutocomplete'
 import { getLiveModalPrice } from '../lib/inventoryModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -292,6 +293,11 @@ export default function Inventory() {
   async function handleMultiSubmit() {
     const batchName = multiBatchName.trim()
     const modalTotal = multiBatchModalTotal.trim() ? Number(multiBatchModalTotal) : null
+
+    if (!batchName) {
+      setFormError('Please select or create a batch before saving.')
+      return
+    }
 
     // Validate items
     const validItems = multiItems.filter((i) => i.item_name.trim() || i.category.trim())
@@ -722,16 +728,14 @@ export default function Inventory() {
             {addMode === 'single' ? (
               /* Single Item Form */
               <>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Item name *</label>
-                  <input
-                    required
-                    value={form.item_name}
-                    onChange={(e) => setForm({ ...form, item_name: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-                    placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
-                  />
-                </div>
+                <ItemNameAutocomplete
+                  required
+                  label="Item name"
+                  labelClassName="mb-1 block text-sm font-medium text-gray-700"
+                  value={form.item_name}
+                  onChange={(name) => setForm({ ...form, item_name: name })}
+                  placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
+                />
 
                 <CategoryAutocomplete
                   required
@@ -767,6 +771,7 @@ export default function Inventory() {
                 {/* Shared Batch Header */}
                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                   <BatchAutocomplete
+                    required
                     value={multiBatchName}
                     modalTotalValue={multiBatchModalTotal}
                     onChange={(batchName, modalTotal) => {
@@ -803,16 +808,12 @@ export default function Inventory() {
                         className="grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
                       >
                         <div className="sm:col-span-4">
-                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                            Item Name *
-                          </label>
-                          <input
-                            type="text"
+                          <ItemNameAutocomplete
                             required
-                            value={itemRow.item_name}
-                            onChange={(e) => updateMultiRow(itemRow.id, 'item_name', e.target.value)}
+                            label="Item Name *"
                             placeholder={`Item #${index + 1} name *`}
-                            className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+                            value={itemRow.item_name}
+                            onChange={(name) => updateMultiRow(itemRow.id, 'item_name', name)}
                           />
                         </div>
 
@@ -880,7 +881,7 @@ export default function Inventory() {
               </button>
               <button
                 type="submit"
-                disabled={saving}
+                disabled={saving || (addMode === 'multiple' && !multiBatchName.trim())}
                 className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
               >
                 {saving

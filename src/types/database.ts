@@ -6,6 +6,7 @@ export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'd
 export interface Profile {
   id: string
   full_name: string | null
+  email?: string | null
   role: string
   created_at: string
 }

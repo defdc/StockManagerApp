@@ -334,6 +334,11 @@ export default function Bookings() {
     const selectedItems = newBookingItems.filter((item) => item.inventory_item_id)
     if (selectedItems.length === 0) return false
     if (!newBookingBuyer.trim()) return false
+
+    // Block save if duplicate items are selected across rows
+    const selectedIds = selectedItems.map((item) => item.inventory_item_id)
+    if (new Set(selectedIds).size < selectedIds.length) return false
+
     if (newBookingIsBorongan) {
       // Borongan mode: single bundle price required
       if (!newBookingBundlePrice || parseInt(newBookingBundlePrice, 10) <= 0) return false
@@ -486,12 +491,24 @@ export default function Bookings() {
     // Fetch inventory item details (including batch info) to compute live modal_price snapshot
     const { data: itemRows, error: fetchError } = await supabase
       .from('inventory_items')
-      .select('id, batch_name, batch_modal_total, modal_price')
+      .select('id, item_name, batch_name, batch_modal_total, modal_price')
       .in('id', selectedItemIds)
     if (fetchError) {
       setSaving(false)
       setFormError(fetchError.message)
       return
+    }
+
+    const seenIds = new Set<string>()
+    for (const itemId of selectedItemIds) {
+      if (seenIds.has(itemId)) {
+        setSaving(false)
+        const dupItem = itemRows?.find((i) => i.id === itemId)
+        const nameStr = dupItem?.item_name ? `"${dupItem.item_name}"` : 'An item'
+        setFormError(`${nameStr} is selected more than once — each item can only be booked once per form.`)
+        return
+      }
+      seenIds.add(itemId)
     }
 
     const batchNames = Array.from(
@@ -1081,37 +1098,44 @@ export default function Bookings() {
                     </button>
                   </div>
                   <div className="space-y-2">
-                    {newBookingItems.map((item, index) => (
-                      <div key={`${item.inventory_item_id}-${index}`} className="flex items-start gap-2">
-                        <div className="min-w-0 flex-1">
-                          <ItemCombobox
-                            required
-                            value={item.inventory_item_id || null}
-                            onChange={(selectedItem) => updateNewBookingItem(index, selectedItem?.id ?? '')}
-                            placeholder="Search ready items..."
-                          />
-                        </div>
-                        {/* Per-item price — hidden in Borongan mode */}
-                        {!newBookingIsBorongan && (
-                          <div className="w-32 shrink-0">
-                            <BundlePriceInput
-                              value={item.deal_price}
-                              onChange={(price) => updateNewBookingItemPrice(index, price)}
-                              placeholder="Price"
+                    {newBookingItems.map((item, index) => {
+                      const excludeIds = newBookingItems
+                        .filter((_, idx) => idx !== index)
+                        .map((i) => i.inventory_item_id)
+                        .filter(Boolean)
+                      return (
+                        <div key={`${item.inventory_item_id}-${index}`} className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <ItemCombobox
+                              required
+                              value={item.inventory_item_id || null}
+                              onChange={(selectedItem) => updateNewBookingItem(index, selectedItem?.id ?? '')}
+                              placeholder="Search ready items..."
+                              excludeIds={excludeIds}
                             />
                           </div>
-                        )}
-                        {newBookingItems.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeNewBookingItem(index)}
-                            className="shrink-0 rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-600 hover:bg-gray-50"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    ))}
+                          {/* Per-item price — hidden in Borongan mode */}
+                          {!newBookingIsBorongan && (
+                            <div className="w-32 shrink-0">
+                              <BundlePriceInput
+                                value={item.deal_price}
+                                onChange={(price) => updateNewBookingItemPrice(index, price)}
+                                placeholder="Price"
+                              />
+                            </div>
+                          )}
+                          {newBookingItems.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeNewBookingItem(index)}
+                              className="shrink-0 rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-600 hover:bg-gray-50"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
 

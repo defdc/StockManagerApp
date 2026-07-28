@@ -274,7 +274,6 @@ export function evaluateStockRow(
   const nameStr = String(rawName).trim()
   if (looksLikeTotalRow(nameStr)) return { skip: true, reason: 'total_row' }
 
-  const pcs = idx.pcs >= 0 ? toNumberOrNull(row[idx.pcs]) : null
   const modal = batch ? batch.modalPrice : idx.modal >= 0 ? parseCurrency(row[idx.modal]) : null
   const booked = idx.booked >= 0 ? parseCurrency(row[idx.booked]) : null
   const rawBuyerName = idx.buyerName >= 0 ? row[idx.buyerName] : null
@@ -284,7 +283,7 @@ export function evaluateStockRow(
   return {
     skip: false,
     itemName: nameStr,
-    quantity: pcs && pcs > 0 ? pcs : 1,
+    quantity: 1,
     modalPrice: modal ?? 0,
     bookedAmount: booked !== null && booked > 0 ? booked : null,
     buyerName,

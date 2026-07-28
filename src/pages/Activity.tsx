@@ -1,10 +1,25 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { useAuth } from '../lib/auth'
 import { formatDateTime } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import type { ActivityLog, Profile } from '../types/database'
 
+function getUserDisplay(
+  userId: string | null,
+  profile: Profile | undefined,
+  currentUserEmail?: string,
+  currentUserId?: string
+): string {
+  if (!userId) return 'Unknown user'
+  if (profile?.email) return profile.email
+  if (profile?.full_name) return profile.full_name
+  if (userId === currentUserId && currentUserEmail) return currentUserEmail
+  return userId.slice(0, 8) || 'Unknown user'
+}
+
 export default function Activity() {
+  const { user } = useAuth()
   const [logs, setLogs] = useState<ActivityLog[]>([])
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [search, setSearch] = useState('')
@@ -35,19 +50,27 @@ export default function Activity() {
 
   const filteredLogs = useMemo(() => {
     return logs
-      .map((log) => ({
-        log,
-        rank: smartSearchRank(search, [
-          { value: log.action },
-          { value: log.entity },
-          { value: profileById.get(log.created_by ?? '')?.full_name },
-          { value: JSON.stringify(log.details), kind: 'notes' },
-        ]),
-      }))
+      .map((log) => {
+        const profile = profileById.get(log.created_by ?? '')
+        const userDisplay = getUserDisplay(log.created_by, profile, user?.email, user?.id)
+
+        return {
+          log,
+          userDisplay,
+          rank: smartSearchRank(search, [
+            { value: log.action },
+            { value: log.entity },
+            { value: userDisplay },
+            { value: profile?.email },
+            { value: profile?.full_name },
+            { value: log.created_by },
+            { value: JSON.stringify(log.details), kind: 'notes' },
+          ]),
+        }
+      })
       .filter((entry) => entry.rank !== null)
       .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.log.created_at.localeCompare(a.log.created_at))
-      .map((entry) => entry.log)
-  }, [logs, profileById, search])
+  }, [logs, profileById, search, user?.email, user?.id])
 
   return (
     <div className="space-y-4">
@@ -83,19 +106,14 @@ export default function Activity() {
                   </td>
                 </tr>
               ) : (
-                filteredLogs.map((log) => {
-                  const profile = profileById.get(log.created_by ?? '')
-                  return (
-                    <tr key={log.id} className="hover:bg-gray-50">
-                      <td className="whitespace-nowrap px-3 py-2">{formatDateTime(log.created_at)}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{log.action}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{log.entity}</td>
-                      <td className="whitespace-nowrap px-3 py-2">
-                        {profile?.full_name || log.created_by?.slice(0, 8) || '-'}
-                      </td>
-                    </tr>
-                  )
-                })
+                filteredLogs.map(({ log, userDisplay }) => (
+                  <tr key={log.id} className="hover:bg-gray-50">
+                    <td className="whitespace-nowrap px-3 py-2">{formatDateTime(log.created_at)}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{log.action}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{log.entity}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{userDisplay}</td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>

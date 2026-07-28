@@ -12,6 +12,7 @@ interface ItemComboboxProps {
   placeholder?: string
   label?: string
   required?: boolean
+  excludeIds?: string[]
 }
 
 const SEARCH_FIELDS = ['item_name', 'category', 'batch_name', 'notes'] as const
@@ -22,7 +23,7 @@ function itemLabel(item: InventoryItem): string {
   return item.item_name
 }
 
-async function findItems(search: string, statuses: string[]): Promise<InventoryItem[]> {
+async function findItems(search: string, statuses: string[], excludeIds: string[] = []): Promise<InventoryItem[]> {
   const fields = search ? SEARCH_FIELDS : SEARCH_FIELDS.slice(0, 1)
   const tokens = searchTokens(search)
   const queryPairs = fields.flatMap((field) =>
@@ -38,6 +39,9 @@ async function findItems(search: string, statuses: string[]): Promise<InventoryI
         .limit(SUGGESTION_LIMIT)
 
       if (token) query = query.ilike(field, `%${token}%`)
+      if (excludeIds.length > 0) {
+        query = query.not('id', 'in', `(${excludeIds.join(',')})`)
+      }
 
       const { data, error } = await query
       if (error) throw new Error(error.message)
@@ -46,7 +50,11 @@ async function findItems(search: string, statuses: string[]): Promise<InventoryI
   )
 
   const uniqueItems = new Map<string, InventoryItem>()
-  for (const item of results.flat()) uniqueItems.set(item.id, item)
+  for (const item of results.flat()) {
+    if (!excludeIds.includes(item.id)) {
+      uniqueItems.set(item.id, item)
+    }
+  }
 
   return [...uniqueItems.values()]
     .map((item) => ({
@@ -70,9 +78,11 @@ export default function ItemCombobox({
   placeholder = 'Search by name, code, category, or notes...',
   label,
   required,
+  excludeIds = [],
 }: ItemComboboxProps) {
   const listboxId = useId()
   const statusKey = (allowedStatuses ?? DEFAULT_ALLOWED_STATUSES).join(',')
+  const excludeKey = excludeIds.join(',')
   const containerRef = useRef<HTMLDivElement>(null)
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null)
   const [query, setQuery] = useState('')
@@ -128,7 +138,8 @@ export default function ItemCombobox({
     const timer = window.setTimeout(async () => {
       setError(null)
       try {
-        const items = await findItems(query.trim(), statusKey.split(','))
+        const currentExcludeIds = excludeKey ? excludeKey.split(',') : []
+        const items = await findItems(query.trim(), statusKey.split(','), currentExcludeIds)
         if (!cancelled) setSuggestions(items)
       } catch (searchError) {
         if (!cancelled) {
@@ -144,7 +155,7 @@ export default function ItemCombobox({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [open, query, selectedItem, statusKey])
+  }, [open, query, selectedItem, statusKey, excludeKey])
 
   function selectItem(item: InventoryItem) {
     setSelectedItem(item)
@@ -222,7 +233,7 @@ export default function ItemCombobox({
                 <span className="block text-sm font-medium text-gray-900">{itemLabel(item)}</span>
                 <span className="block text-xs text-gray-500">
                   {item.batch_name ? `${item.batch_name} · ` : ''}
-                  {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} · Qty: {item.quantity} · Modal:{' '}
+                  {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} · Modal:{' '}
                   {formatIDR(getLiveModalPrice(item, suggestions))}
                 </span>
               </button>
