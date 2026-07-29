@@ -536,7 +536,7 @@ export default function Inventory() {
           </button>
           <button
             onClick={openAddModal}
-            className="rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800"
+            className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
           >
             + Add item(s)
           </button>
@@ -770,7 +770,7 @@ export default function Inventory() {
                 onClick={() => setAddMode('single')}
                 className={`border-b-2 px-4 py-2 text-sm font-medium ${
                   addMode === 'single'
-                    ? 'border-gray-900 text-gray-900'
+                    ? 'border-pink-600 text-pink-600'
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -781,7 +781,7 @@ export default function Inventory() {
                 onClick={() => setAddMode('multiple')}
                 className={`border-b-2 px-4 py-2 text-sm font-medium ${
                   addMode === 'multiple'
-                    ? 'border-gray-900 text-gray-900'
+                    ? 'border-pink-600 text-pink-600'
                     : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -948,7 +948,7 @@ export default function Inventory() {
               <button
                 type="submit"
                 disabled={saving || (addMode === 'multiple' && !multiBatchName.trim())}
-                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {saving
                   ? 'Saving...'
@@ -1016,7 +1016,7 @@ export default function Inventory() {
               <button
                 type="submit"
                 disabled={bulkBookingSaving}
-                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {bulkBookingSaving ? 'Booking...' : 'Create bookings'}
               </button>

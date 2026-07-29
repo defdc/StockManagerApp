@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { APP_NAME } from '../lib/constants'
 
 const links = [
   { to: '/', label: 'Dashboard' },
@@ -19,10 +20,15 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { user } = useAuth()
 
   return (
-    <div className="flex h-full flex-col bg-gray-900 text-gray-100">
-      <div className="border-b border-gray-800 px-4 py-4">
-        <p className="text-lg font-semibold">Stock Manager</p>
-        <p className="truncate text-xs text-gray-400">{user?.email}</p>
+    <div className="flex h-full flex-col bg-white border-r border-pink-100 text-gray-800 shadow-sm">
+      <div className="border-b border-pink-100 px-4 py-3.5 bg-pink-50/40 flex flex-col items-start">
+        <img
+          src="/logo.png"
+          alt="PINKIEPIE GARAGE Logo"
+          className="h-10 w-auto object-contain mb-1 drop-shadow-sm"
+        />
+        <p className="text-base font-bold text-gray-900 tracking-tight">{APP_NAME}</p>
+        <p className="truncate text-xs text-gray-500 font-medium">{user?.email}</p>
       </div>
       <nav className="flex-1 space-y-1 p-2">
         {links.map((link) => (
@@ -32,8 +38,10 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             end={link.to === '/'}
             onClick={onNavigate}
             className={({ isActive }) =>
-              `block rounded-md px-3 py-2 text-sm font-medium ${
-                isActive ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+              `block rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                isActive
+                  ? 'bg-pink-100 text-pink-900 font-semibold border-l-4 border-pink-600'
+                  : 'text-gray-600 hover:bg-pink-50 hover:text-pink-800'
               }`
             }
           >
@@ -41,10 +49,10 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           </NavLink>
         ))}
       </nav>
-      <div className="border-t border-gray-800 p-2">
+      <div className="border-t border-pink-100 p-2">
         <button
           onClick={() => supabase.auth.signOut()}
-          className="block w-full rounded-md px-3 py-2 text-left text-sm font-medium text-gray-300 hover:bg-gray-800 hover:text-white"
+          className="block w-full rounded-md px-3 py-2 text-left text-sm font-medium text-gray-600 hover:bg-pink-50 hover:text-pink-800 transition-colors"
         >
           Sign out
         </button>

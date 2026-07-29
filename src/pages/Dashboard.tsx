@@ -224,7 +224,7 @@ export default function Dashboard() {
           <button
             type="button"
             onClick={() => navigate('/reports')}
-            className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-800"
+            className="rounded-md bg-pink-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-pink-700"
           >
             Sales Reports & Reports Page →
           </button>

@@ -167,7 +167,7 @@ export default function Buyers() {
     <div className="space-y-4">
       {/* Toast Notification */}
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-lg">
+        <div className="fixed bottom-5 right-5 z-50 rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white shadow-lg">
           {toast}
         </div>
       )}

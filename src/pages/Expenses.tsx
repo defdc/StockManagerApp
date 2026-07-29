@@ -122,7 +122,7 @@ export default function Expenses() {
         <h1 className="text-xl font-semibold text-gray-900">Expenses</h1>
         <button
           onClick={openAddModal}
-          className="rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800"
+          className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
         >
           + Add expense
         </button>
@@ -194,7 +194,7 @@ export default function Expenses() {
               <button
                 type="submit"
                 disabled={saving}
-                className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {saving ? 'Saving...' : 'Save'}
               </button>

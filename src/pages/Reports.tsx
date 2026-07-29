@@ -81,7 +81,7 @@ export default function Reports() {
             onClick={() => handlePeriodTypeChange('week')}
             className={`rounded-l-md border px-4 py-2 text-sm font-medium ${
               periodType === 'week'
-                ? 'border-gray-900 bg-gray-900 text-white'
+                ? 'border-pink-600 bg-pink-600 text-white'
                 : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
             }`}
           >
@@ -92,7 +92,7 @@ export default function Reports() {
             onClick={() => handlePeriodTypeChange('month')}
             className={`rounded-r-md border border-l-0 px-4 py-2 text-sm font-medium ${
               periodType === 'month'
-                ? 'border-gray-900 bg-gray-900 text-white'
+                ? 'border-pink-600 bg-pink-600 text-white'
                 : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
             }`}
           >
