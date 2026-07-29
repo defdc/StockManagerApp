@@ -624,64 +624,130 @@ export default function Inventory() {
 
                 {/* Item rows */}
                 {!isCollapsed && (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-100 text-sm">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {catItems.map((item) => (
-                          <tr key={item.id} className="hover:bg-gray-50">
-                            <td className="whitespace-nowrap px-3 py-2">
-                              <input
-                                type="checkbox"
-                                checked={selectedItemIds.includes(item.id)}
-                                onChange={() => toggleItemSelection(item.id)}
-                                aria-label={`Select ${item.item_name}`}
-                                className="h-4 w-4 rounded border-gray-300"
-                              />
-                            </td>
-                            <td className="px-3 py-2">
+                  <>
+                    {/* Mobile Cards List (< 768px) */}
+                    <div className="space-y-3 p-3 bg-gray-50/50 border-t border-gray-200 md:hidden">
+                      {catItems.map((item) => (
+                        <div key={item.id} className="rounded-lg border border-gray-200 bg-white p-3.5 shadow-sm space-y-2.5">
+                          {/* Header: Checkbox + Item Name + Status Badge */}
+                          <div className="flex items-start gap-2.5">
+                            <input
+                              type="checkbox"
+                              checked={selectedItemIds.includes(item.id)}
+                              onChange={() => toggleItemSelection(item.id)}
+                              aria-label={`Select ${item.item_name}`}
+                              className="mt-1 h-4 w-4 shrink-0 rounded border-gray-300"
+                            />
+                            <div className="min-w-0 flex-1">
                               <button
                                 onClick={() => setDrawerItem(item)}
-                                className="font-medium text-blue-700 hover:underline"
+                                className="font-bold text-gray-900 text-base leading-snug break-words hover:text-blue-700 text-left"
                               >
                                 {item.item_name}
                               </button>
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-gray-600">
-                              {item.batch_name ?? '-'}
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2">
-                              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
-                                {formatStatus(item.status)}
-                              </span>
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-gray-500">
-                              {formatDate(item.created_at)}
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2">
-                              <div className="flex gap-2">
-                                <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
-                                  Edit
-                                </button>
-                                <button onClick={() => handleDelete(item)} className="text-red-600 hover:underline">
-                                  Delete
-                                </button>
-                              </div>
-                            </td>
+                            </div>
+                            <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
+                              {formatStatus(item.status)}
+                            </span>
+                          </div>
+
+                          {/* Details Grid */}
+                          <div className="grid grid-cols-2 gap-2 text-xs text-gray-600 bg-gray-50/70 p-2.5 rounded-md">
+                            <div>
+                              <span className="text-gray-400 block text-[11px]">Batch</span>
+                              <span className="font-medium text-gray-800">{item.batch_name ?? '-'}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-400 block text-[11px]">Category</span>
+                              <span className="font-medium text-gray-800">{item.category ?? 'Uncategorized'}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-400 block text-[11px]">Created</span>
+                              <span className="font-medium text-gray-800">{formatDate(item.created_at)}</span>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons (Min 40px touch targets) */}
+                          <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(item)}
+                              className="min-h-[40px] rounded-md border border-gray-300 bg-white px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(item)}
+                              className="min-h-[40px] rounded-md border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Desktop Table View (≥ 768px) */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-100 text-sm">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {catItems.map((item) => (
+                            <tr key={item.id} className="hover:bg-gray-50">
+                              <td className="whitespace-nowrap px-3 py-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedItemIds.includes(item.id)}
+                                  onChange={() => toggleItemSelection(item.id)}
+                                  aria-label={`Select ${item.item_name}`}
+                                  className="h-4 w-4 rounded border-gray-300"
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <button
+                                  onClick={() => setDrawerItem(item)}
+                                  className="font-medium text-blue-700 hover:underline"
+                                >
+                                  {item.item_name}
+                                </button>
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                                {item.batch_name ?? '-'}
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2">
+                                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
+                                  {formatStatus(item.status)}
+                                </span>
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2 text-gray-500">
+                                {formatDate(item.created_at)}
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-2">
+                                <div className="flex gap-2">
+                                  <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
+                                    Edit
+                                  </button>
+                                  <button onClick={() => handleDelete(item)} className="text-red-600 hover:underline">
+                                    Delete
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
               </div>
             )
@@ -805,7 +871,7 @@ export default function Inventory() {
                     {multiItems.map((itemRow, index) => (
                       <div
                         key={itemRow.id}
-                        className="grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
+                        className="relative z-10 focus-within:z-30 transition-all grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
                       >
                         <div className="sm:col-span-4">
                           <ItemNameAutocomplete

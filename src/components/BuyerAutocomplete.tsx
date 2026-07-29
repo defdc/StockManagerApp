@@ -29,6 +29,28 @@ export default function BuyerAutocomplete({
   const [suggestions, setSuggestions] = useState<BuyerSuggestion[]>([])
   const [loading, setLoading] = useState(false)
 
+  const [openUpward, setOpenUpward] = useState(false)
+
+  const updatePosition = () => {
+    if (!containerRef.current) return
+    const rect = containerRef.current.getBoundingClientRect()
+    const spaceBelow = window.innerHeight - rect.bottom
+    const spaceAbove = rect.top
+    setOpenUpward(spaceBelow < 220 && spaceAbove > spaceBelow)
+  }
+
+  useEffect(() => {
+    if (open) {
+      updatePosition()
+      window.addEventListener('resize', updatePosition)
+      window.addEventListener('scroll', updatePosition, true)
+      return () => {
+        window.removeEventListener('resize', updatePosition)
+        window.removeEventListener('scroll', updatePosition, true)
+      }
+    }
+  }, [open])
+
   useEffect(() => {
     function closeOnOutsideClick(event: MouseEvent) {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
@@ -106,7 +128,7 @@ export default function BuyerAutocomplete({
   }, [suggestions, value])
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>
       {label && <label className="mb-1 block text-sm font-medium text-gray-700">{label}</label>}
       <input
         type="text"
@@ -117,10 +139,14 @@ export default function BuyerAutocomplete({
         required={required}
         value={value}
         placeholder={placeholder}
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          setOpen(true)
+          updatePosition()
+        }}
         onChange={(event) => {
           onChange(event.target.value)
           setOpen(true)
+          updatePosition()
         }}
         className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
       />
@@ -129,7 +155,9 @@ export default function BuyerAutocomplete({
         <div
           id={listboxId}
           role="listbox"
-          className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg"
+          className={`absolute z-50 w-full max-h-56 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-xl ${
+            openUpward ? 'bottom-full mb-1' : 'top-full mt-1'
+          }`}
         >
           {loading ? (
             <p className="px-3 py-3 text-sm text-gray-500">Loading buyers...</p>

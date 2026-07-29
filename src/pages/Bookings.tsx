@@ -162,6 +162,21 @@ export default function Bookings() {
       .map((s) => [s, map.get(s) ?? []] as [string, BookingRow[]])
   }, [filtered, statusFilter])
 
+  const [groupBy, setGroupBy] = useState<'status' | 'date'>('status')
+  const [collapsedDates, setCollapsedDates] = useState<Set<string>>(new Set())
+
+  const groupedByDate = useMemo(() => {
+    const map = new Map<string, BookingRow[]>()
+    for (const b of filtered) {
+      const dateKey = b.created_at ? b.created_at.slice(0, 10) : 'Unknown'
+      const arr = map.get(dateKey) ?? []
+      arr.push(b)
+      map.set(dateKey, arr)
+    }
+    const sortedDates = [...map.keys()].sort((a, b) => b.localeCompare(a))
+    return sortedDates.map((dateKey) => [dateKey, map.get(dateKey) ?? []] as [string, BookingRow[]])
+  }, [filtered])
+
   const selectedBookingsTotal = useMemo(() => {
     return bookings
       .filter((b) => selectedBookingIds.includes(b.id))
@@ -815,7 +830,7 @@ export default function Bookings() {
     ? 'Total price will be split evenly across all selected items (remainder goes to last item).'
     : 'Each booking will be converted at its own deal price, preserving all individual booking details.'
 
-  // Render one booking row's action buttons
+  // Render one booking row's action buttons (Desktop)
   function renderBookingActions(b: BookingRow) {
     return (
       <div className="flex flex-wrap gap-2">
@@ -828,6 +843,37 @@ export default function Bookings() {
           Edit
         </button>
         <button onClick={() => handleDelete(b)} className="text-red-600 hover:underline">
+          Delete
+        </button>
+      </div>
+    )
+  }
+
+  // Render booking card action buttons (Mobile - min 40px touch targets)
+  function renderMobileCardActions(b: BookingRow) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
+        {b.status === 'active' && (
+          <button
+            type="button"
+            onClick={() => openSingleConvertModal(b)}
+            className="min-h-[40px] rounded-md bg-green-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-green-800"
+          >
+            Convert to Sale
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => openEditModal(b)}
+          className="min-h-[40px] rounded-md border border-gray-300 bg-white px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          onClick={() => handleDelete(b)}
+          className="min-h-[40px] rounded-md border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+        >
           Delete
         </button>
       </div>
@@ -867,11 +913,36 @@ export default function Bookings() {
           onChange={(e) => setStatusFilter(e.target.value)}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
-          <option value="">All</option>
+          <option value="">All Statuses</option>
           <option value="active">Active</option>
           <option value="converted_to_sale">Converted to Sale</option>
           <option value="cancelled">Cancelled</option>
         </select>
+
+        <div className="inline-flex rounded-md shadow-sm">
+          <button
+            type="button"
+            onClick={() => setGroupBy('status')}
+            className={`rounded-l-md border px-3 py-2 text-xs font-medium ${
+              groupBy === 'status'
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            Group by Status
+          </button>
+          <button
+            type="button"
+            onClick={() => setGroupBy('date')}
+            className={`rounded-r-md border border-l-0 px-3 py-2 text-xs font-medium ${
+              groupBy === 'date'
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            Group by Date
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
@@ -913,23 +984,23 @@ export default function Bookings() {
         <p className="text-sm text-gray-400">No bookings found.</p>
       ) : (
         <div className="space-y-3">
-          {groupedByStatus.map(([status, statusBookings]) => {
-            const isCollapsed = collapsedStatuses.has(status)
-            const groupRows = groupBookingRows(statusBookings)
+          {(groupBy === 'status' ? groupedByStatus : groupedByDate).map(([groupTitle, sectionBookings]) => {
+            const isCollapsed = groupBy === 'status' ? collapsedStatuses.has(groupTitle) : collapsedDates.has(groupTitle)
+            const groupRows = groupBookingRows(sectionBookings)
 
             return (
-              <div key={status} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-                {/* Status section header */}
+              <div key={groupTitle} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+                {/* Section header */}
                 <div className="flex flex-wrap items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2 text-sm">
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={
-                        statusBookings.length > 0 &&
-                        statusBookings.every((b) => selectedBookingIds.includes(b.id))
+                        sectionBookings.length > 0 &&
+                        sectionBookings.every((b) => selectedBookingIds.includes(b.id))
                       }
                       onChange={() => {
-                        const secIds = statusBookings.map((b) => b.id)
+                        const secIds = sectionBookings.map((b) => b.id)
                         const allSelected = secIds.length > 0 && secIds.every((id) => selectedBookingIds.includes(id))
                         if (allSelected) {
                           setSelectedBookingIds((cur) => cur.filter((id) => !secIds.includes(id)))
@@ -937,37 +1008,66 @@ export default function Bookings() {
                           setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...secIds])))
                         }
                       }}
-                      aria-label={`Select all ${formatStatus(status)} bookings`}
+                      aria-label={`Select all ${groupBy === 'status' ? formatStatus(groupTitle) : formatDate(groupTitle)} bookings`}
                       className="h-4 w-4 rounded border-gray-300"
                     />
                     <button
                       type="button"
-                      onClick={() => toggleStatusCollapse(status)}
+                      onClick={() => {
+                        if (groupBy === 'status') {
+                          toggleStatusCollapse(groupTitle)
+                        } else {
+                          setCollapsedDates((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(groupTitle)) next.delete(groupTitle)
+                            else next.add(groupTitle)
+                            return next
+                          })
+                        }
+                      }}
                       className="flex items-center gap-1 font-semibold text-gray-800 hover:text-gray-900"
                     >
                       <span>{isCollapsed ? '▶' : '▼'}</span>
-                      <span>{formatStatus(status)}</span>
-                      <span className="ml-1 font-normal text-gray-500">({statusBookings.length})</span>
+                      <span>{groupBy === 'status' ? formatStatus(groupTitle) : formatDate(groupTitle)}</span>
+                      <span className="ml-1 font-normal text-gray-500">({sectionBookings.length})</span>
                     </button>
                   </div>
 
-                  {status === 'active' && (
+                  {groupBy === 'status' && groupTitle === 'active' && (
                     <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
                       <span>
-                        Items booked: <strong className="font-semibold text-gray-900">{statusBookings.length}</strong>
+                        Items booked: <strong className="font-semibold text-gray-900">{sectionBookings.length}</strong>
                       </span>
                       <span className="h-3 w-[1px] bg-gray-300" />
                       <span>
                         Potential Revenue:{' '}
                         <strong className="font-semibold text-gray-900">
-                          {formatIDR(statusBookings.reduce((sum, b) => sum + b.deal_price, 0))}
+                          {formatIDR(sectionBookings.reduce((sum, b) => sum + b.deal_price, 0))}
                         </strong>
                       </span>
                       <span className="h-3 w-[1px] bg-gray-300" />
                       <span>
                         Potential Profit:{' '}
                         <strong className="font-semibold text-green-700">
-                          {formatIDR(statusBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0))}
+                          {formatIDR(sectionBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0))}
+                        </strong>
+                      </span>
+                    </div>
+                  )}
+
+                  {groupBy === 'date' && (
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
+                      <span>
+                        Active Bookings:{' '}
+                        <strong className="font-semibold text-gray-900">
+                          {sectionBookings.filter((b) => b.status === 'active').length}
+                        </strong>
+                      </span>
+                      <span className="h-3 w-[1px] bg-gray-300" />
+                      <span>
+                        Total Deal Value:{' '}
+                        <strong className="font-semibold text-gray-900">
+                          {formatIDR(sectionBookings.reduce((s, b) => s + b.deal_price, 0))}
                         </strong>
                       </span>
                     </div>
@@ -976,114 +1076,290 @@ export default function Bookings() {
 
                 {/* Booking rows */}
                 {!isCollapsed && (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-100 text-sm">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deal price</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deadline</th>
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {groupRows.map(([groupKey, groupBookings]) => {
-                          const firstBooking = groupBookings[0]
-                          const isGrouped = groupKey.startsWith('group:') && groupBookings.length > 1
-                          const isExpanded = expandedGroupKeys.includes(groupKey)
-                          const friendlyLabel = firstBooking.booking_group_id
-                            ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
-                            : null
-                          const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+                  <>
+                    {/* Mobile Cards List (< 768px) */}
+                    <div className="space-y-3 p-3 bg-gray-50/50 border-t border-gray-200 md:hidden">
+                      {groupRows.map(([groupKey, groupBookings]) => {
+                        const firstBooking = groupBookings[0]
+                        const isGrouped = groupKey.startsWith('group:') && groupBookings.length > 1
+                        const isExpanded = expandedGroupKeys.includes(groupKey)
+                        const friendlyLabel = firstBooking.booking_group_id
+                          ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
+                          : null
+                        const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+                        const isAllGroupSelected = groupBookings.every((b) => selectedBookingIds.includes(b.id))
 
-                          return (
-                            <Fragment key={groupKey}>
-                              {/* Summary row */}
-                              <tr className="hover:bg-gray-50">
-                                <td className="whitespace-nowrap px-3 py-2">
-                                  <input
-                                    type="checkbox"
-                                    checked={groupBookings.every((b) => selectedBookingIds.includes(b.id))}
-                                    onChange={() => {
-                                      const allSelected = groupBookings.every((b) => selectedBookingIds.includes(b.id))
-                                      if (allSelected) {
-                                        setSelectedBookingIds((cur) => cur.filter((id) => !groupBookings.map((b) => b.id).includes(id)))
-                                      } else {
-                                        setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...groupBookings.map((b) => b.id)])))
-                                      }
-                                    }}
-                                    aria-label={`Select booking group`}
-                                    className="h-4 w-4 rounded border-gray-300"
-                                  />
-                                </td>
-                                <td className="px-3 py-2">
-                                  {isGrouped ? (
-                                    <div className="space-y-1">
-                                      <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                                        🧾 Bulk Transaction
-                                      </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => toggleGroupExpand(groupKey)}
-                                        className="block font-medium text-blue-700 hover:underline"
-                                      >
-                                        {friendlyLabel} · {isExpanded ? 'Hide' : 'Show'} {groupBookings.length} items
-                                      </button>
+                        return (
+                          <div key={groupKey} className="rounded-lg border border-gray-200 bg-white p-3.5 shadow-sm space-y-2.5">
+                            {/* Card Header: Checkbox + Title / Group Badge */}
+                            <div className="flex items-start gap-2.5">
+                              <input
+                                type="checkbox"
+                                checked={isAllGroupSelected}
+                                onChange={() => {
+                                  if (isAllGroupSelected) {
+                                    setSelectedBookingIds((cur) => cur.filter((id) => !groupBookings.map((b) => b.id).includes(id)))
+                                  } else {
+                                    setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...groupBookings.map((b) => b.id)])))
+                                  }
+                                }}
+                                aria-label="Select booking group"
+                                className="mt-1 h-4 w-4 shrink-0 rounded border-gray-300"
+                              />
+
+                              <div className="min-w-0 flex-1 space-y-1">
+                                {isGrouped ? (
+                                  <div>
+                                    <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 mb-1">
+                                      🧾 Bulk Transaction
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleGroupExpand(groupKey)}
+                                      className="block font-semibold text-gray-900 text-sm hover:underline text-left"
+                                    >
+                                      {friendlyLabel} · {isExpanded ? 'Hide' : 'Show'} {groupBookings.length} items
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <h3 className="font-bold text-gray-900 text-base leading-snug break-words">
+                                    {firstBooking.inventory_items?.item_name ?? '-'}
+                                  </h3>
+                                )}
+                              </div>
+
+                              {/* Status Badge */}
+                              <span
+                                className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                                  firstBooking.status === 'active'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : firstBooking.status === 'converted_to_sale'
+                                      ? 'bg-green-100 text-green-800'
+                                      : 'bg-gray-100 text-gray-800'
+                                }`}
+                              >
+                                {formatStatus(firstBooking.status)}
+                              </span>
+                            </div>
+
+                            {/* Card Body: Details */}
+                            {!isGrouped && (
+                              <div className="grid grid-cols-2 gap-2 text-xs text-gray-600 bg-gray-50/70 p-2.5 rounded-md">
+                                <div>
+                                  <span className="text-gray-400 block text-[11px]">Batch</span>
+                                  <span className="font-medium text-gray-800">{firstBooking.inventory_items?.batch_name ?? '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-400 block text-[11px]">Buyer</span>
+                                  <span className="font-medium text-gray-800">{firstBooking.buyer_name}</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-400 block text-[11px]">Deal Price</span>
+                                  <span className="font-bold text-gray-900 text-sm">{formatIDR(firstBooking.deal_price)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-400 block text-[11px]">Deadline</span>
+                                  <span className="font-medium text-gray-800">{formatDate(firstBooking.deadline)}</span>
+                                </div>
+                              </div>
+                            )}
+
+                            {isGrouped && (
+                              <div className="flex items-center justify-between text-xs bg-gray-50/70 p-2.5 rounded-md">
+                                <div>
+                                  <span className="text-gray-400 block text-[11px]">Buyer</span>
+                                  <span className="font-medium text-gray-800">{firstBooking.buyer_name}</span>
+                                </div>
+                                <div className="text-right">
+                                  <span className="text-gray-400 block text-[11px]">Total Deal Value</span>
+                                  <span className="font-bold text-gray-900 text-sm">{formatIDR(totalDealPrice)}</span>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Expanded items if bulk transaction */}
+                            {isGrouped && isExpanded && (
+                              <div className="space-y-2 pl-2 border-l-2 border-amber-200 mt-2">
+                                {groupBookings.map((b) => (
+                                  <div key={b.id} className="rounded-md border border-gray-200 bg-white p-2.5 text-xs space-y-1.5">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedBookingIds.includes(b.id)}
+                                          onChange={() => toggleBookingSelection(b.id)}
+                                          className="h-4 w-4 rounded border-gray-300"
+                                        />
+                                        <span className="font-medium text-gray-900">{b.inventory_items?.item_name ?? '-'}</span>
+                                      </div>
+                                      <span className="font-semibold text-gray-900">{formatIDR(b.deal_price)}</span>
                                     </div>
-                                  ) : (
-                                    firstBooking.inventory_items?.item_name ?? '-'
-                                  )}
-                                </td>
-                                <td className="whitespace-nowrap px-3 py-2 text-gray-600">
-                                  {isGrouped
-                                    ? Array.from(new Set(groupBookings.map((b) => b.inventory_items?.batch_name ?? '-').filter((n) => n !== '-'))).join(', ') || '-'
-                                    : (firstBooking.inventory_items?.batch_name ?? '-')}
-                                </td>
-                                <td className="whitespace-nowrap px-3 py-2">{firstBooking.buyer_name}</td>
-                                <td className="whitespace-nowrap px-3 py-2">
-                                  {isGrouped ? (
-                                    <span className="text-gray-600">{formatIDR(totalDealPrice)} total</span>
-                                  ) : (
-                                    formatIDR(firstBooking.deal_price)
-                                  )}
-                                </td>
-                                <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
-                                <td className="whitespace-nowrap px-3 py-2">
-                                  {!isGrouped && renderBookingActions(firstBooking)}
-                                </td>
-                              </tr>
-                              {/* Expanded item rows for grouped bookings */}
-                              {isGrouped && isExpanded && groupBookings.map((b) => (
-                                <tr key={b.id} className="bg-gray-50 text-xs">
+                                    <div className="flex items-center justify-between text-[11px] text-gray-500 pl-6">
+                                      <span>Batch: {b.inventory_items?.batch_name ?? '-'}</span>
+                                      <span>Deadline: {formatDate(b.deadline)}</span>
+                                    </div>
+                                    <div className="pt-1 pl-6 flex gap-2">
+                                      {renderMobileCardActions(b)}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Card Actions (Min 40px touch targets) */}
+                            {!isGrouped && (
+                              <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
+                                {renderMobileCardActions(firstBooking)}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* Desktop Table View (≥ 768px) */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-100 text-sm">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deal price</th>
+                            {groupBy === 'date' && (
+                              <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                            )}
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deadline</th>
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {groupRows.map(([groupKey, groupBookings]) => {
+                            const firstBooking = groupBookings[0]
+                            const isGrouped = groupKey.startsWith('group:') && groupBookings.length > 1
+                            const isExpanded = expandedGroupKeys.includes(groupKey)
+                            const friendlyLabel = firstBooking.booking_group_id
+                              ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
+                              : null
+                            const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+
+                            return (
+                              <Fragment key={groupKey}>
+                                {/* Summary row */}
+                                <tr className="hover:bg-gray-50">
                                   <td className="whitespace-nowrap px-3 py-2">
                                     <input
                                       type="checkbox"
-                                      checked={selectedBookingIds.includes(b.id)}
-                                      onChange={() => toggleBookingSelection(b.id)}
+                                      checked={groupBookings.every((b) => selectedBookingIds.includes(b.id))}
+                                      onChange={() => {
+                                        const allSelected = groupBookings.every((b) => selectedBookingIds.includes(b.id))
+                                        if (allSelected) {
+                                          setSelectedBookingIds((cur) => cur.filter((id) => !groupBookings.map((b) => b.id).includes(id)))
+                                        } else {
+                                          setSelectedBookingIds((cur) => Array.from(new Set([...cur, ...groupBookings.map((b) => b.id)])))
+                                        }
+                                      }}
+                                      aria-label={`Select booking group`}
                                       className="h-4 w-4 rounded border-gray-300"
                                     />
                                   </td>
-                                  <td className="whitespace-nowrap px-3 py-2 pl-8">
-                                    {b.inventory_items?.item_name ?? '-'}
+                                  <td className="px-3 py-2">
+                                    {isGrouped ? (
+                                      <div className="space-y-1">
+                                        <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                          🧾 Bulk Transaction
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleGroupExpand(groupKey)}
+                                          className="block font-medium text-blue-700 hover:underline"
+                                        >
+                                          {friendlyLabel} · {isExpanded ? 'Hide' : 'Show'} {groupBookings.length} items
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      firstBooking.inventory_items?.item_name ?? '-'
+                                    )}
                                   </td>
-                                  <td className="whitespace-nowrap px-3 py-2 text-gray-500">
-                                    {b.inventory_items?.batch_name ?? '-'}
+                                  <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                                    {isGrouped
+                                      ? Array.from(new Set(groupBookings.map((b) => b.inventory_items?.batch_name ?? '-').filter((n) => n !== '-'))).join(', ') || '-'
+                                      : (firstBooking.inventory_items?.batch_name ?? '-')}
                                   </td>
-                                  <td className="whitespace-nowrap px-3 py-2">{b.buyer_name}</td>
-                                  <td className="whitespace-nowrap px-3 py-2">{formatIDR(b.deal_price)}</td>
-                                  <td className="whitespace-nowrap px-3 py-2">{formatDate(b.deadline)}</td>
-                                  <td className="whitespace-nowrap px-3 py-2">{renderBookingActions(b)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">{firstBooking.buyer_name}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    {isGrouped ? (
+                                      <span className="text-gray-600">{formatIDR(totalDealPrice)} total</span>
+                                    ) : (
+                                      formatIDR(firstBooking.deal_price)
+                                    )}
+                                  </td>
+                                  {groupBy === 'date' && (
+                                    <td className="whitespace-nowrap px-3 py-2">
+                                      <span
+                                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                                          firstBooking.status === 'active'
+                                            ? 'bg-blue-100 text-blue-800'
+                                            : firstBooking.status === 'converted_to_sale'
+                                              ? 'bg-green-100 text-green-800'
+                                              : 'bg-gray-100 text-gray-800'
+                                        }`}
+                                      >
+                                        {formatStatus(firstBooking.status)}
+                                      </span>
+                                    </td>
+                                  )}
+                                  <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    {!isGrouped && renderBookingActions(firstBooking)}
+                                  </td>
                                 </tr>
-                              ))}
-                            </Fragment>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                                {/* Expanded item rows for grouped bookings */}
+                                {isGrouped && isExpanded && groupBookings.map((b) => (
+                                  <tr key={b.id} className="bg-gray-50 text-xs">
+                                    <td className="whitespace-nowrap px-3 py-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedBookingIds.includes(b.id)}
+                                        onChange={() => toggleBookingSelection(b.id)}
+                                        className="h-4 w-4 rounded border-gray-300"
+                                      />
+                                    </td>
+                                    <td className="whitespace-nowrap px-3 py-2 pl-8">
+                                      {b.inventory_items?.item_name ?? '-'}
+                                    </td>
+                                    <td className="whitespace-nowrap px-3 py-2 text-gray-500">
+                                      {b.inventory_items?.batch_name ?? '-'}
+                                    </td>
+                                    <td className="whitespace-nowrap px-3 py-2">{b.buyer_name}</td>
+                                    <td className="whitespace-nowrap px-3 py-2">{formatIDR(b.deal_price)}</td>
+                                    {groupBy === 'date' && (
+                                      <td className="whitespace-nowrap px-3 py-2">
+                                        <span
+                                          className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                                            b.status === 'active'
+                                              ? 'bg-blue-100 text-blue-800'
+                                              : b.status === 'converted_to_sale'
+                                                ? 'bg-green-100 text-green-800'
+                                                : 'bg-gray-100 text-gray-800'
+                                          }`}
+                                        >
+                                          {formatStatus(b.status)}
+                                        </span>
+                                      </td>
+                                    )}
+                                    <td className="whitespace-nowrap px-3 py-2">{formatDate(b.deadline)}</td>
+                                    <td className="whitespace-nowrap px-3 py-2">{renderBookingActions(b)}</td>
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
                 )}
               </div>
             )
@@ -1155,7 +1431,7 @@ export default function Bookings() {
                         .map((i) => i.inventory_item_id)
                         .filter(Boolean)
                       return (
-                        <div key={`${item.inventory_item_id}-${index}`} className="flex items-start gap-2">
+                        <div key={`${item.inventory_item_id}-${index}`} className="relative z-10 focus-within:z-30 transition-all flex items-start gap-2">
                           <div className="min-w-0 flex-1">
                             <ItemCombobox
                               required
@@ -1330,11 +1606,11 @@ export default function Bookings() {
                   ? bookingGroupFriendlyLabel(b.booking_group_id, bookings, knownGroupIds)
                   : null
                 return (
-                  <div key={b.id} className="flex items-center justify-between rounded bg-white p-1.5 border border-gray-100">
-                    <span className="truncate max-w-[200px] font-medium text-gray-800">
+                  <div key={b.id} className="flex flex-wrap items-center justify-between gap-1 rounded bg-white p-1.5 border border-gray-100">
+                    <span className="truncate max-w-[130px] sm:max-w-[200px] font-medium text-gray-800">
                       {b.inventory_items?.item_name ?? 'Unknown item'} ({b.buyer_name})
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 text-xs">
                       {groupLabel ? (
                         <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-800">
                           {groupLabel}
@@ -1420,11 +1696,11 @@ export default function Bookings() {
 
             {bulkSaleError && <p className="text-sm text-red-600">{bulkSaleError}</p>}
 
-            <div className="flex justify-end gap-2">
+            <div className="sticky bottom-0 bg-white pt-2 pb-1 flex flex-wrap justify-end gap-2 border-t border-gray-100">
               <button
                 type="button"
                 onClick={() => setShowBulkSaleModal(false)}
-                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 Cancel
               </button>

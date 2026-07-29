@@ -20,11 +20,50 @@ interface BuyerSummary {
   fulfillmentSummary: Record<FulfillmentStatus, number>
 }
 
+export function generateInvoiceText(buyerName: string, activeBookings: BuyerBooking[], includeItemList: boolean): string {
+  const qty = activeBookings.length
+  const totalItemPrice = activeBookings.reduce((sum, b) => sum + b.deal_price, 0)
+  const formattedTotal = formatIDR(totalItemPrice)
+
+  let itemListSection = ''
+  if (includeItemList && activeBookings.length > 0) {
+    const itemsText = activeBookings
+      .map((b) => `- ${b.inventory_items?.item_name ?? 'Item'}: ${formatIDR(b.deal_price)}`)
+      .join('\n')
+    itemListSection = itemsText + '\n'
+  }
+
+  return `*INVOICE - NEW BUYER ${buyerName.toUpperCase()}* 🦄
+*🛒 PESANAN*
+${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
+- Packing: Rp. 3k
+- Ongkir: Rp. 
+- TOTAL: ${formattedTotal}
+
+(Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
+
+💳 PEMBAYARAN (a.n Benedictus Jody Setiawan)
+- BCA: 6041522337
+- DANA: 08161928280
+
+*⚠️ KETENTUAN WAJIB*
+1. Bayar maksimal *1x10 menit* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
+2. Pastikan Nama, Alamat, dan No. HP sudah *BENAR*.
+3. *❌ TIDAK TERIMA KOMPLAIN* untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
+4. *📦 Syarat Komplain Lain (Kompensasi):* Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
+5. *Wajib kirim bukti transfer ke sini.*
+
+*Thank you for shopping!* ✨`
+}
+
 export default function Buyers() {
   const [bookings, setBookings] = useState<BuyerBooking[]>([])
   const [sales, setSales] = useState<BuyerSale[]>([])
   const [search, setSearch] = useState('')
   const [selectedBuyer, setSelectedBuyer] = useState<BuyerSummary | null>(null)
+  const [invoiceBuyer, setInvoiceBuyer] = useState<BuyerSummary | null>(null)
+  const [includeItemList, setIncludeItemList] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -103,8 +142,36 @@ export default function Buyers() {
       .map((entry) => entry.summary)
   }, [bookings, sales, search])
 
+  function showToast(msg: string) {
+    setToast(msg)
+    setTimeout(() => setToast(null), 3000)
+  }
+
+  function handleCopyInvoice(buyer: BuyerSummary) {
+    const activeBookings = buyer.bookings.filter((b) => b.status === 'active')
+    if (activeBookings.length === 0) return
+    setInvoiceBuyer(buyer)
+    setIncludeItemList(false)
+  }
+
+  async function executeCopy() {
+    if (!invoiceBuyer) return
+    const activeBookings = invoiceBuyer.bookings.filter((b) => b.status === 'active')
+    const text = generateInvoiceText(invoiceBuyer.buyer, activeBookings, includeItemList)
+    await navigator.clipboard.writeText(text)
+    showToast('Invoice copied to clipboard!')
+    setInvoiceBuyer(null)
+  }
+
   return (
     <div className="space-y-4">
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-lg">
+          {toast}
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-gray-900">Buyers</h1>
       </div>
@@ -131,36 +198,100 @@ export default function Buyers() {
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Profit</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Last Activity</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {buyerSummaries.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
                     No buyers found.
                   </td>
                 </tr>
               ) : (
-                buyerSummaries.map((buyer) => (
-                  <tr key={buyer.buyer} className="hover:bg-gray-50">
-                    <td className="whitespace-nowrap px-3 py-2">
-                      <button onClick={() => setSelectedBuyer(buyer)} className="font-medium text-blue-700 hover:underline">
-                        {buyer.buyer}
-                      </button>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2">{buyer.bookings.filter((booking) => booking.status === 'active').length}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{buyer.sales.length}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.revenue)}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.netProfit)}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastActivity)}</td>
-                  </tr>
-                ))
+                buyerSummaries.map((buyer) => {
+                  const activeBookingsCount = buyer.bookings.filter((booking) => booking.status === 'active').length
+                  return (
+                    <tr key={buyer.buyer} className="hover:bg-gray-50">
+                      <td className="whitespace-nowrap px-3 py-2">
+                        <button onClick={() => setSelectedBuyer(buyer)} className="font-medium text-blue-700 hover:underline">
+                          {buyer.buyer}
+                        </button>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2">{activeBookingsCount}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{buyer.sales.length}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.revenue)}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.netProfit)}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastActivity)}</td>
+                      <td className="whitespace-nowrap px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyInvoice(buyer)}
+                          disabled={activeBookingsCount === 0}
+                          title={activeBookingsCount === 0 ? 'No active bookings to invoice' : 'Generate & copy invoice'}
+                          className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Copy Invoice
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
         </div>
       )}
 
+      {/* Invoice Preview Modal */}
+      {invoiceBuyer && (
+        <Modal title={`Invoice - ${invoiceBuyer.buyer}`} onClose={() => setInvoiceBuyer(null)}>
+          <div className="space-y-4">
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={includeItemList}
+                onChange={(e) => setIncludeItemList(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              Include itemized list breakdown
+            </label>
+
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-500">Invoice Preview:</label>
+              <textarea
+                readOnly
+                rows={14}
+                value={generateInvoiceText(
+                  invoiceBuyer.buyer,
+                  invoiceBuyer.bookings.filter((b) => b.status === 'active'),
+                  includeItemList
+                )}
+                className="w-full rounded-md border border-gray-300 bg-gray-50 p-3 font-mono text-xs text-gray-800 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setInvoiceBuyer(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void executeCopy()}
+                className="rounded-md bg-purple-700 px-4 py-2 text-sm font-medium text-white hover:bg-purple-800"
+              >
+                Copy to Clipboard
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Buyer Detail Modal */}
       {selectedBuyer && (
         <Modal title={selectedBuyer.buyer} onClose={() => setSelectedBuyer(null)} wide>
           <div className="space-y-5">
@@ -205,8 +336,19 @@ export default function Buyers() {
               </div>
             </section>
 
-            <section>
-              <h2 className="mb-2 font-medium text-gray-900">Active bookings</h2>
+            <section className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h2 className="font-medium text-gray-900">Active bookings</h2>
+                {selectedBuyer.bookings.filter((booking) => booking.status === 'active').length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopyInvoice(selectedBuyer)}
+                    className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800"
+                  >
+                    Copy Invoice
+                  </button>
+                )}
+              </div>
               {selectedBuyer.bookings.filter((booking) => booking.status === 'active').length === 0 ? (
                 <p className="text-sm text-gray-400">No active bookings.</p>
               ) : (

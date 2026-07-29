@@ -224,74 +224,115 @@ export default function Batches() {
       {loading ? (
         <p className="text-gray-500">Loading batches...</p>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch Name</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch Modal</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked Revenue</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sales Revenue</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Revenue</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery Profit</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery %</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Items</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Ready</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sold</th>
-                <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {filteredBatches.length === 0 ? (
+        <>
+          {/* Mobile / Tablet List View (< 768px) */}
+          <div className="space-y-2.5 md:hidden">
+            {filteredBatches.length === 0 ? (
+              <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
+                No batches found.
+              </div>
+            ) : (
+              filteredBatches.map((batch) => {
+                const barWidth = `${Math.min(100, Math.round(batch.recoveryPercent))}%`
+                return (
+                  <button
+                    key={batch.batchName}
+                    type="button"
+                    onClick={() => setSelectedBatch(batch)}
+                    className="block w-full min-h-[52px] rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm hover:border-gray-300 hover:bg-gray-50 focus:outline-none transition-colors"
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="font-semibold text-gray-900 text-sm truncate">{batch.batchName}</span>
+                      <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
+                        {batch.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-gray-500">Recovery: <strong className="font-medium text-gray-800">{Math.round(batch.recoveryPercent)}%</strong></span>
+                      <div className="w-28 sm:w-36 h-2 rounded-full bg-gray-200">
+                        <div className="h-2 rounded-full bg-gray-700" style={{ width: barWidth }} />
+                      </div>
+                    </div>
+                  </button>
+                )
+              })
+            )}
+          </div>
+
+          {/* Desktop Table View (≥ 768px) */}
+          <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-200 bg-white">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50">
                 <tr>
-                  <td colSpan={12} className="px-3 py-6 text-center text-gray-400">
-                    No batches found.
-                  </td>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch Name</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch Modal</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked Revenue</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sales Revenue</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Revenue</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery Profit</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery / Item</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Recovery %</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Total Items</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Ready</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sold</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
                 </tr>
-              ) : (
-                filteredBatches.map((batch) => {
-                  const barWidth = `${Math.min(100, Math.round(batch.recoveryPercent))}%`
-                  return (
-                    <tr key={batch.batchName} className="hover:bg-gray-50">
-                      <td className="whitespace-nowrap px-3 py-3">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedBatch(batch)}
-                          className="font-medium text-blue-700 hover:underline"
-                        >
-                          {batch.batchName}
-                        </button>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.batchModal)}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.bookedRevenue)}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.salesRevenue)}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.totalRevenue)}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.profit)}</td>
-                      <td className="whitespace-nowrap px-3 py-3">
-                        <div className="min-w-[140px] space-y-1">
-                          <div className="text-xs text-gray-500">{Math.round(batch.recoveryPercent)}%</div>
-                          <div className="h-2 rounded-full bg-gray-200">
-                            <div className="h-2 rounded-full bg-gray-700" style={{ width: barWidth }} />
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filteredBatches.length === 0 ? (
+                  <tr>
+                    <td colSpan={13} className="px-3 py-6 text-center text-gray-400">
+                      No batches found.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredBatches.map((batch) => {
+                    const barWidth = `${Math.min(100, Math.round(batch.recoveryPercent))}%`
+                    return (
+                      <tr key={batch.batchName} className="hover:bg-gray-50">
+                        <td className="whitespace-nowrap px-3 py-3">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedBatch(batch)}
+                            className="font-medium text-blue-700 hover:underline"
+                          >
+                            {batch.batchName}
+                          </button>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.batchModal)}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.bookedRevenue)}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.salesRevenue)}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.totalRevenue)}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{formatIDR(batch.profit)}</td>
+                        <td className="whitespace-nowrap px-3 py-3 font-medium">
+                          {batch.readyCount > 0 ? formatIDR(Math.round(batch.profit / batch.readyCount)) : 'N/A'}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3">
+                          <div className="min-w-[140px] space-y-1">
+                            <div className="text-xs text-gray-500">{Math.round(batch.recoveryPercent)}%</div>
+                            <div className="h-2 rounded-full bg-gray-200">
+                              <div className="h-2 rounded-full bg-gray-700" style={{ width: barWidth }} />
+                            </div>
                           </div>
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-3">{batch.totalItems}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{batch.readyCount}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{batch.bookedCount}</td>
-                      <td className="whitespace-nowrap px-3 py-3">{batch.soldCount}</td>
-                      <td className="whitespace-nowrap px-3 py-3">
-                        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
-                          {batch.status}
-                        </span>
-                      </td>
-                    </tr>
-                  )
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3">{batch.totalItems}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{batch.readyCount}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{batch.bookedCount}</td>
+                        <td className="whitespace-nowrap px-3 py-3">{batch.soldCount}</td>
+                        <td className="whitespace-nowrap px-3 py-3">
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
+                            {batch.status}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
 
       {selectedBatch && (
@@ -317,6 +358,14 @@ export default function Batches() {
               <div className="rounded-md bg-gray-50 p-3 text-sm">
                 <p className="text-gray-500">Recovery Profit</p>
                 <p className="font-medium text-gray-900">{formatIDR(selectedBatch.profit)}</p>
+              </div>
+              <div className="rounded-md bg-gray-50 p-3 text-sm">
+                <p className="text-gray-500">Recovery / Item</p>
+                <p className="font-medium text-gray-900">
+                  {selectedBatch.readyCount > 0
+                    ? formatIDR(Math.round(selectedBatch.profit / selectedBatch.readyCount))
+                    : 'N/A'}
+                </p>
               </div>
               <div className="rounded-md bg-gray-50 p-3 text-sm">
                 <p className="text-gray-500">Recovery %</p>
