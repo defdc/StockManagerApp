@@ -1605,10 +1605,11 @@ export default function Bookings() {
                 const groupLabel = b.booking_group_id
                   ? bookingGroupFriendlyLabel(b.booking_group_id, bookings, knownGroupIds)
                   : null
+                const standaloneLabel = b.buyer_name?.trim() || 'No buyer'
                 return (
                   <div key={b.id} className="flex flex-wrap items-center justify-between gap-1 rounded bg-white p-1.5 border border-gray-100">
                     <span className="truncate max-w-[130px] sm:max-w-[200px] font-medium text-gray-800">
-                      {b.inventory_items?.item_name ?? 'Unknown item'} ({b.buyer_name})
+                      {b.inventory_items?.item_name ?? 'Unknown item'}
                     </span>
                     <div className="flex items-center gap-2 text-xs">
                       {groupLabel ? (
@@ -1616,7 +1617,9 @@ export default function Bookings() {
                           {groupLabel}
                         </span>
                       ) : (
-                        <span className="text-[10px] text-gray-400">Standalone</span>
+                        <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">
+                          {standaloneLabel}
+                        </span>
                       )}
                       <span className="font-semibold text-gray-900">{formatIDR(b.deal_price)}</span>
                     </div>
