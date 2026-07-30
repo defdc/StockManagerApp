@@ -33,12 +33,12 @@ export function generateInvoiceText(buyerName: string, activeBookings: BuyerBook
     itemListSection = itemsText + '\n'
   }
 
-  return `*INVOICE - NEW BUYER ${buyerName.toUpperCase()}* 🦄
+  return `*INVOICE - BUYER ${buyerName.toUpperCase()}* 🦄
 *🛒 PESANAN*
 ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 - Packing: Rp. 3k
 - Ongkir: Rp. 
-- TOTAL: ${formattedTotal}
+- TOTAL:
 
 (Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
 
@@ -47,11 +47,12 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 - DANA: 08161928280
 
 *⚠️ KETENTUAN WAJIB*
-1. Bayar maksimal *1x10 menit* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
-2. Pastikan Nama, Alamat, dan No. HP sudah *BENAR*.
-3. *❌ TIDAK TERIMA KOMPLAIN* untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
-4. *📦 Syarat Komplain Lain (Kompensasi):* Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
-5. *Wajib kirim bukti transfer ke sini.*
+1. Bayar maksimal buyer baru *1x10 menit* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
+2. Bayar maksimal buyer lama *2x24 jam* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
+3. Pastikan Nama, Alamat, dan No. HP sudah *BENAR*.
+4. *❌ TIDAK TERIMA KOMPLAIN* untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
+5. *📦 Syarat Komplain Lain (Kompensasi):* Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
+6. *Wajib kirim bukti transfer ke sini.*
 
 *Thank you for shopping!* ✨`
 }
