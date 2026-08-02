@@ -17,8 +17,13 @@ import {
 
 type InventoryAggregate = Pick<InventoryItem, 'id' | 'status' | 'quantity' | 'modal_price' | 'batch_name' | 'batch_modal_total'>
 type SaleWithItem = Sale & { inventory_items: { item_name: string } | null }
-type SaleWithBatch = Pick<Sale, 'id' | 'net_profit' | 'sale_price'> & {
-  inventory_items: { batch_name: string | null } | null
+
+function getBatchName(inventoryItems: unknown): string {
+  if (!inventoryItems) return 'Unassigned'
+  if (Array.isArray(inventoryItems)) {
+    return (inventoryItems[0] as { batch_name?: string | null } | undefined)?.batch_name?.trim() || 'Unassigned'
+  }
+  return (inventoryItems as { batch_name?: string | null }).batch_name?.trim() || 'Unassigned'
 }
 
 interface DashboardData {
@@ -35,6 +40,9 @@ interface DashboardData {
   revenue: number
   grossProfit: number
   netProfit: number
+  totalRecoveryProfit: number
+  weekRecoveryProfit: number
+  monthRecoveryProfit: number
   recentSales: SaleWithItem[]
   lowStockItems: InventoryItem[]
   topProfitSales: SaleWithItem[]
@@ -62,7 +70,7 @@ export default function Dashboard() {
       setError(null)
 
       try {
-        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, batchSalesRes] =
+        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, activeBookings] =
           await Promise.all([
             supabase.from('inventory_items').select('id', { count: 'exact', head: true }),
             fetchAllRows<InventoryAggregate>((from, to) =>
@@ -75,9 +83,9 @@ export default function Dashboard() {
             fetchAllRows<SaleSummaryInput>((from, to) =>
               supabase
                 .from('sales')
-                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status')
+                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status, inventory_items(batch_name)')
                 .order('id')
-                .range(from, to)
+                .range(from, to) as unknown as PromiseLike<{ data: SaleSummaryInput[] | null; error: { message: string } | null }>
             ),
             fetchAllRows<ExpenseSummaryInput>((from, to) =>
               supabase.from('expenses').select('id, amount, expense_date').order('id').range(from, to)
@@ -99,11 +107,16 @@ export default function Dashboard() {
               .select('*, inventory_items(item_name)')
               .order('net_profit', { ascending: false })
               .limit(5),
-            supabase.from('sales').select('id, sale_price, net_profit, inventory_items(batch_name)').limit(1000),
+            fetchAllRows<{ deal_price: number; inventory_items: { batch_name: string | null } | null }>((from, to) =>
+              supabase
+                .from('bookings')
+                .select('deal_price, inventory_items(batch_name)')
+                .eq('status', 'active')
+                .range(from, to) as unknown as PromiseLike<{ data: { deal_price: number; inventory_items: { batch_name: string | null } | null }[] | null; error: { message: string } | null }>
+            ),
           ])
 
-        const firstError =
-          itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error || batchSalesRes.error
+        const firstError = itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error
         if (firstError) throw new Error(firstError.message)
 
         const readyQty = items.filter((i) => i.status === 'ready').length
@@ -130,38 +143,65 @@ export default function Dashboard() {
           buyerRevenue.set(sale.buyer_name, (buyerRevenue.get(sale.buyer_name) ?? 0) + sale.sale_price)
         }
         const topBuyerEntry = [...buyerRevenue.entries()].sort((a, b) => b[1] - a[1])[0]
-        const batchProfit = new Map<string, number>()
-        for (const sale of ((batchSalesRes.data as unknown as SaleWithBatch[]) ?? [])) {
-          const batchName = sale.inventory_items?.batch_name
-          if (!batchName) continue
-          batchProfit.set(batchName, (batchProfit.get(batchName) ?? 0) + sale.net_profit)
-        }
-        const highestProfitBatchEntry = [...batchProfit.entries()].sort((a, b) => b[1] - a[1])[0]
 
-        const batchSummaryMap = new Map<string, { revenue: number; batchModal: number; status: string }>()
+        // Calculate Batch Recovery % (including sales and active booked revenue)
+        const batchRecoveryMap = new Map<string, { batchModal: number; salesRevenue: number; bookedRevenue: number; netProfit: number }>()
+
         for (const item of items) {
           const batchName = item.batch_name?.trim() || 'Unassigned'
-          const current = batchSummaryMap.get(batchName) ?? { revenue: 0, batchModal: item.batch_modal_total ?? 0, status: 'No Sales' }
+          const current = batchRecoveryMap.get(batchName) ?? { batchModal: item.batch_modal_total ?? 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
           if ((item.batch_modal_total ?? 0) > 0 && current.batchModal === 0) {
             current.batchModal = item.batch_modal_total ?? 0
           }
-          batchSummaryMap.set(batchName, current)
+          batchRecoveryMap.set(batchName, current)
         }
-        for (const sale of ((batchSalesRes.data as unknown as SaleWithBatch[]) ?? [])) {
-          const batchName = sale.inventory_items?.batch_name
-          if (!batchName) continue
-          const current = batchSummaryMap.get(batchName) ?? { revenue: 0, batchModal: 0, status: 'No Sales' }
-          current.revenue += sale.sale_price
-          batchSummaryMap.set(batchName, current)
+
+        for (const sale of sales) {
+          const batchName = getBatchName(sale.inventory_items)
+          const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
+          current.salesRevenue += sale.sale_price
+          current.netProfit += sale.net_profit
+          batchRecoveryMap.set(batchName, current)
         }
-        const batchSummary = Array.from(batchSummaryMap.values()).reduce(
+
+        for (const booking of activeBookings) {
+          const batchName = getBatchName(booking.inventory_items)
+          const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
+          current.bookedRevenue += booking.deal_price
+          batchRecoveryMap.set(batchName, current)
+        }
+
+        const highestProfitBatchEntry = [...batchRecoveryMap.entries()].sort((a, b) => b[1].netProfit - a[1].netProfit)[0]
+
+        const recoveredBatchNames = new Set<string>()
+        for (const [batchName, bData] of batchRecoveryMap.entries()) {
+          const totalRev = bData.salesRevenue + bData.bookedRevenue
+          if (bData.batchModal > 0 && totalRev >= bData.batchModal) {
+            recoveredBatchNames.add(batchName)
+          }
+        }
+
+        function calculateRecoveryProfitForSales(salesList: SaleSummaryInput[]) {
+          return salesList.reduce((sum, sale) => {
+            const batchName = getBatchName(sale.inventory_items)
+            if (recoveredBatchNames.has(batchName)) {
+              return sum + sale.gross_profit
+            }
+            return sum
+          }, 0)
+        }
+
+        const totalRecoveryProfit = calculateRecoveryProfitForSales(sales)
+
+        const batchSummary = Array.from(batchRecoveryMap.values()).reduce(
           (summary, batch) => {
-            if (batch.revenue === 0) summary.noSalesBatches += 1
-            else if (batch.batchModal > 0 && batch.revenue < batch.batchModal) summary.inProgressBatches += 1
+            const totalRev = batch.salesRevenue + batch.bookedRevenue
+            if (totalRev === 0) summary.noSalesBatches += 1
+            else if (batch.batchModal > 0 && totalRev < batch.batchModal) summary.inProgressBatches += 1
             else summary.profitableBatches += 1
             return summary
           },
-          { totalBatches: batchSummaryMap.size, profitableBatches: 0, inProgressBatches: 0, noSalesBatches: 0 }
+          { totalBatches: batchRecoveryMap.size, profitableBatches: 0, inProgressBatches: 0, noSalesBatches: 0 }
         )
         const fulfillmentSummary = sales.reduce(
           (summary, sale) => {
@@ -172,12 +212,15 @@ export default function Dashboard() {
           { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 }
         )
 
-        // Calculate Period Summaries using shared logic
+        // Calculate Period Summaries
         const weekBounds = getWeekBounds(0)
         const monthBounds = getMonthBounds(0)
 
         const weekSummary = calculatePeriodSummary(sales, expenses, weekBounds.start, weekBounds.end, weekBounds.label, 'week')
         const monthSummary = calculatePeriodSummary(sales, expenses, monthBounds.start, monthBounds.end, monthBounds.label, 'month')
+
+        const weekRecoveryProfit = calculateRecoveryProfitForSales(weekSummary.sales)
+        const monthRecoveryProfit = calculateRecoveryProfitForSales(monthSummary.sales)
 
         setData({
           totalItems: itemCountRes.count ?? 0,
@@ -190,11 +233,14 @@ export default function Dashboard() {
           soldThisMonth,
           topBuyer: topBuyerEntry ? `${topBuyerEntry[0]} (${formatIDR(topBuyerEntry[1])})` : '-',
           highestProfitBatch: highestProfitBatchEntry
-            ? `${highestProfitBatchEntry[0]} (${formatIDR(highestProfitBatchEntry[1])})`
+            ? `${highestProfitBatchEntry[0]} (${formatIDR(highestProfitBatchEntry[1].netProfit)})`
             : '-',
           revenue,
           grossProfit,
           netProfit,
+          totalRecoveryProfit,
+          weekRecoveryProfit,
+          monthRecoveryProfit,
           recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
           lowStockItems: lowStockRes.data ?? [],
           topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
@@ -280,8 +326,11 @@ export default function Dashboard() {
                 <p className="font-semibold text-gray-900">{formatIDR(data.weekSummary.expenses)}</p>
               </div>
               <div>
-                <p className="text-xs text-gray-500">Net Profit</p>
-                <p className="font-semibold text-green-700">{formatIDR(data.weekSummary.netProfit)}</p>
+                <p className="text-xs text-gray-500">Recovery Profit</p>
+                <p className="font-semibold text-green-700">{formatIDR(data.weekRecoveryProfit)}</p>
+                <p className="text-[10px] text-gray-400 mt-0.5 leading-tight" title="Profit from sales in batches that have fully recovered their modal">
+                  Profit from sales in batches that have fully recovered their modal
+                </p>
               </div>
             </div>
             <p className="text-xs text-gray-500">Top Buyer: <span className="font-medium text-gray-800">{data.weekSummary.topBuyer}</span></p>
@@ -312,8 +361,11 @@ export default function Dashboard() {
                 <p className="font-semibold text-gray-900">{formatIDR(data.monthSummary.expenses)}</p>
               </div>
               <div>
-                <p className="text-xs text-gray-500">Net Profit</p>
-                <p className="font-semibold text-green-700">{formatIDR(data.monthSummary.netProfit)}</p>
+                <p className="text-xs text-gray-500">Recovery Profit</p>
+                <p className="font-semibold text-green-700">{formatIDR(data.monthRecoveryProfit)}</p>
+                <p className="text-[10px] text-gray-400 mt-0.5 leading-tight" title="Profit from sales in batches that have fully recovered their modal">
+                  Profit from sales in batches that have fully recovered their modal
+                </p>
               </div>
             </div>
             <p className="text-xs text-gray-500">Top Buyer: <span className="font-medium text-gray-800">{data.monthSummary.topBuyer}</span></p>
@@ -329,7 +381,11 @@ export default function Dashboard() {
         <StatCard label="Total modal value" value={formatIDR(data.modalValue)} subtext="ready + booked stock" />
         <StatCard label="Total revenue" value={formatIDR(data.revenue)} />
         <StatCard label="Total gross profit" value={formatIDR(data.grossProfit)} />
-        <StatCard label="Total net profit" value={formatIDR(data.netProfit)} subtext="after general expenses" />
+        <StatCard
+          label="Total Recovery Profit"
+          value={formatIDR(data.totalRecoveryProfit)}
+          subtext="Profit from sales in batches that have fully recovered their modal"
+        />
         <StatCard label="Ready Inventory Value" value={formatIDR(data.readyInventoryValue)} />
         <StatCard label="Booked Inventory Value" value={formatIDR(data.bookedInventoryValue)} />
         <StatCard label="Sold This Month" value={String(data.soldThisMonth)} subtext="sales" />

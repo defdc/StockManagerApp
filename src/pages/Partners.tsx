@@ -5,6 +5,7 @@ import type { InventoryItem, Partner, PartnerWithdrawal } from '../types/databas
 import DataTable, { type Column } from '../components/DataTable'
 import StatCard from '../components/StatCard'
 import Modal from '../components/Modal'
+import { useAuth } from '../lib/auth'
 
 interface SaleProfit {
   net_profit: number
@@ -22,6 +23,7 @@ const emptyPartnerForm = { name: '', email: '' }
 const emptyWithdrawalForm = { partner_id: '', amount: '0', withdrawal_date: todayISO(), notes: '' }
 
 export default function Partners() {
+  const { canWrite } = useAuth()
   const [partners, setPartners] = useState<Partner[]>([])
   const [items, setItems] = useState<InventoryItem[]>([])
   const [sales, setSales] = useState<SaleProfit[]>([])
@@ -192,20 +194,22 @@ export default function Partners() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-gray-900">Partners & Settlement</h1>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowWithdrawalModal(true)}
-            className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-          >
-            + Record withdrawal
-          </button>
-          <button
-            onClick={() => setShowPartnerModal(true)}
-            className="rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800"
-          >
-            + Add partner
-          </button>
-        </div>
+        {canWrite && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowWithdrawalModal(true)}
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              + Record withdrawal
+            </button>
+            <button
+              onClick={() => setShowPartnerModal(true)}
+              className="rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800"
+            >
+              + Add partner
+            </button>
+          </div>
+        )}
       </div>
 
       <p className="text-sm text-gray-500">

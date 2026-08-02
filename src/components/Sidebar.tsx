@@ -17,7 +17,7 @@ const links = [
 ]
 
 export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
-  const { user } = useAuth()
+  const { user, role } = useAuth()
 
   return (
     <div className="flex h-full flex-col bg-white border-r border-pink-100 text-gray-800 shadow-sm">
@@ -28,7 +28,12 @@ export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           className="h-10 w-auto object-contain mb-1 drop-shadow-sm"
         />
         <p className="text-base font-bold text-gray-900 tracking-tight">{APP_NAME}</p>
-        <p className="truncate text-xs text-gray-500 font-medium">{user?.email}</p>
+        <div className="flex items-center gap-1.5 mt-0.5 max-w-full">
+          <p className="truncate text-xs text-gray-500 font-medium">{user?.email}</p>
+          <span className="shrink-0 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-pink-800">
+            {role}
+          </span>
+        </div>
       </div>
       <nav className="flex-1 space-y-1 p-2">
         {links.map((link) => (

@@ -49,7 +49,7 @@ interface PricedPreviewRow {
 }
 
 export default function ImportExcel() {
-  const { user } = useAuth()
+  const { user, canWrite } = useAuth()
   const [workbook, setWorkbook] = useState<XLSX.WorkBook | null>(null)
   const [fileName, setFileName] = useState('')
   const [sheetNames, setSheetNames] = useState<string[]>([])
@@ -593,33 +593,52 @@ export default function ImportExcel() {
         deleted or overwritten — each import creates a new history entry.
       </p>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-4">
-        <div>
-          <label className="mb-1 block text-sm font-medium text-gray-700">Excel file (.xlsx)</label>
-          <input
-            type="file"
-            accept=".xlsx,.xls"
-            onChange={handleFileChange}
-            className="block w-full text-sm text-gray-700"
-          />
+      {!canWrite ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-800">
+          Read-only mode: File upload and importing are disabled for the Viewer role.
         </div>
-
-        {sheetNames.length > 0 && (
+      ) : (
+        <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">Sheet</label>
-            <select
-              value={selectedSheet}
-              onChange={(e) => handleSheetSelect(e.target.value)}
-              className="w-full max-w-sm rounded-md border border-gray-300 px-3 py-2 text-sm"
-            >
-              {sheetNames.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+            <label className="mb-1 block text-sm font-medium text-gray-700">Excel file (.xlsx)</label>
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={handleFileChange}
+              className="block w-full text-sm text-gray-700"
+            />
           </div>
-        )}
+
+          {sheetNames.length > 0 && (
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Sheet</label>
+              <select
+                value={selectedSheet}
+                onChange={(e) => handleSheetSelect(e.target.value)}
+                className="w-full max-w-sm rounded-md border border-gray-300 px-3 py-2 text-sm"
+              >
+                {sheetNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {sheetNames.length > 0 && (
+            <button
+              onClick={handleImport}
+              disabled={importing}
+              className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+            >
+              {importing
+                ? `Importing... ${progress.done}/${progress.total}`
+                : 'Save raw rows & import inventory'}
+            </button>
+          )}
+
+          {error && <p className="text-sm text-red-600">{error}</p>}
 
         {previewRows.length > 0 && (
           <div>
@@ -816,20 +835,9 @@ export default function ImportExcel() {
           </div>
         )}
 
-        {sheetNames.length > 0 && (
-          <button
-            onClick={handleImport}
-            disabled={importing}
-            className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
-          >
-            {importing
-              ? `Importing... ${progress.done}/${progress.total}`
-              : 'Save raw rows & import inventory'}
-          </button>
-        )}
-
         {error && <p className="text-sm text-red-600">{error}</p>}
-      </div>
+        </div>
+      )}
 
       {result && (
         <div className="rounded-lg border border-green-200 bg-green-50 p-4">
@@ -897,14 +905,15 @@ export default function ImportExcel() {
                           >
                             View items
                           </button>
-                          {!isReverted ? (
+                          {canWrite && !isReverted && (
                             <button
                               onClick={() => openDeleteModal(imp)}
                               className="text-xs font-medium text-red-600 hover:underline"
                             >
                               Delete import
                             </button>
-                          ) : (
+                          )}
+                          {isReverted && (
                             <span className="text-xs text-gray-400">Reverted</span>
                           )}
                         </div>

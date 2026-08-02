@@ -15,7 +15,7 @@ const emptyForm = {
 }
 
 export default function Expenses() {
-  const { user } = useAuth()
+  const { user, canWrite } = useAuth()
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -96,36 +96,44 @@ export default function Expenses() {
     else loadExpenses()
   }
 
-  const columns: Column<Expense>[] = [
+  const baseColumns: Column<Expense>[] = [
     { header: 'Date', render: (e) => formatDate(e.expense_date) },
     { header: 'Type', render: (e) => e.type },
     { header: 'Amount', render: (e) => formatIDR(e.amount) },
     { header: 'Notes', render: (e) => e.notes ?? '-' },
-    {
-      header: 'Actions',
-      render: (e) => (
-        <div className="flex gap-2">
-          <button onClick={() => openEditModal(e)} className="text-blue-600 hover:underline">
-            Edit
-          </button>
-          <button onClick={() => handleDelete(e)} className="text-red-600 hover:underline">
-            Delete
-          </button>
-        </div>
-      ),
-    },
   ]
+
+  const columns: Column<Expense>[] = canWrite
+    ? [
+        ...baseColumns,
+        {
+          header: 'Actions',
+          render: (e) => (
+            <div className="flex gap-2">
+              <button onClick={() => openEditModal(e)} className="text-blue-600 hover:underline">
+                Edit
+              </button>
+              <button onClick={() => handleDelete(e)} className="text-red-600 hover:underline">
+                Delete
+              </button>
+            </div>
+          ),
+        },
+      ]
+    : baseColumns
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-gray-900">Expenses</h1>
-        <button
-          onClick={openAddModal}
-          className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
-        >
-          + Add expense
-        </button>
+        {canWrite && (
+          <button
+            onClick={openAddModal}
+            className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
+          >
+            + Add expense
+          </button>
+        )}
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}

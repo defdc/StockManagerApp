@@ -60,7 +60,7 @@ const emptyGroupEditForm = {
 const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
 
 export default function Sales() {
-  const { user } = useAuth()
+  const { user, canWrite } = useAuth()
   const [sales, setSales] = useState<SaleRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -561,6 +561,7 @@ export default function Sales() {
   }
 
   function renderSaleActions(sale: SaleRow) {
+    if (!canWrite) return null
     return (
       <div className="flex gap-2">
         <button onClick={() => openEditModal(sale)} className="text-blue-600 hover:underline">
@@ -577,6 +578,7 @@ export default function Sales() {
   }
 
   function renderMobileSaleCardActions(sale: SaleRow) {
+    if (!canWrite) return null
     return (
       <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
         <button
@@ -605,6 +607,7 @@ export default function Sales() {
   }
 
   function renderMobileGroupSaleActions(group: SaleGroup) {
+    if (!canWrite) return null
     return (
       <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
         <button
@@ -629,12 +632,14 @@ export default function Sales() {
           >
             Export CSV
           </button>
-          <button
-            onClick={openAddModal}
-            className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
-          >
-            + Add sale
-          </button>
+          {canWrite && (
+            <button
+              onClick={openAddModal}
+              className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
+            >
+              + Add sale
+            </button>
+          )}
         </div>
       </div>
 
@@ -677,24 +682,28 @@ export default function Sales() {
             <span className="font-medium text-gray-900">
               {selectedSaleIds.length} selected · Total {formatIDR(selectedSalesTotal)}
             </span>
-            <button
-              onClick={() => { setBulkShippingStatus('parking'); setBulkActionError(null); setShowBulkShippingModal(true) }}
-              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              Change Shipping Status
-            </button>
-            <button
-              onClick={() => { setBulkActionError(null); setShowBulkUndoConfirm(true) }}
-              className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
-            >
-              Undo Sale
-            </button>
-            <button
-              onClick={() => { setBulkActionError(null); setShowBulkDeleteConfirm(true) }}
-              className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
-            >
-              Delete
-            </button>
+            {canWrite && (
+              <>
+                <button
+                  onClick={() => { setBulkShippingStatus('parking'); setBulkActionError(null); setShowBulkShippingModal(true) }}
+                  className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                >
+                  Change Shipping Status
+                </button>
+                <button
+                  onClick={() => { setBulkActionError(null); setShowBulkUndoConfirm(true) }}
+                  className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                >
+                  Undo Sale
+                </button>
+                <button
+                  onClick={() => { setBulkActionError(null); setShowBulkDeleteConfirm(true) }}
+                  className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+                >
+                  Delete
+                </button>
+              </>
+            )}
             <button
               onClick={() => setSelectedSaleIds([])}
               className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"

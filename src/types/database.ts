@@ -3,11 +3,13 @@ export type BookingStatus = 'active' | 'cancelled' | 'converted_to_sale'
 export type ExpenseType = 'packing' | 'shipping' | 'marketplace_fee' | 'event_fee' | 'other'
 export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'delivered'
 
+export type UserRole = 'admin' | 'editor' | 'viewer'
+
 export interface Profile {
   id: string
   full_name: string | null
   email?: string | null
-  role: string
+  role: UserRole
   created_at: string
 }
 

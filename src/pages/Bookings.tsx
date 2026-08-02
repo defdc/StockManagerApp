@@ -60,7 +60,7 @@ function saveCollapsedStatuses(set: Set<string>) {
 }
 
 export default function Bookings() {
-  const { user } = useAuth()
+  const { user, canWrite } = useAuth()
   const navigate = useNavigate()
   const [bookings, setBookings] = useState<BookingRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -832,6 +832,7 @@ export default function Bookings() {
 
   // Render one booking row's action buttons (Desktop)
   function renderBookingActions(b: BookingRow) {
+    if (!canWrite) return null
     return (
       <div className="flex flex-wrap gap-2">
         {b.status === 'active' && (
@@ -851,6 +852,7 @@ export default function Bookings() {
 
   // Render booking card action buttons (Mobile - min 40px touch targets)
   function renderMobileCardActions(b: BookingRow) {
+    if (!canWrite) return null
     return (
       <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end">
         {b.status === 'active' && (
@@ -891,12 +893,14 @@ export default function Bookings() {
           >
             Export CSV
           </button>
-          <button
-            onClick={openAddModal}
-            className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
-          >
-            + Add booking
-          </button>
+          {canWrite && (
+            <button
+              onClick={openAddModal}
+              className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
+            >
+              + Add booking
+            </button>
+          )}
         </div>
       </div>
 
@@ -961,12 +965,14 @@ export default function Bookings() {
             <span className="font-medium text-gray-900">
               {selectedBookingIds.length} selected · Total {formatIDR(selectedBookingsTotal)}
             </span>
-            <button
-              onClick={openBulkSaleModal}
-              className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800"
-            >
-              Convert Selected to Sale
-            </button>
+            {canWrite && (
+              <button
+                onClick={openBulkSaleModal}
+                className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800"
+              >
+                Convert Selected to Sale
+              </button>
+            )}
             <button
               onClick={() => setSelectedBookingIds([])}
               className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"

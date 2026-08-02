@@ -9,7 +9,7 @@ export interface SaleSummaryInput {
   net_profit: number
   sale_date: string
   fulfillment_status: FulfillmentStatus | null
-  inventory_items?: { item_name: string } | null
+  inventory_items?: { item_name?: string; batch_name?: string | null } | null
 }
 
 export interface ExpenseSummaryInput {

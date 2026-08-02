@@ -66,7 +66,7 @@ function saveCollapsed(set: Set<string>) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Inventory() {
-  const { user } = useAuth()
+  const { user, canWrite } = useAuth()
   const [items, setItems] = useState<InventoryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -534,12 +534,14 @@ export default function Inventory() {
           >
             Export CSV
           </button>
-          <button
-            onClick={openAddModal}
-            className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
-          >
-            + Add item(s)
-          </button>
+          {canWrite && (
+            <button
+              onClick={openAddModal}
+              className="rounded-md bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
+            >
+              + Add item(s)
+            </button>
+          )}
         </div>
       </div>
 
@@ -581,12 +583,14 @@ export default function Inventory() {
         {selectedItemIds.length > 0 && (
           <>
             <span className="text-gray-500">{selectedItemIds.length} selected</span>
-            <button
-              onClick={openBulkBookingModal}
-              className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
-            >
-              Book Selected
-            </button>
+            {canWrite && (
+              <button
+                onClick={openBulkBookingModal}
+                className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+              >
+                Book Selected
+              </button>
+            )}
             <button
               onClick={() => setSelectedItemIds([])}
               className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
@@ -668,22 +672,24 @@ export default function Inventory() {
                           </div>
 
                           {/* Action Buttons (Min 40px touch targets) */}
-                          <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
-                            <button
-                              type="button"
-                              onClick={() => openEditModal(item)}
-                              className="min-h-[40px] rounded-md border border-gray-300 bg-white px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDelete(item)}
-                              className="min-h-[40px] rounded-md border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
-                            >
-                              Delete
-                            </button>
-                          </div>
+                          {canWrite && (
+                            <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
+                              <button
+                                type="button"
+                                onClick={() => openEditModal(item)}
+                                className="min-h-[40px] rounded-md border border-gray-300 bg-white px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(item)}
+                                className="min-h-[40px] rounded-md border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -698,7 +704,7 @@ export default function Inventory() {
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created</th>
-                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                            {canWrite && <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -732,16 +738,18 @@ export default function Inventory() {
                               <td className="whitespace-nowrap px-3 py-2 text-gray-500">
                                 {formatDate(item.created_at)}
                               </td>
-                              <td className="whitespace-nowrap px-3 py-2">
-                                <div className="flex gap-2">
-                                  <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
-                                    Edit
-                                  </button>
-                                  <button onClick={() => handleDelete(item)} className="text-red-600 hover:underline">
-                                    Delete
-                                  </button>
-                                </div>
-                              </td>
+                              {canWrite && (
+                                <td className="whitespace-nowrap px-3 py-2">
+                                  <div className="flex gap-2">
+                                    <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
+                                      Edit
+                                    </button>
+                                    <button onClick={() => handleDelete(item)} className="text-red-600 hover:underline">
+                                      Delete
+                                    </button>
+                                  </div>
+                                </td>
+                              )}
                             </tr>
                           ))}
                         </tbody>
