@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
@@ -61,7 +61,7 @@ function saveCollapsedStatuses(set: Set<string>) {
 
 export default function Bookings() {
   const { user, canWrite } = useAuth()
-  const navigate = useNavigate()
+  const { showToast } = useToast()
   const [bookings, setBookings] = useState<BookingRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -247,7 +247,7 @@ export default function Bookings() {
     if (selectedBookings.length === 0) return
     const invalidBookings = selectedBookings.filter((booking) => booking.status !== 'active' || !booking.inventory_item_id)
     if (invalidBookings.length > 0) {
-      alert('Only active bookings with linked inventory items can be converted in bulk.')
+      showToast('Only active bookings with linked inventory items can be converted in bulk.', 'error')
       return
     }
 
@@ -299,7 +299,7 @@ export default function Bookings() {
 
   function openSingleConvertModal(b: BookingRow) {
     if (!b.inventory_item_id) {
-      alert('This booking has no linked inventory item.')
+      showToast('This booking has no linked inventory item.', 'error')
       return
     }
     setSingleConvertTarget(b)
@@ -623,11 +623,19 @@ export default function Bookings() {
     loadBookings()
   }
 
-  async function handleDelete(b: BookingRow) {
-    if (!confirm(`Delete booking for "${b.buyer_name}"? This cannot be undone.`)) return
+  const [deletingBooking, setDeletingBooking] = useState<BookingRow | null>(null)
+
+  function handleDelete(b: BookingRow) {
+    setDeletingBooking(b)
+  }
+
+  async function confirmDeleteBooking() {
+    if (!deletingBooking) return
+    const b = deletingBooking
     const { error } = await supabase.from('bookings').delete().eq('id', b.id)
     if (error) {
-      alert(error.message)
+      showToast(error.message, 'error')
+      setDeletingBooking(null)
       return
     }
     if (b.status === 'active' && b.inventory_item_id) {
@@ -644,6 +652,8 @@ export default function Bookings() {
       userId: user?.id,
       details: { buyer_name: b.buyer_name },
     })
+    setDeletingBooking(null)
+    showToast('Booking deleted successfully.')
     loadBookings()
   }
 
@@ -679,7 +689,7 @@ export default function Bookings() {
     })
     if (saleError) {
       setSingleConvertSaving(false)
-      alert(saleError.message)
+      showToast(saleError.message, 'error')
       return
     }
 
@@ -694,9 +704,8 @@ export default function Bookings() {
 
     setSingleConvertSaving(false)
     setSingleConvertTarget(null)
-    alert('Booking converted to sale. You can edit fees/costs in the Sales page.')
+    showToast('Booking converted to sale. You can edit fees/costs in the Sales page.')
     loadBookings()
-    navigate('/sales')
   }
 
   async function handleBulkConvertToSale(e: FormEvent) {
@@ -806,8 +815,8 @@ export default function Bookings() {
         buyer_name: bulkSaleForm.buyer_name.trim(),
       },
     })
+    showToast(`${selectedBookings.length} booking(s) converted to sale.`)
     loadBookings()
-    navigate('/sales')
   }
 
   function handleExport() {
@@ -1722,6 +1731,32 @@ export default function Bookings() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {deletingBooking && (
+        <Modal title="Delete booking?" onClose={() => setDeletingBooking(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete the booking for <strong>&ldquo;{deletingBooking.buyer_name}&rdquo;</strong>? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingBooking(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteBooking()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>

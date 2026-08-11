@@ -4,6 +4,7 @@ import { formatDate, formatIDR } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import type { Booking, FulfillmentStatus, Sale } from '../types/database'
 import Modal from '../components/Modal'
+import { useToast } from '../lib/toast'
 
 type BuyerBooking = Booking & { inventory_items: { item_name: string; batch_name: string | null } | null }
 type BuyerSale = Sale & { inventory_items: { item_name: string } | null }
@@ -48,23 +49,18 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 
 *⚠️ KETENTUAN WAJIB*
 1. Bayar maksimal buyer baru *1x10 menit* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
-2. Bayar maksimal buyer lama *2x24 jam* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
-3. Pastikan Nama, Alamat, dan No. HP sudah *BENAR*.
-4. *❌ TIDAK TERIMA KOMPLAIN* untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
-5. *📦 Syarat Komplain Lain (Kompensasi):* Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
-6. *Wajib kirim bukti transfer ke sini.*
-
-*Thank you for shopping!* ✨`
+2. *Wajib* sertakan video unboxing utuh jika ada klaim retur.
+3. *Wajib* isi format order dengan *Lengkap* (terutama No. HP/WA aktif).`
 }
 
 export default function Buyers() {
+  const { showToast } = useToast()
   const [bookings, setBookings] = useState<BuyerBooking[]>([])
   const [sales, setSales] = useState<BuyerSale[]>([])
   const [search, setSearch] = useState('')
   const [selectedBuyer, setSelectedBuyer] = useState<BuyerSummary | null>(null)
   const [invoiceBuyer, setInvoiceBuyer] = useState<BuyerSummary | null>(null)
   const [includeItemList, setIncludeItemList] = useState(false)
-  const [toast, setToast] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -143,11 +139,6 @@ export default function Buyers() {
       .map((entry) => entry.summary)
   }, [bookings, sales, search])
 
-  function showToast(msg: string) {
-    setToast(msg)
-    setTimeout(() => setToast(null), 3000)
-  }
-
   function handleCopyInvoice(buyer: BuyerSummary) {
     const activeBookings = buyer.bookings.filter((b) => b.status === 'active')
     if (activeBookings.length === 0) return
@@ -166,12 +157,6 @@ export default function Buyers() {
 
   return (
     <div className="space-y-4">
-      {/* Toast Notification */}
-      {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white shadow-lg">
-          {toast}
-        </div>
-      )}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-xl font-semibold text-gray-900">Buyers</h1>

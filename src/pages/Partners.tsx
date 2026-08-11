@@ -6,6 +6,7 @@ import DataTable, { type Column } from '../components/DataTable'
 import StatCard from '../components/StatCard'
 import Modal from '../components/Modal'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 
 interface SaleProfit {
   net_profit: number
@@ -24,7 +25,10 @@ const emptyWithdrawalForm = { partner_id: '', amount: '0', withdrawal_date: toda
 
 export default function Partners() {
   const { canWrite } = useAuth()
+  const { showToast } = useToast()
   const [partners, setPartners] = useState<Partner[]>([])
+  const [deletingPartner, setDeletingPartner] = useState<Partner | null>(null)
+  const [deletingWithdrawal, setDeletingWithdrawal] = useState<PartnerWithdrawal | null>(null)
   const [items, setItems] = useState<InventoryItem[]>([])
   const [sales, setSales] = useState<SaleProfit[]>([])
   const [withdrawals, setWithdrawals] = useState<PartnerWithdrawal[]>([])
@@ -112,11 +116,22 @@ export default function Partners() {
     loadAll()
   }
 
-  async function handleDeletePartner(p: Partner) {
-    if (!confirm(`Delete partner "${p.name}"? This cannot be undone.`)) return
+  function handleDeletePartner(p: Partner) {
+    setDeletingPartner(p)
+  }
+
+  async function confirmDeletePartner() {
+    if (!deletingPartner) return
+    const p = deletingPartner
     const { error } = await supabase.from('partners').delete().eq('id', p.id)
-    if (error) alert(error.message)
-    else loadAll()
+    if (error) {
+      showToast(error.message, 'error')
+      setDeletingPartner(null)
+    } else {
+      setDeletingPartner(null)
+      showToast(`Partner "${p.name}" deleted.`)
+      loadAll()
+    }
   }
 
   async function handleWithdrawalSubmit(e: FormEvent) {
@@ -140,14 +155,26 @@ export default function Partners() {
     }
     setShowWithdrawalModal(false)
     setWithdrawalForm(emptyWithdrawalForm)
+    showToast('Withdrawal record added.')
     loadAll()
   }
 
-  async function handleDeleteWithdrawal(w: PartnerWithdrawal) {
-    if (!confirm('Delete this withdrawal record?')) return
+  function handleDeleteWithdrawal(w: PartnerWithdrawal) {
+    setDeletingWithdrawal(w)
+  }
+
+  async function confirmDeleteWithdrawal() {
+    if (!deletingWithdrawal) return
+    const w = deletingWithdrawal
     const { error } = await supabase.from('partner_withdrawals').delete().eq('id', w.id)
-    if (error) alert(error.message)
-    else loadAll()
+    if (error) {
+      showToast(error.message, 'error')
+      setDeletingWithdrawal(null)
+    } else {
+      setDeletingWithdrawal(null)
+      showToast('Withdrawal record deleted.')
+      loadAll()
+    }
   }
 
   const partnerName = (id: string | null) => partners.find((p) => p.id === id)?.name ?? '-'
@@ -347,6 +374,58 @@ export default function Partners() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {deletingPartner && (
+        <Modal title="Delete partner?" onClose={() => setDeletingPartner(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete partner <strong>&ldquo;{deletingPartner.name}&rdquo;</strong>? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingPartner(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeletePartner()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {deletingWithdrawal && (
+        <Modal title="Delete withdrawal record?" onClose={() => setDeletingWithdrawal(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete this withdrawal record ({formatIDR(deletingWithdrawal.amount)})?
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingWithdrawal(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteWithdrawal()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>

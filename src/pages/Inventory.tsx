@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
@@ -11,7 +12,7 @@ import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import BatchAutocomplete from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
-import ItemNameAutocomplete from '../components/ItemNameAutocomplete'
+import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
 import { getLiveModalPrice } from '../lib/inventoryModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -67,7 +68,9 @@ function saveCollapsed(set: Set<string>) {
 
 export default function Inventory() {
   const { user, canWrite } = useAuth()
+  const { showToast } = useToast()
   const [items, setItems] = useState<InventoryItem[]>([])
+  const [deletingItem, setDeletingItem] = useState<InventoryItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -235,7 +238,7 @@ export default function Inventory() {
     if (selectedItems.length === 0) return
     const nonReadyItems = selectedItems.filter((item) => item.status !== 'ready')
     if (nonReadyItems.length > 0) {
-      alert('Only ready inventory items can be bulk booked. Please deselect booked, sold, or cancelled items.')
+      showToast('Only ready inventory items can be bulk booked. Please deselect booked, sold, or cancelled items.', 'error')
       return
     }
     setBulkBookingForm(emptyBulkBookingForm)
@@ -488,11 +491,18 @@ export default function Inventory() {
     loadItems()
   }
 
-  async function handleDelete(item: InventoryItem) {
-    if (!confirm(`Delete "${item.item_name}"? This cannot be undone.`)) return
+  function handleDelete(item: InventoryItem) {
+    setDeletingItem(item)
+  }
+
+  async function confirmDeleteItem() {
+    if (!deletingItem) return
+    const item = deletingItem
     const { error } = await supabase.from('inventory_items').delete().eq('id', item.id)
-    if (error) alert(error.message)
-    else {
+    if (error) {
+      showToast(error.message, 'error')
+      setDeletingItem(null)
+    } else {
       void logActivity({
         action: 'Delete',
         entity: 'inventory_items',
@@ -500,6 +510,8 @@ export default function Inventory() {
         userId: user?.id,
         details: { item_name: item.item_name },
       })
+      setDeletingItem(null)
+      showToast(`Item "${item.item_name}" deleted.`)
       loadItems()
     }
   }
@@ -807,7 +819,15 @@ export default function Inventory() {
                   label="Item name"
                   labelClassName="mb-1 block text-sm font-medium text-gray-700"
                   value={form.item_name}
-                  onChange={(name) => setForm({ ...form, item_name: name })}
+                  onChange={(name) => setForm((prev) => ({ ...prev, item_name: name }))}
+                  onSelectRecord={(rec) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      item_name: rec.item_name,
+                      category: rec.category ? rec.category : prev.category,
+                      notes: !prev.notes.trim() && rec.notes ? rec.notes : prev.notes,
+                    }))
+                  }}
                   placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
                 />
 
@@ -876,61 +896,89 @@ export default function Inventory() {
                   </div>
 
                   <div className="space-y-2">
-                    {multiItems.map((itemRow, index) => (
-                      <div
-                        key={itemRow.id}
-                        className="relative z-10 focus-within:z-30 transition-all grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
-                      >
-                        <div className="sm:col-span-4">
-                          <ItemNameAutocomplete
-                            required
-                            label="Item Name *"
-                            placeholder={`Item #${index + 1} name *`}
-                            value={itemRow.item_name}
-                            onChange={(name) => updateMultiRow(itemRow.id, 'item_name', name)}
-                          />
-                        </div>
+                    {(() => {
+                      const sessionItemNames = multiItems.map((i) => i.item_name).filter(Boolean)
+                      const sessionCategories = multiItems.map((i) => i.category).filter(Boolean)
+                      const sessionRecords: ItemSuggestionRecord[] = multiItems
+                        .filter((i) => Boolean(i.item_name.trim()))
+                        .map((i) => ({
+                          item_name: i.item_name.trim(),
+                          category: i.category.trim() || undefined,
+                          notes: i.notes.trim() || undefined,
+                        }))
 
-                        <div className="sm:col-span-4">
-                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                            Category *
-                          </label>
-                          <CategoryAutocomplete
-                            required
-                            label=""
-                            placeholder="Category *"
-                            value={itemRow.category}
-                            onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
-                          />
-                        </div>
+                      return multiItems.map((itemRow, index) => (
+                        <div
+                          key={itemRow.id}
+                          className="relative z-10 focus-within:z-30 transition-all grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
+                        >
+                          <div className="sm:col-span-4">
+                            <ItemNameAutocomplete
+                              required
+                              label="Item Name *"
+                              placeholder={`Item #${index + 1} name *`}
+                              value={itemRow.item_name}
+                              onChange={(name) => updateMultiRow(itemRow.id, 'item_name', name)}
+                              onSelectRecord={(rec) => {
+                                setMultiItems((prev) =>
+                                  prev.map((row) => {
+                                    if (row.id !== itemRow.id) return row
+                                    return {
+                                      ...row,
+                                      item_name: rec.item_name,
+                                      category: rec.category ? rec.category : row.category,
+                                      notes: !row.notes.trim() && rec.notes ? rec.notes : row.notes,
+                                    }
+                                  })
+                                )
+                              }}
+                              extraSuggestions={sessionItemNames}
+                              extraRecords={sessionRecords}
+                            />
+                          </div>
 
-                        <div className="sm:col-span-3">
-                          <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                            Notes
-                          </label>
-                          <input
-                            type="text"
-                            value={itemRow.notes}
-                            onChange={(e) => updateMultiRow(itemRow.id, 'notes', e.target.value)}
-                            placeholder="Notes (optional)"
-                            className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
-                          />
-                        </div>
+                          <div className="sm:col-span-4">
+                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                              Category *
+                            </label>
+                            <CategoryAutocomplete
+                              required
+                              label=""
+                              placeholder="Category *"
+                              value={itemRow.category}
+                              onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
+                              extraSuggestions={sessionCategories}
+                            />
+                          </div>
 
-                        <div className="flex justify-end sm:col-span-1 sm:pt-1">
-                          <button
-                            type="button"
-                            onClick={() => removeMultiRow(itemRow.id)}
-                            disabled={multiItems.length === 1}
-                            aria-label="Remove item row"
-                            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:opacity-30"
-                          >
-                            ✕
-                          </button>
+                          <div className="sm:col-span-3">
+                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                              Notes
+                            </label>
+                            <input
+                              type="text"
+                              value={itemRow.notes}
+                              onChange={(e) => updateMultiRow(itemRow.id, 'notes', e.target.value)}
+                              placeholder="Notes (optional)"
+                              className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="flex justify-end sm:col-span-1 sm:pt-1">
+                            <button
+                              type="button"
+                              onClick={() => removeMultiRow(itemRow.id)}
+                              disabled={multiItems.length === 1}
+                              aria-label="Remove item row"
+                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:opacity-30"
+                            >
+                              ✕
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))
+                    })()}
+                </div>
 
                   <button
                     type="button"
@@ -1120,6 +1168,32 @@ export default function Inventory() {
             )}
           </aside>
         </div>
+      )}
+
+      {deletingItem && (
+        <Modal title="Delete inventory item?" onClose={() => setDeletingItem(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete <strong>&ldquo;{deletingItem.item_name}&rdquo;</strong>? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingItem(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteItem()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   )

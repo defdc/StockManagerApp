@@ -2,6 +2,7 @@ import { useEffect, useState, type ChangeEvent } from 'react'
 import type * as XLSX from 'xlsx'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 import { formatDateTime, formatIDR, formatStatus } from '../lib/format'
 import { STATUS_BADGE_CLASSES } from '../lib/constants'
 import { logActivity } from '../lib/activityLog'
@@ -50,6 +51,7 @@ interface PricedPreviewRow {
 
 export default function ImportExcel() {
   const { user, canWrite } = useAuth()
+  const { showToast } = useToast()
   const [workbook, setWorkbook] = useState<XLSX.WorkBook | null>(null)
   const [fileName, setFileName] = useState('')
   const [sheetNames, setSheetNames] = useState<string[]>([])
@@ -260,7 +262,7 @@ export default function ImportExcel() {
       loadPastImports()
     } catch (err) {
       console.error('Revert import failed:', err)
-      alert(err instanceof Error ? err.message : 'Failed to revert import')
+      showToast(err instanceof Error ? err.message : 'Failed to revert import', 'error')
     } finally {
       setDeleting(false)
     }

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { EXPENSE_TYPES } from '../lib/constants'
 import type { Expense, ExpenseType } from '../types/database'
@@ -16,7 +17,9 @@ const emptyForm = {
 
 export default function Expenses() {
   const { user, canWrite } = useAuth()
+  const { showToast } = useToast()
   const [expenses, setExpenses] = useState<Expense[]>([])
+  const [deletingExpense, setDeletingExpense] = useState<Expense | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -89,11 +92,22 @@ export default function Expenses() {
     loadExpenses()
   }
 
-  async function handleDelete(e: Expense) {
-    if (!confirm('Delete this expense? This cannot be undone.')) return
+  function handleDelete(e: Expense) {
+    setDeletingExpense(e)
+  }
+
+  async function confirmDeleteExpense() {
+    if (!deletingExpense) return
+    const e = deletingExpense
     const { error } = await supabase.from('expenses').delete().eq('id', e.id)
-    if (error) alert(error.message)
-    else loadExpenses()
+    if (error) {
+      showToast(error.message, 'error')
+      setDeletingExpense(null)
+    } else {
+      setDeletingExpense(null)
+      showToast('Expense deleted.')
+      loadExpenses()
+    }
   }
 
   const baseColumns: Column<Expense>[] = [
@@ -208,6 +222,32 @@ export default function Expenses() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {deletingExpense && (
+        <Modal title="Delete expense?" onClose={() => setDeletingExpense(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete this expense record ({formatIDR(deletingExpense.amount)})? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingExpense(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteExpense()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>

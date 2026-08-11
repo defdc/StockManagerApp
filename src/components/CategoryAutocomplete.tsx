@@ -7,6 +7,7 @@ interface CategoryAutocompleteProps {
   label?: string
   required?: boolean
   placeholder?: string
+  extraSuggestions?: string[]
 }
 
 export default function CategoryAutocomplete({
@@ -15,6 +16,7 @@ export default function CategoryAutocomplete({
   label = 'Category',
   required,
   placeholder = 'Search or enter category...',
+  extraSuggestions = [],
 }: CategoryAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -85,14 +87,25 @@ export default function CategoryAutocomplete({
     return () => { cancelled = true }
   }, [open, categories.length])
 
+  const combinedCategories = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const item of [...extraSuggestions, ...categories]) {
+      const raw = (item || '').trim()
+      if (!raw) continue
+      const key = raw.toLowerCase()
+      if (!seen.has(key)) seen.set(key, raw)
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b))
+  }, [categories, extraSuggestions])
+
   const filtered = useMemo(() => {
     const q = value.trim().toLowerCase()
-    if (!q) return categories.slice(0, 10)
-    return categories.filter((c) => c.toLowerCase().includes(q)).slice(0, 10)
-  }, [categories, value])
+    if (!q) return combinedCategories.slice(0, 10)
+    return combinedCategories.filter((c) => c.toLowerCase().includes(q)).slice(0, 10)
+  }, [combinedCategories, value])
 
   // Whether the typed value matches an existing category (case-insensitive)
-  const isExisting = categories.some((c) => c.toLowerCase() === value.trim().toLowerCase())
+  const isExisting = combinedCategories.some((c) => c.toLowerCase() === value.trim().toLowerCase())
 
   return (
     <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>

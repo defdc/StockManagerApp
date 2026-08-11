@@ -1,6 +1,7 @@
 import { Suspense, lazy } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AuthProvider } from './lib/auth'
+import { ToastProvider } from './lib/toast'
 import ProtectedRoute from './components/ProtectedRoute'
 import Layout from './components/Layout'
 import Login from './pages/Login'
@@ -19,7 +20,8 @@ const ImportExcel = lazy(() => import('./pages/ImportExcel'))
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <ToastProvider>
+        <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route
@@ -49,6 +51,7 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
+    </ToastProvider>
+  </AuthProvider>
   )
 }

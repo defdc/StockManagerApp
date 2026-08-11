@@ -1,6 +1,6 @@
-export function exportToCSV(filename: string, rows: Record<string, unknown>[]) {
+export function exportToCSV(filename: string, rows: Record<string, unknown>[], onError?: (msg: string) => void) {
   if (rows.length === 0) {
-    alert('No data to export.')
+    if (onError) onError('No data to export.')
     return
   }
 

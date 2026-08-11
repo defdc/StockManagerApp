@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
@@ -61,7 +62,10 @@ const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
 
 export default function Sales() {
   const { user, canWrite } = useAuth()
+  const { showToast } = useToast()
   const [sales, setSales] = useState<SaleRow[]>([])
+  const [deletingSale, setDeletingSale] = useState<SaleRow | null>(null)
+  const [undoingSale, setUndoingSale] = useState<SaleRow | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -459,11 +463,17 @@ export default function Sales() {
     loadSales()
   }
 
-  async function handleDelete(s: SaleRow) {
-    if (!confirm(`Delete sale to "${s.buyer_name}"? This cannot be undone.`)) return
+  function handleDelete(s: SaleRow) {
+    setDeletingSale(s)
+  }
+
+  async function confirmDeleteSale() {
+    if (!deletingSale) return
+    const s = deletingSale
     const { error } = await supabase.from('sales').delete().eq('id', s.id)
     if (error) {
-      alert(error.message)
+      showToast(error.message, 'error')
+      setDeletingSale(null)
       return
     }
     if (s.inventory_item_id) {
@@ -480,11 +490,18 @@ export default function Sales() {
       userId: user?.id,
       details: { buyer_name: s.buyer_name, inventory_item_id: s.inventory_item_id },
     })
+    setDeletingSale(null)
+    showToast('Sale record deleted successfully.')
     loadSales()
   }
 
-  async function handleUndoSale(s: SaleRow) {
-    if (!confirm(`Undo sale to "${s.buyer_name}"? The sale record will be deleted.`)) return
+  function handleUndoSale(s: SaleRow) {
+    setUndoingSale(s)
+  }
+
+  async function confirmUndoSale() {
+    if (!undoingSale) return
+    const s = undoingSale
 
     let originatingBookingId: string | null = null
     if (s.inventory_item_id) {
@@ -504,7 +521,8 @@ export default function Sales() {
 
     const { error: deleteError } = await supabase.from('sales').delete().eq('id', s.id)
     if (deleteError) {
-      alert(deleteError.message)
+      showToast(deleteError.message, 'error')
+      setUndoingSale(null)
       return
     }
 
@@ -539,6 +557,8 @@ export default function Sales() {
       },
     })
 
+    setUndoingSale(null)
+    showToast('Sale undone successfully.')
     loadSales()
   }
 
@@ -1344,6 +1364,58 @@ export default function Sales() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {deletingSale && (
+        <Modal title="Delete sale record?" onClose={() => setDeletingSale(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete the sale to <strong>&ldquo;{deletingSale.buyer_name}&rdquo;</strong>? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeletingSale(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteSale()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {undoingSale && (
+        <Modal title="Undo sale?" onClose={() => setUndoingSale(null)}>
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to undo the sale to <strong>&ldquo;{undoingSale.buyer_name}&rdquo;</strong>? The sale record will be removed and status restored.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setUndoingSale(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmUndoSale()}
+                className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+              >
+                Undo Sale
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
     </div>
