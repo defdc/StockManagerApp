@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import type { InventoryItem, Partner, PartnerWithdrawal } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
 import StatCard from '../components/StatCard'
 import Modal from '../components/Modal'
+import FormattedPriceInput from '../components/FormattedPriceInput'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 
@@ -48,22 +50,30 @@ export default function Partners() {
   async function loadAll() {
     setLoading(true)
     setError(null)
-    const [partnersRes, itemsRes, salesRes, withdrawalsRes] = await Promise.all([
-      supabase.from('partners').select('*').order('name'),
-      supabase.from('inventory_items').select('*'),
-      supabase.from('sales').select('net_profit'),
-      supabase.from('partner_withdrawals').select('*').order('withdrawal_date', { ascending: false }),
-    ])
+    try {
+      const [partnersRes, itemsData, salesData, withdrawalsRes] = await Promise.all([
+        supabase.from('partners').select('*').order('name'),
+        fetchAllRows<InventoryItem>((from, to) =>
+          supabase.from('inventory_items').select('*').order('id').range(from, to)
+        ),
+        fetchAllRows<SaleProfit>((from, to) =>
+          supabase.from('sales').select('net_profit').order('id').range(from, to)
+        ),
+        supabase.from('partner_withdrawals').select('*').order('withdrawal_date', { ascending: false }),
+      ])
 
-    const firstError =
-      partnersRes.error || itemsRes.error || salesRes.error || withdrawalsRes.error
-    if (firstError) setError(firstError.message)
+      const firstError = partnersRes.error || withdrawalsRes.error
+      if (firstError) setError(firstError.message)
 
-    setPartners(partnersRes.data ?? [])
-    setItems(itemsRes.data ?? [])
-    setSales((salesRes.data as unknown as SaleProfit[]) ?? [])
-    setWithdrawals(withdrawalsRes.data ?? [])
-    setLoading(false)
+      setPartners(partnersRes.data ?? [])
+      setItems(itemsData ?? [])
+      setSales(salesData ?? [])
+      setWithdrawals(withdrawalsRes.data ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load partners data.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -329,13 +339,11 @@ export default function Partners() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Amount (Rp)</label>
-              <input
-                type="number"
-                min="0"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Amount *</label>
+              <FormattedPriceInput
+                required
                 value={withdrawalForm.amount}
-                onChange={(e) => setWithdrawalForm({ ...withdrawalForm, amount: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setWithdrawalForm({ ...withdrawalForm, amount: price })}
               />
             </div>
             <div>

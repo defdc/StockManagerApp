@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
-import { formatIDR, formatDate, todayISO } from '../lib/format'
+import { formatIDR, formatDate, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
@@ -12,6 +13,7 @@ import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
+import FormattedPriceInput from '../components/FormattedPriceInput'
 
 type SaleRow = Sale & { inventory_items: { item_name: string; batch_name: string | null } | null }
 
@@ -53,6 +55,7 @@ const emptyForm = {
 
 const emptyGroupEditForm = {
   buyer_name: '',
+  total_sale_price: '0',
   sale_date: todayISO(),
   fulfillment_status: 'parking' as FulfillmentStatus,
   notes: '',
@@ -96,13 +99,20 @@ export default function Sales() {
   async function loadSales() {
     setLoading(true)
     setError(null)
-    const { data, error } = await supabase
-      .from('sales')
-      .select('*, inventory_items(item_name, batch_name)')
-      .order('sale_date', { ascending: false })
-    if (error) setError(error.message)
-    else setSales((data as unknown as SaleRow[]) ?? [])
-    setLoading(false)
+    try {
+      const data = await fetchAllRows<SaleRow>((from, to) =>
+        supabase
+          .from('sales')
+          .select('*, inventory_items(item_name, batch_name)')
+          .order('sale_date', { ascending: false })
+          .range(from, to) as unknown as PromiseLike<{ data: SaleRow[] | null; error: { message: string } | null }>
+      )
+      setSales(data ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load sales.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -332,9 +342,11 @@ export default function Sales() {
 
   function openGroupEditModal(group: SaleGroup) {
     const firstSale = group.sales[0]
+    const totalSalePrice = group.sales.reduce((sum, s) => sum + s.sale_price, 0)
     setGroupEditTarget(group)
     setGroupEditForm({
       buyer_name: firstSale.buyer_name,
+      total_sale_price: String(totalSalePrice),
       sale_date: firstSale.sale_date,
       fulfillment_status: firstSale.fulfillment_status ?? 'parking',
       notes: firstSale.notes ?? '',
@@ -382,26 +394,64 @@ export default function Sales() {
     setSaving(true)
     setGroupEditError(null)
 
-    const { error } = await supabase
-      .from('sales')
-      .update({
-        buyer_name: groupEditForm.buyer_name.trim(),
-        sale_date: groupEditForm.sale_date || todayISO(),
-        fulfillment_status: groupEditForm.fulfillment_status,
-        notes: groupEditForm.notes.trim() || null,
-        updated_at: new Date().toISOString(),
+    const totalSalePrice = Number(groupEditForm.total_sale_price) || 0
+    const childSales = groupEditTarget.sales
+    const splitSalePrices = splitAmount(totalSalePrice, childSales.length)
+
+    try {
+      const updatePromises = childSales.map((s, index) => {
+        const itemSalePrice = splitSalePrices[index] ?? 0
+        const itemModalPrice = s.modal_price
+        const grossProfit = itemSalePrice - itemModalPrice
+        const netProfit = grossProfit - (s.marketplace_fee || 0) - (s.packing_cost || 0)
+
+        return supabase
+          .from('sales')
+          .update({
+            buyer_name: groupEditForm.buyer_name.trim(),
+            sale_price: itemSalePrice,
+            gross_profit: grossProfit,
+            net_profit: netProfit,
+            sale_date: groupEditForm.sale_date || todayISO(),
+            fulfillment_status: groupEditForm.fulfillment_status,
+            notes: groupEditForm.notes.trim() || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', s.id)
       })
-      .eq('booking_group_id', groupEditTarget.bookingGroupId)
 
-    setSaving(false)
-    if (error) {
-      setGroupEditError(error.message)
-      return
+      const results = await Promise.all(updatePromises)
+      const failed = results.find((r) => r.error)
+      if (failed?.error) {
+        setSaving(false)
+        setGroupEditError(failed.error.message)
+        showToast(failed.error.message, 'error')
+        return
+      }
+
+      void logActivity({
+        action: 'Edit Group Sale',
+        entity: 'sales',
+        userId: user?.id,
+        details: {
+          count: childSales.length,
+          buyer_name: groupEditForm.buyer_name.trim(),
+          booking_group_id: groupEditTarget.bookingGroupId,
+          total_sale_price: totalSalePrice,
+        },
+      })
+
+      setSaving(false)
+      setShowGroupEditModal(false)
+      setGroupEditTarget(null)
+      showToast('Group sale updated successfully.')
+      loadSales()
+    } catch (err) {
+      setSaving(false)
+      const msg = err instanceof Error ? err.message : 'Failed to update group sale.'
+      setGroupEditError(msg)
+      showToast(msg, 'error')
     }
-
-    setShowGroupEditModal(false)
-    setGroupEditTarget(null)
-    loadSales()
   }
 
   async function handleSubmit(e: FormEvent) {
@@ -1166,13 +1216,23 @@ export default function Sales() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Buyer</label>
-              <input
-                type="text"
+              <BuyerAutocomplete
+                required
+                label="Buyer *"
                 value={groupEditForm.buyer_name}
-                onChange={(e) => setGroupEditForm({ ...groupEditForm, buyer_name: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(buyerName) => setGroupEditForm({ ...groupEditForm, buyer_name: buyerName })}
               />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Total Sale Price *</label>
+              <FormattedPriceInput
+                required
+                value={groupEditForm.total_sale_price}
+                onChange={(price) => setGroupEditForm({ ...groupEditForm, total_sale_price: price })}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Total price will be divided equally across all {groupEditTarget.sales.length} items in this group.
+              </p>
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status</label>
@@ -1271,45 +1331,34 @@ export default function Sales() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Sale price (Rp)</label>
-              <input
-                type="text"
-                inputMode="numeric"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Sale price *</label>
+              <FormattedPriceInput
+                required
                 value={form.sale_price}
-                onChange={(e) => setForm({ ...form, sale_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setForm({ ...form, sale_price: price })}
               />
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">
-                Modal price (Rp) <span className="text-gray-400">(auto-filled, editable)</span>
+                Modal price <span className="text-gray-400">(auto-filled, editable)</span>
               </label>
-              <input
-                type="text"
-                inputMode="numeric"
+              <FormattedPriceInput
                 value={form.modal_price}
-                onChange={(e) => setForm({ ...form, modal_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setForm({ ...form, modal_price: price })}
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Marketplace fee (Rp)</label>
-              <input
-                type="text"
-                inputMode="numeric"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Marketplace fee</label>
+              <FormattedPriceInput
                 value={form.marketplace_fee}
-                onChange={(e) => setForm({ ...form, marketplace_fee: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setForm({ ...form, marketplace_fee: price })}
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Packing cost (Rp)</label>
-              <input
-                type="text"
-                inputMode="numeric"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Packing cost</label>
+              <FormattedPriceInput
                 value={form.packing_cost}
-                onChange={(e) => setForm({ ...form, packing_cost: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setForm({ ...form, packing_cost: price })}
               />
             </div>
 

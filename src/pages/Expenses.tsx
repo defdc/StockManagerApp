@@ -7,6 +7,7 @@ import { EXPENSE_TYPES } from '../lib/constants'
 import type { Expense, ExpenseType } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
 import Modal from '../components/Modal'
+import FormattedPriceInput from '../components/FormattedPriceInput'
 
 const emptyForm = {
   expense_date: todayISO(),
@@ -184,13 +185,11 @@ export default function Expenses() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Amount (Rp)</label>
-              <input
-                type="number"
-                min="0"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Amount *</label>
+              <FormattedPriceInput
+                required
                 value={form.amount}
-                onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setForm({ ...form, amount: price })}
               />
             </div>
             <div>

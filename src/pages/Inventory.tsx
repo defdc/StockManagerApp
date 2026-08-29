@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus } from '../lib/format'
@@ -10,9 +11,10 @@ import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { Booking, InventoryItem, Sale } from '../types/database'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
-import BatchAutocomplete from '../components/BatchAutocomplete'
+import BatchAutocomplete, { type BatchSuggestion } from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
 import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
+import FormattedPriceInput from '../components/FormattedPriceInput'
 import { getLiveModalPrice } from '../lib/inventoryModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -26,6 +28,7 @@ interface MultiItemRow {
   item_name: string
   category: string
   notes: string
+  quantity: number | string
 }
 
 const emptyForm = {
@@ -79,6 +82,8 @@ export default function Inventory() {
 
   // Category collapse state — persisted in localStorage
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(loadCollapsed)
+  // Visible items limit per category to avoid rendering thousands of DOM elements
+  const [expandedLimits, setExpandedLimits] = useState<Record<string, number>>({})
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -91,7 +96,7 @@ export default function Inventory() {
   const [multiBatchName, setMultiBatchName] = useState('')
   const [multiBatchModalTotal, setMultiBatchModalTotal] = useState('')
   const [multiItems, setMultiItems] = useState<MultiItemRow[]>([
-    { id: crypto.randomUUID(), item_name: '', category: '', notes: '' },
+    { id: crypto.randomUUID(), item_name: '', category: '', notes: '', quantity: 1 },
   ])
 
   const [saving, setSaving] = useState(false)
@@ -114,13 +119,16 @@ export default function Inventory() {
   async function loadItems() {
     setLoading(true)
     setError(null)
-    const { data, error } = await supabase
-      .from('inventory_items')
-      .select('*')
-      .order('created_at', { ascending: false })
-    if (error) setError(error.message)
-    else setItems(data ?? [])
-    setLoading(false)
+    try {
+      const data = await fetchAllRows<InventoryItem>((from, to) =>
+        supabase.from('inventory_items').select('*').order('created_at', { ascending: false }).range(from, to)
+      )
+      setItems(data ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load inventory items.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -195,6 +203,59 @@ export default function Inventory() {
     })
   }, [filtered])
 
+  // ── Autocomplete suggestions derived from loaded items (0 network requests) ──
+
+  const existingItemRecords = useMemo<ItemSuggestionRecord[]>(() => {
+    const seen = new Map<string, ItemSuggestionRecord>()
+    for (const item of items) {
+      const raw = (item.item_name || '').trim()
+      if (!raw) continue
+      const key = raw.toLowerCase()
+      if (!seen.has(key)) {
+        seen.set(key, {
+          item_name: raw,
+          category: item.category ? item.category.trim() : null,
+          notes: item.notes ? item.notes.trim() : null,
+        })
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name))
+  }, [items])
+
+  const existingCategories = useMemo<string[]>(() => {
+    const seen = new Map<string, string>()
+    for (const item of items) {
+      const raw = (item.category || '').trim()
+      if (!raw) continue
+      const key = raw.toLowerCase()
+      if (!seen.has(key)) seen.set(key, raw)
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b))
+  }, [items])
+
+  const existingBatches = useMemo<BatchSuggestion[]>(() => {
+    const batchMap = new Map<string, BatchSuggestion>()
+    for (const item of items) {
+      const name = (item.batch_name || '').trim()
+      if (!name) continue
+      const modalTotal = item.batch_modal_total ?? null
+      const existing = batchMap.get(name)
+      if (existing) {
+        existing.itemCount += 1
+        if (item.created_at > existing.latestAt) existing.latestAt = item.created_at
+        if (modalTotal && !existing.modalTotal) existing.modalTotal = modalTotal
+      } else {
+        batchMap.set(name, {
+          name,
+          modalTotal,
+          itemCount: 1,
+          latestAt: item.created_at,
+        })
+      }
+    }
+    return [...batchMap.values()].sort((a, b) => b.latestAt.localeCompare(a.latestAt))
+  }, [items])
+
   // ── Selection helpers ────────────────────────────────────────────────────
 
   const selectedItems = useMemo(
@@ -252,7 +313,7 @@ export default function Inventory() {
     setForm(emptyForm)
     setMultiBatchName('')
     setMultiBatchModalTotal('')
-    setMultiItems([{ id: crypto.randomUUID(), item_name: '', category: '', notes: '' }])
+    setMultiItems([{ id: crypto.randomUUID(), item_name: '', category: '', notes: '', quantity: 1 }])
     setFormError(null)
     setShowModal(true)
   }
@@ -276,11 +337,11 @@ export default function Inventory() {
   function addMultiRow() {
     setMultiItems((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), item_name: '', category: '', notes: '' },
+      { id: crypto.randomUUID(), item_name: '', category: '', notes: '', quantity: 1 },
     ])
   }
 
-  function updateMultiRow(id: string, field: keyof MultiItemRow, value: string) {
+  function updateMultiRow(id: string, field: keyof MultiItemRow, value: string | number) {
     setMultiItems((prev) =>
       prev.map((row) => (row.id === id ? { ...row, [field]: value } : row))
     )
@@ -324,17 +385,22 @@ export default function Inventory() {
     setSaving(true)
     setFormError(null)
 
-    const itemsPayload = validItems.map((item) => ({
-      item_name: item.item_name.trim(),
-      category: item.category.trim() || null,
-      batch_name: batchName || null,
-      batch_modal_total: batchName ? modalTotal : null,
-      modal_price: 0,
-      quantity: 1,
-      status: 'ready' as const,
-      notes: item.notes.trim() || null,
-      created_by: user?.id,
-    }))
+    const itemsPayload = validItems.flatMap((item) => {
+      const rawQty = typeof item.quantity === 'number' ? item.quantity : parseInt(String(item.quantity || '1'), 10)
+      const qty = !rawQty || isNaN(rawQty) || rawQty < 1 ? 1 : Math.floor(rawQty)
+      const itemObj = {
+        item_name: item.item_name.trim(),
+        category: item.category.trim() || null,
+        batch_name: batchName || null,
+        batch_modal_total: batchName ? modalTotal : null,
+        modal_price: 0,
+        quantity: 1,
+        status: 'ready' as const,
+        notes: item.notes.trim() || null,
+        created_by: user?.id,
+      }
+      return Array.from({ length: qty }, () => ({ ...itemObj }))
+    })
 
     const { error } = await supabase.from('inventory_items').insert(itemsPayload)
 
@@ -356,7 +422,7 @@ export default function Inventory() {
       action: 'Bulk Add Items',
       entity: 'inventory_items',
       userId: user?.id,
-      details: { count: validItems.length, batch_name: batchName || 'Unassigned' },
+      details: { count: itemsPayload.length, batch_name: batchName || 'Unassigned' },
     })
 
     setShowModal(false)
@@ -624,6 +690,11 @@ export default function Inventory() {
         <div className="space-y-3">
           {grouped.map(([category, catItems]) => {
             const isCollapsed = collapsedCategories.has(category)
+            const isSearching = Boolean(search.trim() || statusFilter)
+            const limit = isSearching ? catItems.length : (expandedLimits[category] ?? 30)
+            const visibleItems = catItems.slice(0, limit)
+            const remainingCount = catItems.length - visibleItems.length
+
             return (
               <div key={category} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
                 {/* Category header */}
@@ -643,7 +714,7 @@ export default function Inventory() {
                   <>
                     {/* Mobile Cards List (< 768px) */}
                     <div className="space-y-3 p-3 bg-gray-50/50 border-t border-gray-200 md:hidden">
-                      {catItems.map((item) => (
+                      {visibleItems.map((item) => (
                         <div key={item.id} className="rounded-lg border border-gray-200 bg-white p-3.5 shadow-sm space-y-2.5">
                           {/* Header: Checkbox + Item Name + Status Badge */}
                           <div className="flex items-start gap-2.5">
@@ -720,7 +791,7 @@ export default function Inventory() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                          {catItems.map((item) => (
+                          {visibleItems.map((item) => (
                             <tr key={item.id} className="hover:bg-gray-50">
                               <td className="whitespace-nowrap px-3 py-2">
                                 <input
@@ -767,6 +838,24 @@ export default function Inventory() {
                         </tbody>
                       </table>
                     </div>
+
+                    {/* Show more control when total items exceed visible limit */}
+                    {remainingCount > 0 && (
+                      <div className="border-t border-gray-100 bg-gray-50/50 p-2.5 text-center">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedLimits((prev) => ({
+                              ...prev,
+                              [category]: (prev[category] ?? 30) + 50,
+                            }))
+                          }
+                          className="rounded-md border border-gray-300 bg-white px-4 py-1.5 text-xs font-semibold text-gray-700 shadow-sm hover:bg-gray-50"
+                        >
+                          Show more ({remainingCount} remaining)
+                        </button>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -829,12 +918,14 @@ export default function Inventory() {
                     }))
                   }}
                   placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
+                  existingRecords={existingItemRecords}
                 />
 
                 <CategoryAutocomplete
                   required
                   value={form.category}
                   onChange={(cat) => setForm({ ...form, category: cat })}
+                  existingCategories={existingCategories}
                 />
 
                 <BatchAutocomplete
@@ -847,6 +938,7 @@ export default function Inventory() {
                       batch_modal_total: modalTotal ?? form.batch_modal_total,
                     })
                   }
+                  existingBatches={existingBatches}
                 />
 
                 <div>
@@ -874,6 +966,7 @@ export default function Inventory() {
                     }}
                     label="Batch for all items below"
                     placeholder="Select or create a batch for these items..."
+                    existingBatches={existingBatches}
                   />
                   <p className="mt-1 text-xs text-gray-500">
                     This batch and its modal total will be shared across all items added in this session.
@@ -934,10 +1027,11 @@ export default function Inventory() {
                               }}
                               extraSuggestions={sessionItemNames}
                               extraRecords={sessionRecords}
+                              existingRecords={existingItemRecords}
                             />
                           </div>
 
-                          <div className="sm:col-span-4">
+                          <div className="sm:col-span-3">
                             <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
                               Category *
                             </label>
@@ -948,6 +1042,7 @@ export default function Inventory() {
                               value={itemRow.category}
                               onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
                               extraSuggestions={sessionCategories}
+                              existingCategories={existingCategories}
                             />
                           </div>
 
@@ -961,6 +1056,20 @@ export default function Inventory() {
                               onChange={(e) => updateMultiRow(itemRow.id, 'notes', e.target.value)}
                               placeholder="Notes (optional)"
                               className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="sm:col-span-1">
+                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+                              Qty
+                            </label>
+                            <input
+                              type="number"
+                              min={1}
+                              value={itemRow.quantity ?? 1}
+                              onChange={(e) => updateMultiRow(itemRow.id, 'quantity', e.target.value)}
+                              placeholder="Qty"
+                              className="w-full rounded-md border border-gray-300 px-1 py-1.5 text-center text-sm focus:border-gray-500 focus:outline-none"
                             />
                           </div>
 
@@ -1009,7 +1118,12 @@ export default function Inventory() {
                 {saving
                   ? 'Saving...'
                   : addMode === 'multiple' && !editingId
-                  ? `Save ${multiItems.filter((i) => i.item_name.trim()).length || multiItems.length} items`
+                  ? `Save ${
+                      multiItems
+                        .filter((i) => i.item_name.trim())
+                        .reduce((sum, i) => sum + (Math.max(1, parseInt(String(i.quantity), 10) || 1)), 0) ||
+                      multiItems.reduce((sum, i) => sum + (Math.max(1, parseInt(String(i.quantity), 10) || 1)), 0)
+                    } items`
                   : 'Save item'}
               </button>
             </div>
@@ -1030,13 +1144,11 @@ export default function Inventory() {
               onChange={(buyerName) => setBulkBookingForm({ ...bulkBookingForm, buyer_name: buyerName })}
             />
             <div>
-              <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
-              <input
-                type="number"
-                min="0"
+              <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price *</label>
+              <FormattedPriceInput
+                required
                 value={bulkBookingForm.total_deal_price}
-                onChange={(e) => setBulkBookingForm({ ...bulkBookingForm, total_deal_price: e.target.value })}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                onChange={(price) => setBulkBookingForm({ ...bulkBookingForm, total_deal_price: price })}
               />
             </div>
             <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">

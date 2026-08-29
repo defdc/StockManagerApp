@@ -8,6 +8,7 @@ interface CategoryAutocompleteProps {
   required?: boolean
   placeholder?: string
   extraSuggestions?: string[]
+  existingCategories?: string[]
 }
 
 export default function CategoryAutocomplete({
@@ -17,6 +18,7 @@ export default function CategoryAutocomplete({
   required,
   placeholder = 'Search or enter category...',
   extraSuggestions = [],
+  existingCategories,
 }: CategoryAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -55,7 +57,8 @@ export default function CategoryAutocomplete({
   }, [])
 
   useEffect(() => {
-    if (!open || categories.length > 0) return
+    // If existingCategories is passed by parent, skip fetching from Supabase
+    if (existingCategories || !open || categories.length > 0) return
 
     let cancelled = false
     setLoading(true)
@@ -85,18 +88,19 @@ export default function CategoryAutocomplete({
 
     loadCategories()
     return () => { cancelled = true }
-  }, [open, categories.length])
+  }, [existingCategories, open, categories.length])
 
   const combinedCategories = useMemo(() => {
     const seen = new Map<string, string>()
-    for (const item of [...extraSuggestions, ...categories]) {
+    const sourceCategories = existingCategories ?? categories
+    for (const item of [...extraSuggestions, ...sourceCategories]) {
       const raw = (item || '').trim()
       if (!raw) continue
       const key = raw.toLowerCase()
       if (!seen.has(key)) seen.set(key, raw)
     }
     return [...seen.values()].sort((a, b) => a.localeCompare(b))
-  }, [categories, extraSuggestions])
+  }, [existingCategories, categories, extraSuggestions])
 
   const filtered = useMemo(() => {
     const q = value.trim().toLowerCase()

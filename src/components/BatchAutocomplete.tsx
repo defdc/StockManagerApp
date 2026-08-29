@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { smartSearchRank } from '../lib/search'
+import { formatIDR } from '../lib/format'
 import FormattedPriceInput from './FormattedPriceInput'
 
 interface BatchAutocompleteProps {
@@ -12,11 +13,21 @@ interface BatchAutocompleteProps {
   required?: boolean
 }
 
-interface BatchSuggestion {
+export interface BatchSuggestion {
   name: string
   modalTotal: number | null
   itemCount: number
   latestAt: string
+}
+
+interface BatchAutocompleteProps {
+  value: string
+  modalTotalValue?: string
+  onChange: (batchName: string, batchModalTotal?: string) => void
+  label?: string
+  placeholder?: string
+  required?: boolean
+  existingBatches?: BatchSuggestion[]
 }
 
 export default function BatchAutocomplete({
@@ -26,6 +37,7 @@ export default function BatchAutocomplete({
   label = 'Batch',
   placeholder = 'Search or enter batch name...',
   required,
+  existingBatches,
 }: BatchAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -64,7 +76,8 @@ export default function BatchAutocomplete({
   }, [])
 
   useEffect(() => {
-    if (!open) return
+    // If existingBatches is passed by parent, skip fetching from Supabase
+    if (existingBatches || !open || suggestions.length > 0) return
 
     let cancelled = false
     setLoading(true)
@@ -109,11 +122,13 @@ export default function BatchAutocomplete({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [existingBatches, open, suggestions.length])
+
+  const activeSuggestions = existingBatches ?? suggestions
 
   const filteredSuggestions = useMemo(() => {
-    if (!value.trim()) return suggestions.slice(0, 8)
-    return suggestions
+    if (!value.trim()) return activeSuggestions.slice(0, 8)
+    return activeSuggestions
       .map((suggestion) => ({
         suggestion,
         rank: smartSearchRank(value, [{ value: suggestion.name }]),
@@ -122,11 +137,11 @@ export default function BatchAutocomplete({
       .sort((a, b) => a.rank - b.rank)
       .slice(0, 8)
       .map((entry) => entry.suggestion)
-  }, [suggestions, value])
+  }, [activeSuggestions, value])
 
   const existingMatch = useMemo(() => {
-    return suggestions.find((s) => s.name.trim().toLowerCase() === value.trim().toLowerCase())
-  }, [suggestions, value])
+    return activeSuggestions.find((s) => s.name.trim().toLowerCase() === value.trim().toLowerCase())
+  }, [activeSuggestions, value])
 
   const isNewBatch = Boolean(value.trim()) && !existingMatch
 
@@ -153,7 +168,7 @@ export default function BatchAutocomplete({
         }}
         onChange={(event) => {
           const newName = event.target.value
-          const match = suggestions.find(
+          const match = activeSuggestions.find(
             (s) => s.name.trim().toLowerCase() === newName.trim().toLowerCase()
           )
           onChange(newName, match?.modalTotal ? String(match.modalTotal) : modalTotalValue)
@@ -197,7 +212,7 @@ export default function BatchAutocomplete({
                 <span className="block text-xs text-gray-500">
                   {suggestion.itemCount} item{suggestion.itemCount === 1 ? '' : 's'}
                   {suggestion.modalTotal
-                    ? ` · Rp ${suggestion.modalTotal.toLocaleString('id-ID')}`
+                    ? ` · ${formatIDR(suggestion.modalTotal)}`
                     : ''}
                 </span>
               </button>

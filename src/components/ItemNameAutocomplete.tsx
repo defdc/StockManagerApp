@@ -17,6 +17,7 @@ interface ItemNameAutocompleteProps {
   placeholder?: string
   extraSuggestions?: string[]
   extraRecords?: ItemSuggestionRecord[]
+  existingRecords?: ItemSuggestionRecord[]
 }
 
 export default function ItemNameAutocomplete({
@@ -29,6 +30,7 @@ export default function ItemNameAutocomplete({
   placeholder = 'Search or enter item name...',
   extraSuggestions = [],
   extraRecords = [],
+  existingRecords,
 }: ItemNameAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -67,7 +69,8 @@ export default function ItemNameAutocomplete({
   }, [])
 
   useEffect(() => {
-    if (!open || records.length > 0) return
+    // If existingRecords is passed by parent, skip fetching from Supabase
+    if (existingRecords || !open || records.length > 0) return
 
     let cancelled = false
     setLoading(true)
@@ -104,7 +107,7 @@ export default function ItemNameAutocomplete({
     return () => {
       cancelled = true
     }
-  }, [open, records.length])
+  }, [existingRecords, open, records.length])
 
   const combinedRecords = useMemo(() => {
     const seen = new Map<string, ItemSuggestionRecord>()
@@ -133,8 +136,9 @@ export default function ItemNameAutocomplete({
       }
     }
 
-    // 3. Database records
-    for (const rec of records) {
+    // 3. Database / provided existing records
+    const sourceRecords = existingRecords ?? records
+    for (const rec of sourceRecords) {
       const raw = (rec.item_name || '').trim()
       if (!raw) continue
       const key = raw.toLowerCase()
@@ -144,7 +148,7 @@ export default function ItemNameAutocomplete({
     }
 
     return [...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name))
-  }, [records, extraSuggestions, extraRecords])
+  }, [existingRecords, records, extraSuggestions, extraRecords])
 
   const filteredRecords = useMemo(() => {
     const q = value.trim().toLowerCase()

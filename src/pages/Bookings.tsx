@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
@@ -30,6 +31,13 @@ const emptyBulkSaleForm = {
   buyer_name: '',
   total_sale_price: '0',
   sale_date: todayISO(),
+  notes: '',
+}
+
+const emptyBulkEditForm = {
+  buyer_name: '',
+  total_deal_price: '0',
+  deadline: '',
   notes: '',
 }
 
@@ -90,25 +98,38 @@ export default function Bookings() {
   const [bulkSaleError, setBulkSaleError] = useState<string | null>(null)
   const [bulkPurchase, setBulkPurchase] = useState(false)
   const [bulkFulfillmentStatus, setBulkFulfillmentStatus] = useState<FulfillmentStatus>('parking')
+  const [showBulkEditModal, setShowBulkEditModal] = useState(false)
+  const [bulkEditTarget, setBulkEditTarget] = useState<BookingRow[] | null>(null)
+  const [bulkEditForm, setBulkEditForm] = useState(emptyBulkEditForm)
+  const [bulkEditSaving, setBulkEditSaving] = useState(false)
+  const [bulkEditError, setBulkEditError] = useState<string | null>(null)
 
   // Collapse state for status sections — persisted in localStorage
   const [collapsedStatuses, setCollapsedStatuses] = useState<Set<string>>(loadCollapsedStatuses)
   // Expanded booking group keys (for Bulk Transaction expand/collapse)
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([])
   const [singleConvertFulfillment, setSingleConvertFulfillment] = useState<FulfillmentStatus>('parking')
+  const [singleConvertSaleDate, setSingleConvertSaleDate] = useState('')
   const [singleConvertSaving, setSingleConvertSaving] = useState(false)
   const [singleConvertTarget, setSingleConvertTarget] = useState<BookingRow | null>(null)
 
   async function loadBookings() {
     setLoading(true)
     setError(null)
-    const { data, error } = await supabase
-      .from('bookings')
-      .select('*, inventory_items(item_name, modal_price, batch_name)')
-      .order('created_at', { ascending: false })
-    if (error) setError(error.message)
-    else setBookings((data as unknown as BookingRow[]) ?? [])
-    setLoading(false)
+    try {
+      const data = await fetchAllRows<BookingRow>((from, to) =>
+        supabase
+          .from('bookings')
+          .select('*, inventory_items(item_name, modal_price, batch_name)')
+          .order('created_at', { ascending: false })
+          .range(from, to) as unknown as PromiseLike<{ data: BookingRow[] | null; error: { message: string } | null }>
+      )
+      setBookings(data ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load bookings.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -259,7 +280,7 @@ export default function Bookings() {
       ...emptyBulkSaleForm,
       buyer_name: allSameBuyer ? firstBuyer : '',
       total_sale_price: String(totalDealPrice),
-      sale_date: todayISO(),
+      sale_date: selectedBookings[0]?.created_at ? selectedBookings[0].created_at.slice(0, 10) : todayISO(),
     })
     setBulkSaleError(null)
     setBulkPurchase(false)
@@ -304,6 +325,23 @@ export default function Bookings() {
     }
     setSingleConvertTarget(b)
     setSingleConvertFulfillment('parking')
+    // Default the sale date to the booking's own date, not today
+    setSingleConvertSaleDate(b.created_at.slice(0, 10))
+  }
+
+  function openBulkEditModal(groupBookings: BookingRow[]) {
+    if (groupBookings.length === 0) return
+    const firstBooking = groupBookings[0]
+    const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+    setBulkEditTarget(groupBookings)
+    setBulkEditForm({
+      buyer_name: firstBooking.buyer_name ?? '',
+      total_deal_price: String(totalDealPrice),
+      deadline: firstBooking.deadline ?? '',
+      notes: firstBooking.notes ?? '',
+    })
+    setBulkEditError(null)
+    setShowBulkEditModal(true)
   }
 
   function addNewBookingItem() {
@@ -410,22 +448,20 @@ export default function Bookings() {
     const [firstSlot] = splitAmount(rawPrice, selectedCount)
     const base = firstSlot
     const remainder = rawPrice - base * selectedCount
-    const perItemFormatted = base.toLocaleString('id-ID')
-    const bundleFormatted = rawPrice.toLocaleString('id-ID')
 
     return (
       <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
         <p className="font-medium">{selectedCount} items selected</p>
         <div className="mt-1 space-y-0.5 text-xs">
           <p>
-            Bundle price: <span className="font-medium">Rp {bundleFormatted}</span>
+            Bundle price: <span className="font-medium">{formatIDR(rawPrice)}</span>
           </p>
           <p>
-            ≈ <span className="font-medium">Rp {perItemFormatted}</span> per item
+            ≈ <span className="font-medium">{formatIDR(base)}</span> per item
           </p>
           {remainder > 0 && (
             <p className="text-gray-400">
-              Remaining Rp {remainder.toLocaleString('id-ID')} is automatically assigned to the last item.
+              Remaining {formatIDR(remainder)} is automatically assigned to the last item.
             </p>
           )}
         </div>
@@ -682,7 +718,7 @@ export default function Bookings() {
       packing_cost: 0,
       gross_profit: grossProfit,
       net_profit: netProfit,
-      sale_date: todayISO(),
+      sale_date: singleConvertSaleDate || todayISO(),
       fulfillment_status: singleConvertFulfillment,
       notes: 'Converted from booking',
       created_by: user?.id,
@@ -817,6 +853,69 @@ export default function Bookings() {
     })
     showToast(`${selectedBookings.length} booking(s) converted to sale.`)
     loadBookings()
+  }
+
+  async function handleBulkEditSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!bulkEditTarget || bulkEditTarget.length === 0) return
+    if (!bulkEditForm.buyer_name.trim()) {
+      setBulkEditError('Buyer name is required.')
+      return
+    }
+
+    setBulkEditSaving(true)
+    setBulkEditError(null)
+
+    const totalDealPrice = Number(bulkEditForm.total_deal_price) || 0
+    const splitPrices = splitAmount(totalDealPrice, bulkEditTarget.length)
+
+    try {
+      const updatePromises = bulkEditTarget.map((b, index) =>
+        supabase
+          .from('bookings')
+          .update({
+            buyer_name: bulkEditForm.buyer_name.trim(),
+            group_total_deal_price: totalDealPrice,
+            deal_price: splitPrices[index] ?? 0,
+            deadline: bulkEditForm.deadline || null,
+            notes: bulkEditForm.notes.trim() || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', b.id)
+      )
+
+      const results = await Promise.all(updatePromises)
+      const failed = results.find((r) => r.error)
+      if (failed?.error) {
+        setBulkEditSaving(false)
+        setBulkEditError(failed.error.message)
+        showToast(failed.error.message, 'error')
+        return
+      }
+
+      void logActivity({
+        action: 'Edit Bulk Booking',
+        entity: 'bookings',
+        userId: user?.id,
+        details: {
+          count: bulkEditTarget.length,
+          buyer_name: bulkEditForm.buyer_name.trim(),
+          booking_group_id: bulkEditTarget[0].booking_group_id,
+          total_deal_price: totalDealPrice,
+        },
+      })
+
+      setBulkEditSaving(false)
+      setShowBulkEditModal(false)
+      setBulkEditTarget(null)
+      showToast('Bulk booking updated successfully.')
+      loadBookings()
+    } catch (err) {
+      setBulkEditSaving(false)
+      const msg = err instanceof Error ? err.message : 'Failed to update bulk booking.'
+      setBulkEditError(msg)
+      showToast(msg, 'error')
+    }
   }
 
   function handleExport() {
@@ -1222,10 +1321,22 @@ export default function Bookings() {
                             )}
 
                             {/* Card Actions (Min 40px touch targets) */}
-                            {!isGrouped && (
+                            {!isGrouped ? (
                               <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
                                 {renderMobileCardActions(firstBooking)}
                               </div>
+                            ) : (
+                              canWrite && (
+                                <div className="pt-1 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100">
+                                  <button
+                                    type="button"
+                                    onClick={() => openBulkEditModal(groupBookings)}
+                                    className="min-h-[40px] rounded-md border border-gray-300 bg-white px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                                  >
+                                    Edit
+                                  </button>
+                                </div>
+                              )
                             )}
                           </div>
                         )
@@ -1327,7 +1438,19 @@ export default function Bookings() {
                                   )}
                                   <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
                                   <td className="whitespace-nowrap px-3 py-2">
-                                    {!isGrouped && renderBookingActions(firstBooking)}
+                                    {!isGrouped ? (
+                                      renderBookingActions(firstBooking)
+                                    ) : (
+                                      canWrite && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openBulkEditModal(groupBookings)}
+                                          className="text-blue-600 hover:underline"
+                                        >
+                                          Edit
+                                        </button>
+                                      )
+                                    )}
                                   </td>
                                 </tr>
                                 {/* Expanded item rows for grouped bookings */}
@@ -1391,6 +1514,16 @@ export default function Bookings() {
               <br />
               Deal price: <span className="font-medium">{formatIDR(singleConvertTarget.deal_price)}</span>
             </p>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Sale date *</label>
+              <input
+                type="date"
+                required
+                value={singleConvertSaleDate}
+                onChange={(e) => setSingleConvertSaleDate(e.target.value)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              />
+            </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">Shipping status *</label>
               <select
@@ -1458,7 +1591,7 @@ export default function Bookings() {
                           </div>
                           {/* Per-item price — hidden in Borongan mode */}
                           {!newBookingIsBorongan && (
-                            <div className="w-32 shrink-0">
+                            <div className="w-36 shrink-0">
                               <BundlePriceInput
                                 value={item.deal_price}
                                 onChange={(price) => updateNewBookingItemPrice(index, price)}
@@ -1555,13 +1688,11 @@ export default function Bookings() {
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">Deal price (Rp)</label>
-                  <input
-                    type="number"
-                    min="0"
+                  <label className="mb-1 block text-sm font-medium text-gray-700">Deal price *</label>
+                  <FormattedPriceInput
+                    required
                     value={form.deal_price}
-                    onChange={(event) => setForm({ ...form, deal_price: event.target.value })}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                    onChange={(price) => setForm({ ...form, deal_price: price })}
                   />
                 </div>
                 <div>
@@ -1691,13 +1822,11 @@ export default function Bookings() {
             </div>
             {bulkPurchase && (
               <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price (Rp)</label>
-                <input
-                  type="number"
-                  min="0"
+                <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price *</label>
+                <FormattedPriceInput
+                  required
                   value={bulkSaleForm.total_sale_price}
-                  onChange={(e) => setBulkSaleForm({ ...bulkSaleForm, total_sale_price: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  onChange={(price) => setBulkSaleForm({ ...bulkSaleForm, total_sale_price: price })}
                 />
               </div>
             )}
@@ -1728,6 +1857,76 @@ export default function Bookings() {
                 className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {bulkSaleSaving ? 'Converting...' : 'Convert to sale'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showBulkEditModal && bulkEditTarget && (
+        <Modal
+          title={`Edit Bulk Booking (${bulkEditTarget.length} items)`}
+          onClose={() => setShowBulkEditModal(false)}
+        >
+          <form onSubmit={handleBulkEditSubmit} className="space-y-3">
+            <div>
+              <BuyerAutocomplete
+                required
+                label="Buyer name *"
+                value={bulkEditForm.buyer_name}
+                onChange={(buyerName) => setBulkEditForm({ ...bulkEditForm, buyer_name: buyerName })}
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Total deal price *</label>
+              <FormattedPriceInput
+                required
+                value={bulkEditForm.total_deal_price}
+                onChange={(price) => setBulkEditForm({ ...bulkEditForm, total_deal_price: price })}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Total price will be divided equally across all {bulkEditTarget.length} items in this group.
+              </p>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Deadline</label>
+              <input
+                type="date"
+                value={bulkEditForm.deadline}
+                onChange={(e) => setBulkEditForm({ ...bulkEditForm, deadline: e.target.value })}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+              <textarea
+                value={bulkEditForm.notes}
+                onChange={(e) => setBulkEditForm({ ...bulkEditForm, notes: e.target.value })}
+                rows={2}
+                placeholder="Optional notes for this group..."
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+
+            {bulkEditError && <p className="text-sm text-red-600">{bulkEditError}</p>}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkEditModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={bulkEditSaving}
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+              >
+                {bulkEditSaving ? 'Saving...' : 'Save changes'}
               </button>
             </div>
           </form>

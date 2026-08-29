@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { formatDate, formatIDR } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import type { Booking, FulfillmentStatus, Sale } from '../types/database'
@@ -68,21 +69,31 @@ export default function Buyers() {
     async function loadBuyers() {
       setLoading(true)
       setError(null)
-      const [bookingsRes, salesRes] = await Promise.all([
-        supabase
-          .from('bookings')
-          .select('*, inventory_items(item_name, batch_name)')
-          .order('created_at', { ascending: false }),
-        supabase.from('sales').select('*, inventory_items(item_name)').order('sale_date', { ascending: false }),
-      ])
+      try {
+        const [bookingsData, salesData] = await Promise.all([
+          fetchAllRows<BuyerBooking>((from, to) =>
+            supabase
+              .from('bookings')
+              .select('*, inventory_items(item_name, batch_name)')
+              .order('created_at', { ascending: false })
+              .range(from, to) as unknown as PromiseLike<{ data: BuyerBooking[] | null; error: { message: string } | null }>
+          ),
+          fetchAllRows<BuyerSale>((from, to) =>
+            supabase
+              .from('sales')
+              .select('*, inventory_items(item_name)')
+              .order('sale_date', { ascending: false })
+              .range(from, to) as unknown as PromiseLike<{ data: BuyerSale[] | null; error: { message: string } | null }>
+          ),
+        ])
 
-      const firstError = bookingsRes.error || salesRes.error
-      if (firstError) setError(firstError.message)
-      else {
-        setBookings((bookingsRes.data as unknown as BuyerBooking[]) ?? [])
-        setSales((salesRes.data as unknown as BuyerSale[]) ?? [])
+        setBookings(bookingsData ?? [])
+        setSales(salesData ?? [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load buyers.')
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
     }
 
     loadBuyers()

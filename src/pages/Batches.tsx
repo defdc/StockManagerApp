@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { formatDate, formatIDR } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import Modal from '../components/Modal'
+import FormattedPriceInput from '../components/FormattedPriceInput'
 import type { Booking, InventoryItem, Sale } from '../types/database'
+import { useAuth } from '../lib/auth'
+import { useToast } from '../lib/toast'
 
 type BatchStatus = 'No Sales' | 'In Progress' | 'Break Even' | 'Profit'
 
@@ -41,6 +45,9 @@ const FILTERS = ['All', 'No Sales', 'In Progress', 'Break Even', 'Profit'] as co
 type FilterValue = (typeof FILTERS)[number]
 
 export default function Batches() {
+  const { canWrite } = useAuth()
+  const { showToast } = useToast()
+
   const [batches, setBatches] = useState<BatchSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -48,123 +55,187 @@ export default function Batches() {
   const [statusFilter, setStatusFilter] = useState<FilterValue>('All')
   const [selectedBatch, setSelectedBatch] = useState<BatchSummary | null>(null)
 
-  useEffect(() => {
-    async function loadBatches() {
-      setLoading(true)
-      setError(null)
+  // ── Edit batch state ──────────────────────────────────────────────────────
+  const [editingBatch, setEditingBatch] = useState<BatchSummary | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editModalTotal, setEditModalTotal] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
 
-      try {
-        const [inventoryRes, salesRes, bookingsRes] = await Promise.all([
-          supabase.from('inventory_items').select('*').order('created_at', { ascending: true }),
+  async function loadBatches() {
+    setLoading(true)
+    setError(null)
+
+    try {
+      const [inventoryItems, sales, bookings] = await Promise.all([
+        fetchAllRows<InventoryItem>((from, to) =>
+          supabase.from('inventory_items').select('*').order('created_at', { ascending: true }).range(from, to)
+        ),
+        fetchAllRows<SaleRow>((from, to) =>
           supabase
             .from('sales')
             .select('*, inventory_items(batch_name, item_name)')
-            .order('sale_date', { ascending: false }),
+            .order('sale_date', { ascending: false })
+            .range(from, to)
+        ),
+        fetchAllRows<BookingRow>((from, to) =>
           supabase
             .from('bookings')
             .select('*, inventory_items(batch_name, item_name)')
-            .order('created_at', { ascending: false }),
-        ])
+            .order('created_at', { ascending: false })
+            .range(from, to)
+        ),
+      ])
 
-        if (inventoryRes.error) throw new Error(inventoryRes.error.message)
-        if (salesRes.error) throw new Error(salesRes.error.message)
-        if (bookingsRes.error) throw new Error(bookingsRes.error.message)
-
-        const inventoryItems = (inventoryRes.data as InventoryItem[]) ?? []
-        const sales = (salesRes.data as SaleRow[]) ?? []
-        const bookings = (bookingsRes.data as BookingRow[]) ?? []
-
-        const salesByItemId = new Map<string, SaleRow>()
-        for (const sale of sales) {
-          if (sale.inventory_item_id) salesByItemId.set(sale.inventory_item_id, sale)
-        }
-
-        const batchMap = new Map<string, BatchSummary>()
-
-        function ensureBatch(batchName: string): BatchSummary {
-          const existing = batchMap.get(batchName)
-          if (existing) return existing
-
-          const summary: BatchSummary = {
-            batchName,
-            batchModal: 0,
-            totalItems: 0,
-            readyCount: 0,
-            bookedCount: 0,
-            soldCount: 0,
-            bookedRevenue: 0,
-            salesRevenue: 0,
-            totalRevenue: 0,
-            profit: 0,
-            recoveryPercent: 0,
-            status: 'No Sales',
-            items: [],
-          }
-
-          batchMap.set(batchName, summary)
-          return summary
-        }
-
-        for (const item of inventoryItems) {
-          const batchName = item.batch_name?.trim() || 'Unassigned'
-          const batch = ensureBatch(batchName)
-
-          if (batch.totalItems === 0) {
-            batch.batchModal = item.batch_modal_total ?? 0
-          } else if ((item.batch_modal_total ?? 0) > 0 && batch.batchModal === 0) {
-            batch.batchModal = item.batch_modal_total ?? 0
-          }
-
-          batch.totalItems += 1
-
-          const itemWithSale: InventoryItemWithSale = {
-            ...item,
-            salePrice: null,
-            buyerName: null,
-          }
-
-          const matchingSale = salesByItemId.get(item.id)
-          if (matchingSale) {
-            itemWithSale.salePrice = matchingSale.sale_price
-            itemWithSale.buyerName = matchingSale.buyer_name
-            batch.salesRevenue += matchingSale.sale_price
-          }
-
-          if (item.status === 'ready') batch.readyCount += 1
-          else if (item.status === 'booked') batch.bookedCount += 1
-          else if (item.status === 'sold') batch.soldCount += 1
-
-          batch.items.push(itemWithSale)
-        }
-
-        for (const booking of bookings) {
-          if (booking.status === 'cancelled' || booking.status === 'converted_to_sale') continue
-          const batchName = booking.inventory_items?.batch_name?.trim() || 'Unassigned'
-          const batch = ensureBatch(batchName)
-          batch.bookedRevenue += booking.deal_price
-        }
-
-        for (const batch of batchMap.values()) {
-          batch.totalRevenue = batch.bookedRevenue + batch.salesRevenue
-          batch.profit = batch.totalRevenue - batch.batchModal
-          batch.recoveryPercent = batch.batchModal > 0 ? (batch.totalRevenue / batch.batchModal) * 100 : 0
-
-          if (batch.totalRevenue === 0) batch.status = 'No Sales'
-          else if (batch.totalRevenue > 0 && batch.batchModal > 0 && batch.totalRevenue < batch.batchModal) batch.status = 'In Progress'
-          else if (batch.batchModal > 0 && batch.totalRevenue === batch.batchModal) batch.status = 'Break Even'
-          else batch.status = 'Profit'
-        }
-
-        setBatches(Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName)))
-      } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : 'Unable to load batches.')
-      } finally {
-        setLoading(false)
+      const salesByItemId = new Map<string, SaleRow>()
+      for (const sale of sales) {
+        if (sale.inventory_item_id) salesByItemId.set(sale.inventory_item_id, sale)
       }
+
+      const batchMap = new Map<string, BatchSummary>()
+
+      function ensureBatch(batchName: string): BatchSummary {
+        const existing = batchMap.get(batchName)
+        if (existing) return existing
+
+        const summary: BatchSummary = {
+          batchName,
+          batchModal: 0,
+          totalItems: 0,
+          readyCount: 0,
+          bookedCount: 0,
+          soldCount: 0,
+          bookedRevenue: 0,
+          salesRevenue: 0,
+          totalRevenue: 0,
+          profit: 0,
+          recoveryPercent: 0,
+          status: 'No Sales',
+          items: [],
+        }
+
+        batchMap.set(batchName, summary)
+        return summary
+      }
+
+      for (const item of inventoryItems) {
+        const batchName = item.batch_name?.trim() || 'Unassigned'
+        const batch = ensureBatch(batchName)
+
+        if (batch.totalItems === 0) {
+          batch.batchModal = item.batch_modal_total ?? 0
+        } else if ((item.batch_modal_total ?? 0) > 0 && batch.batchModal === 0) {
+          batch.batchModal = item.batch_modal_total ?? 0
+        }
+
+        batch.totalItems += 1
+
+        const itemWithSale: InventoryItemWithSale = {
+          ...item,
+          salePrice: null,
+          buyerName: null,
+        }
+
+        const matchingSale = salesByItemId.get(item.id)
+        if (matchingSale) {
+          itemWithSale.salePrice = matchingSale.sale_price
+          itemWithSale.buyerName = matchingSale.buyer_name
+          batch.salesRevenue += matchingSale.sale_price
+        }
+
+        if (item.status === 'ready') batch.readyCount += 1
+        else if (item.status === 'booked') batch.bookedCount += 1
+        else if (item.status === 'sold') batch.soldCount += 1
+
+        batch.items.push(itemWithSale)
+      }
+
+      for (const booking of bookings) {
+        if (booking.status === 'cancelled' || booking.status === 'converted_to_sale') continue
+        const batchName = booking.inventory_items?.batch_name?.trim() || 'Unassigned'
+        const batch = ensureBatch(batchName)
+        batch.bookedRevenue += booking.deal_price
+      }
+
+      for (const batch of batchMap.values()) {
+        batch.totalRevenue = batch.bookedRevenue + batch.salesRevenue
+        batch.profit = batch.totalRevenue - batch.batchModal
+        batch.recoveryPercent = batch.batchModal > 0 ? (batch.totalRevenue / batch.batchModal) * 100 : 0
+
+        if (batch.totalRevenue === 0) batch.status = 'No Sales'
+        else if (batch.totalRevenue > 0 && batch.batchModal > 0 && batch.totalRevenue < batch.batchModal) batch.status = 'In Progress'
+        else if (batch.batchModal > 0 && batch.totalRevenue === batch.batchModal) batch.status = 'Break Even'
+        else batch.status = 'Profit'
+      }
+
+      setBatches(Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName)))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load batches.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadBatches()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function openEditBatch(batch: BatchSummary) {
+    setEditingBatch(batch)
+    setEditName(batch.batchName)
+    setEditModalTotal(String(batch.batchModal))
+  }
+
+  async function handleEditBatchSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!editingBatch) return
+
+    const newName = editName.trim()
+    if (!newName) {
+      showToast('Batch name cannot be empty.', 'error')
+      return
     }
 
-    loadBatches()
-  }, [])
+    const newModalTotal = Number(editModalTotal) || 0
+    setEditSaving(true)
+
+    try {
+      const oldName = editingBatch.batchName
+      const updatePayload = {
+        batch_name: newName,
+        batch_modal_total: newModalTotal,
+      }
+
+      const updateQuery =
+        oldName === 'Unassigned'
+          ? supabase
+              .from('inventory_items')
+              .update(updatePayload)
+              .or('batch_name.is.null,batch_name.eq.Unassigned')
+          : supabase
+              .from('inventory_items')
+              .update(updatePayload)
+              .eq('batch_name', oldName)
+
+      const { error: updateError } = await updateQuery
+
+      if (updateError) {
+        showToast(updateError.message, 'error')
+        return
+      }
+
+      showToast('Batch updated successfully.')
+      setEditingBatch(null)
+      if (selectedBatch && selectedBatch.batchName === oldName) {
+        setSelectedBatch(null)
+      }
+      await loadBatches()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update batch.', 'error')
+    } finally {
+      setEditSaving(false)
+    }
+  }
 
   const filteredBatches = useMemo(() => {
     return batches
@@ -243,9 +314,23 @@ export default function Batches() {
                   >
                     <div className="flex items-center justify-between gap-2 mb-2">
                       <span className="font-semibold text-gray-900 text-sm truncate">{batch.batchName}</span>
-                      <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
-                        {batch.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {canWrite && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              openEditBatch(batch)
+                            }}
+                            className="text-xs font-medium text-blue-600 hover:underline"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
+                          {batch.status}
+                        </span>
+                      </div>
                     </div>
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <span className="text-gray-500">Recovery: <strong className="font-medium text-gray-800">{Math.round(batch.recoveryPercent)}%</strong></span>
@@ -277,12 +362,13 @@ export default function Batches() {
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked</th>
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sold</th>
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredBatches.length === 0 ? (
                   <tr>
-                    <td colSpan={13} className="px-3 py-6 text-center text-gray-400">
+                    <td colSpan={14} className="px-3 py-6 text-center text-gray-400">
                       No batches found.
                     </td>
                   </tr>
@@ -324,6 +410,17 @@ export default function Batches() {
                           <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${batchStatusClasses[batch.status]}`}>
                             {batch.status}
                           </span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3">
+                          {canWrite && (
+                            <button
+                              type="button"
+                              onClick={() => openEditBatch(batch)}
+                              className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                            >
+                              Edit
+                            </button>
+                          )}
                         </td>
                       </tr>
                     )
@@ -423,6 +520,49 @@ export default function Batches() {
               </div>
             </section>
           </div>
+        </Modal>
+      )}
+
+      {editingBatch && (
+        <Modal title={`Edit Batch — ${editingBatch.batchName}`} onClose={() => setEditingBatch(null)}>
+          <form onSubmit={handleEditBatchSubmit} className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Batch Name *</label>
+              <input
+                type="text"
+                required
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="e.g. Borongan 3.350 Anuva"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Batch Modal (Modal Total) *</label>
+              <FormattedPriceInput
+                value={editModalTotal}
+                onChange={(val) => setEditModalTotal(val)}
+                placeholder="0"
+                required
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditingBatch(null)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={editSaving}
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+              >
+                {editSaving ? 'Saving...' : 'Save changes'}
+              </button>
+            </div>
+          </form>
         </Modal>
       )}
     </div>
