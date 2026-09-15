@@ -106,6 +106,7 @@ export default function Inventory() {
   const [showBulkBookingModal, setShowBulkBookingModal] = useState(false)
   const [bulkBookingForm, setBulkBookingForm] = useState(emptyBulkBookingForm)
   const [bulkBookingSaving, setBulkBookingSaving] = useState(false)
+  const [bulkDeleteSaving, setBulkDeleteSaving] = useState(false)
   const [bulkBookingError, setBulkBookingError] = useState<string | null>(null)
 
   // Detail drawer
@@ -279,6 +280,20 @@ export default function Inventory() {
       return
     }
     setSelectedItemIds((current) => Array.from(new Set([...current, ...filteredIds])))
+  }
+
+  // Category selection helpers
+  function isCategoryFullySelected(catItems: InventoryItem[]) {
+    return catItems.length > 0 && catItems.every((i) => selectedItemIds.includes(i.id));
+  }
+  function toggleCategorySelection(catItems: InventoryItem[]) {
+    const ids = catItems.map((i) => i.id);
+    const allSelected = ids.every((id) => selectedItemIds.includes(id));
+    if (allSelected) {
+      setSelectedItemIds((current) => current.filter((id) => !ids.includes(id)));
+    } else {
+      setSelectedItemIds((current) => Array.from(new Set([...current, ...ids])));
+    }
   }
 
   // ── Category collapse ────────────────────────────────────────────────────
@@ -556,6 +571,46 @@ export default function Inventory() {
     })
     loadItems()
   }
+  async function handleBulkDelete() {
+    if (selectedItemIds.length === 0) return
+
+    const itemMap = new Map(items.map((item) => [item.id, item]))
+    const hasInvalidItems = selectedItemIds.some((id) => {
+      const item = itemMap.get(id)
+      if (!item) return false
+      const statusLower = item.status?.toLowerCase()
+      const hasTransaction = Boolean(
+        (item as unknown as Record<string, unknown>).booking_id ||
+        (item as unknown as Record<string, unknown>).sale_id
+      )
+      return statusLower !== 'ready' || hasTransaction
+    })
+
+    if (hasInvalidItems) {
+      showToast(
+        'Cannot delete: One or more selected items are already booked or sold. Please unselect them first.',
+        'error'
+      )
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${selectedItemIds.length} selected item${selectedItemIds.length === 1 ? '' : 's'}? This action cannot be undone.`
+    )
+    if (!confirmed) return
+
+    setBulkDeleteSaving(true)
+    const { error } = await supabase.from('inventory_items').delete().in('id', selectedItemIds)
+    setBulkDeleteSaving(false)
+
+    if (error) {
+      showToast(error.message, 'error')
+    } else {
+      showToast(`Successfully deleted ${selectedItemIds.length} item${selectedItemIds.length === 1 ? '' : 's'}`)
+      setSelectedItemIds([])
+      loadItems()
+    }
+  }
 
   function handleDelete(item: InventoryItem) {
     setDeletingItem(item)
@@ -661,13 +716,22 @@ export default function Inventory() {
         {selectedItemIds.length > 0 && (
           <>
             <span className="text-gray-500">{selectedItemIds.length} selected</span>
-            {canWrite && (
-              <button
-                onClick={openBulkBookingModal}
-                className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
-              >
-                Book Selected
-              </button>
+                        {canWrite && (
+              <>
+                <button
+                  onClick={openBulkBookingModal}
+                  className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                >
+                  Book Selected
+                </button>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={bulkDeleteSaving}
+                  className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+                >
+                  Delete Selected
+                </button>
+              </>
             )}
             <button
               onClick={() => setSelectedItemIds([])}
@@ -703,7 +767,16 @@ export default function Inventory() {
                   onClick={() => toggleCategory(category)}
                   className="flex w-full items-center justify-between bg-gray-50 px-3 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-100"
                 >
-                  <span>
+                  <input
+                    type="checkbox"
+                    checked={isCategoryFullySelected(catItems)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      toggleCategorySelection(catItems);
+                    }}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  <span className="flex items-center">
                     {isCollapsed ? '▶' : '▼'} {category}
                     <span className="ml-2 font-normal text-gray-500">({catItems.length})</span>
                   </span>

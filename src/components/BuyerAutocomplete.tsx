@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { smartSearchRank } from '../lib/search'
+import { fetchAllRows } from '../lib/supabasePagination'
 
 interface BuyerAutocompleteProps {
   value: string
@@ -8,6 +8,7 @@ interface BuyerAutocompleteProps {
   label?: string
   required?: boolean
   placeholder?: string
+  existingBuyers?: string[]
 }
 
 interface BuyerSuggestion {
@@ -22,6 +23,7 @@ export default function BuyerAutocomplete({
   label = 'Buyer name',
   required,
   placeholder = 'Search or enter buyer name...',
+  existingBuyers,
 }: BuyerAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -61,51 +63,66 @@ export default function BuyerAutocomplete({
   }, [])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || suggestions.length > 0) return
 
     let cancelled = false
     setLoading(true)
 
     async function loadBuyerNames() {
-      const [bookingsRes, salesRes] = await Promise.all([
-        supabase.from('bookings').select('buyer_name').limit(1000),
-        supabase.from('sales').select('buyer_name').limit(1000),
-      ])
+      try {
+        const [bookingsData, salesData] = await Promise.all([
+          fetchAllRows<{ buyer_name: string | null }>((from, to) =>
+            supabase.from('bookings').select('buyer_name').range(from, to)
+          ),
+          fetchAllRows<{ buyer_name: string | null }>((from, to) =>
+            supabase.from('sales').select('buyer_name').range(from, to)
+          ),
+        ])
 
-      if (cancelled) return
+        if (cancelled) return
 
-      const suggestionsByName = new Map<string, BuyerSuggestion>()
-      function ensureSuggestion(rawName: string): BuyerSuggestion {
-        const name = rawName.trim()
-        const existingName = [...suggestionsByName.keys()].find(
-          (candidate) => candidate.toLowerCase() === name.toLowerCase()
+        const suggestionsByName = new Map<string, BuyerSuggestion>()
+        function ensureSuggestion(rawName: string): BuyerSuggestion {
+          const name = rawName.trim()
+          const existingName = [...suggestionsByName.keys()].find(
+            (candidate) => candidate.toLowerCase() === name.toLowerCase()
+          )
+          if (existingName) return suggestionsByName.get(existingName) as BuyerSuggestion
+          const suggestion = { name, purchases: 0, transactions: 0 }
+          suggestionsByName.set(name, suggestion)
+          return suggestion
+        }
+
+        for (const raw of existingBuyers ?? []) {
+          const name = raw.trim()
+          if (!name) continue
+          ensureSuggestion(name)
+        }
+
+        for (const row of bookingsData ?? []) {
+          const name = row.buyer_name?.trim()
+          if (!name) continue
+          ensureSuggestion(name).transactions += 1
+        }
+
+        for (const row of salesData ?? []) {
+          const name = row.buyer_name?.trim()
+          if (!name) continue
+          const suggestion = ensureSuggestion(name)
+          suggestion.transactions += 1
+          suggestion.purchases += 1
+        }
+
+        setSuggestions(
+          [...suggestionsByName.values()].sort(
+            (a, b) => b.purchases - a.purchases || b.transactions - a.transactions || a.name.localeCompare(b.name)
+          )
         )
-        if (existingName) return suggestionsByName.get(existingName) as BuyerSuggestion
-        const suggestion = { name, purchases: 0, transactions: 0 }
-        suggestionsByName.set(name, suggestion)
-        return suggestion
+      } catch {
+        // ignore errors
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-
-      for (const row of bookingsRes.data ?? []) {
-        const name = row.buyer_name?.trim()
-        if (!name) continue
-        ensureSuggestion(name).transactions += 1
-      }
-
-      for (const row of salesRes.data ?? []) {
-        const name = row.buyer_name?.trim()
-        if (!name) continue
-        const suggestion = ensureSuggestion(name)
-        suggestion.transactions += 1
-        suggestion.purchases += 1
-      }
-
-      setSuggestions(
-        [...suggestionsByName.values()].sort(
-          (a, b) => b.purchases - a.purchases || b.transactions - a.transactions || a.name.localeCompare(b.name)
-        )
-      )
-      setLoading(false)
     }
 
     loadBuyerNames()
@@ -113,18 +130,29 @@ export default function BuyerAutocomplete({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, suggestions.length, existingBuyers])
 
   const filteredSuggestions = useMemo(() => {
+    const searchInput = value.trim().toLowerCase()
+    if (!searchInput) {
+      return suggestions.slice(0, 8)
+    }
+
     return suggestions
-      .map((suggestion) => ({
-        suggestion,
-        rank: smartSearchRank(value, [{ value: suggestion.name }]),
-      }))
-      .filter((entry): entry is { suggestion: BuyerSuggestion; rank: number } => entry.rank !== null)
-      .sort((a, b) => a.rank - b.rank || b.suggestion.purchases - a.suggestion.purchases)
+      .filter((buyer) => buyer.name.toLowerCase().includes(searchInput))
+      .sort((a, b) => {
+        const aLower = a.name.toLowerCase()
+        const bLower = b.name.toLowerCase()
+        const aStarts = aLower.startsWith(searchInput) ? 0 : 1
+        const bStarts = bLower.startsWith(searchInput) ? 0 : 1
+        return (
+          aStarts - bStarts ||
+          b.purchases - a.purchases ||
+          b.transactions - a.transactions ||
+          a.name.localeCompare(b.name)
+        )
+      })
       .slice(0, 8)
-      .map((entry) => entry.suggestion)
   }, [suggestions, value])
 
   return (
@@ -169,7 +197,7 @@ export default function BuyerAutocomplete({
                 key={suggestion.name}
                 type="button"
                 role="option"
-                aria-selected={suggestion.name === value}
+                aria-selected={suggestion.name.toLowerCase() === value.trim().toLowerCase()}
                 onClick={() => {
                   onChange(suggestion.name)
                   setOpen(false)

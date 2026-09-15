@@ -439,25 +439,26 @@ export default function ImportExcel() {
           if (r.row_number !== null) rowNumberToLegacyId.set(r.row_number, r.id)
         }
 
-        const inventoryPayload: Record<string, unknown>[] = []
         const bookingByLegacyRowId = new Map<string, { buyerName: string; dealPrice: number }>()
 
-        chunk.forEach((row, i) => {
+        const inventoryPayload = chunk.flatMap((row, i) => {
           const rowNumber = start + i + 2
           const evalResult = evaluateStockRow(row, stockIdx, batchByRow.get(start + i) ?? null)
           if (evalResult.skip) {
             skippedRows++
-            return
+            return []
           }
-          cleanRows++
-          if (evalResult.missingModal) missingModal++
+
+          const qty = evalResult.quantity || 1
+          cleanRows += qty
+          if (evalResult.missingModal) missingModal += qty
           if (evalResult.bookedAmount !== null) {
             rowsWithBookedValue++
-            inventoryRowsMarkedBooked++
+            inventoryRowsMarkedBooked += qty
           }
-          if (evalResult.batchName) rowsWithBatch++
-          if (evalResult.batchModalTotal !== null) rowsWithBatchModalTotal++
-          if (evalResult.modalCalculatedFromBatch) rowsWithCalculatedBatchModal++
+          if (evalResult.batchName) rowsWithBatch += qty
+          if (evalResult.batchModalTotal !== null) rowsWithBatchModalTotal += qty
+          if (evalResult.modalCalculatedFromBatch) rowsWithCalculatedBatchModal += qty
 
           const legacyRowId = rowNumberToLegacyId.get(rowNumber) ?? null
           if (!legacyRowId && evalResult.bookedAmount !== null) {
@@ -471,10 +472,10 @@ export default function ImportExcel() {
             })
           }
 
-          inventoryPayload.push({
+          const itemTemplate = {
             item_name: evalResult.itemName,
             category,
-            quantity: evalResult.quantity,
+            quantity: 1,
             modal_price: evalResult.modalPrice,
             batch_name: evalResult.batchName,
             batch_modal_total: evalResult.batchModalTotal,
@@ -486,7 +487,9 @@ export default function ImportExcel() {
             legacy_import_id: importRow.id,
             legacy_row_id: legacyRowId,
             created_by: user.id,
-          })
+          }
+
+          return Array.from({ length: qty }, () => ({ ...itemTemplate }))
         })
 
         if (inventoryPayload.length > 0) {

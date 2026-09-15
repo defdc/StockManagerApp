@@ -237,6 +237,47 @@ export default function Batches() {
     }
   }
 
+  // Delete batch with strict validation
+  async function handleDeleteBatch(batch: BatchSummary) {
+    // Validate that there are no booked or sold items
+    if (batch.bookedCount > 0 || batch.soldCount > 0) {
+      showToast('Cannot delete batch: It already has booked or sold items.', 'error');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Are you sure you want to delete this batch? All unsold/ready items inside this batch will also be deleted.'
+    );
+    if (!confirmed) return;
+
+    try {
+      // Delete inventory items belonging to the batch
+      const { error: itemsError } = await supabase
+        .from('inventory_items')
+        .delete()
+        .eq('batch_name', batch.batchName);
+      if (itemsError) {
+        showToast(itemsError.message, 'error');
+        return;
+      }
+
+      // Delete the batch itself
+      const { error: batchError } = await supabase
+        .from('batches')
+        .delete()
+        .eq('batch_name', batch.batchName);
+      if (batchError) {
+        showToast(batchError.message, 'error');
+        return;
+      }
+
+      showToast('Batch deleted successfully.');
+      await loadBatches();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to delete batch.', 'error');
+    }
+  }
+
   const filteredBatches = useMemo(() => {
     return batches
       .map((batch) => ({
@@ -413,13 +454,28 @@ export default function Batches() {
                         </td>
                         <td className="whitespace-nowrap px-3 py-3">
                           {canWrite && (
-                            <button
-                              type="button"
-                              onClick={() => openEditBatch(batch)}
-                              className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
-                            >
-                              Edit
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  openEditBatch(batch)
+                                }}
+                                className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  handleDeleteBatch(batch)
+                                }}
+                                className="ml-2 font-medium text-red-600 hover:text-red-800 hover:underline"
+                              >
+                                Delete
+                              </button>
+                            </>
                           )}
                         </td>
                       </tr>

@@ -52,12 +52,23 @@ export function getSheetGrid(workbook: XLSX.WorkBook, sheetName: string): SheetG
 }
 
 export function findColumnIndex(header: string[], candidates: string[]): number {
-  const normalized = header.map((h) => h.toLowerCase().trim())
+  const normalized = header.map((h) =>
+    h === null || h === undefined ? '' : String(h).toLowerCase().replace(/[\s\u00a0]+/g, ' ').trim()
+  )
   for (const candidate of candidates) {
-    const idx = normalized.indexOf(candidate.toLowerCase())
+    const candidateNorm = candidate.toLowerCase().replace(/[\s\u00a0]+/g, ' ').trim()
+    const idx = normalized.indexOf(candidateNorm)
     if (idx !== -1) return idx
   }
   return -1
+}
+
+export const EXACT_QTY_HEADERS = ['pcs', 'qty', 'quantity', 'jumlah', 'count']
+
+export function isExactQtyHeader(headerCol: unknown): boolean {
+  if (headerCol === null || headerCol === undefined) return false
+  const clean = String(headerCol).toLowerCase().replace(/[\s\u00a0]+/g, ' ').trim()
+  return EXACT_QTY_HEADERS.includes(clean)
 }
 
 export function buildRawJson(header: string[], row: unknown[]): Record<string, unknown> {
@@ -183,7 +194,7 @@ export function detectStockColumns(header: string[]): StockColumnIndexes {
   const modal = findColumnIndex(header, ['modal', 'modal/pcs'])
   return {
     itemName: findColumnIndex(header, ['item name', 'item_name', 'name']),
-    pcs: findColumnIndex(header, ['pcs']),
+    pcs: header.findIndex(isExactQtyHeader),
     modal,
     booked: findColumnIndex(header, ['booked']),
     buyerName: findColumnIndex(header, ['buyer name', 'buyer_name', 'buyer', 'customer name']),
@@ -230,8 +241,7 @@ export function detectBatchModals(
       if (evaluation.skip) continue
 
       validRowIndexes.push(rowIndex)
-      const quantity = idx.pcs >= 0 ? toNumberOrNull(row[idx.pcs]) : null
-      if (quantity !== null && quantity > 0) totalQuantity += quantity
+      totalQuantity += evaluation.quantity
     }
 
     const info: BatchModalInfo = {
@@ -274,6 +284,9 @@ export function evaluateStockRow(
   const nameStr = String(rawName).trim()
   if (looksLikeTotalRow(nameStr)) return { skip: true, reason: 'total_row' }
 
+  const rawPcs = idx.pcs >= 0 ? toNumberOrNull(row[idx.pcs]) : null
+  const quantity = rawPcs !== null && rawPcs > 0 ? Math.floor(rawPcs) : 1
+
   const modal = batch ? batch.modalPrice : idx.modal >= 0 ? parseCurrency(row[idx.modal]) : null
   const booked = idx.booked >= 0 ? parseCurrency(row[idx.booked]) : null
   const rawBuyerName = idx.buyerName >= 0 ? row[idx.buyerName] : null
@@ -283,7 +296,7 @@ export function evaluateStockRow(
   return {
     skip: false,
     itemName: nameStr,
-    quantity: 1,
+    quantity,
     modalPrice: modal ?? 0,
     bookedAmount: booked !== null && booked > 0 ? booked : null,
     buyerName,
