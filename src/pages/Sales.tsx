@@ -333,6 +333,60 @@ export default function Sales() {
     }
   }
 
+  async function handleCopyBatchSummary(group?: DailySalesGroup) {
+    const items = group ? group.transactionGroups.flatMap((tg) => tg.sales) : filtered
+
+    if (items.length === 0) {
+      showToast('No sales data to copy.', 'error')
+      return
+    }
+
+    let dateString = 'Semua Tanggal'
+    if (group) {
+      dateString = `tgl ${formatDate(group.saleDate)}`
+    } else {
+      const dates = Array.from(new Set(items.map((s) => s.sale_date).filter(Boolean))).sort()
+      if (dates.length === 1) {
+        dateString = `tgl ${formatDate(dates[0])}`
+      } else if (dates.length > 1) {
+        dateString = `tgl ${formatDate(dates[0])} - ${formatDate(dates[dates.length - 1])}`
+      }
+    }
+
+    const grandTotal = items.reduce((sum, s) => sum + (s.sale_price ?? 0), 0)
+    const formattedGrandTotal = Math.round(grandTotal / 1000).toLocaleString('id-ID')
+
+    const batchMap = new Map<string, { totalRevenue: number; itemCount: number }>()
+    for (const sale of items) {
+      const batchName = sale.inventory_items?.batch_name?.trim() || 'Tanpa Batch'
+      const existing = batchMap.get(batchName) ?? { totalRevenue: 0, itemCount: 0 }
+      existing.totalRevenue += sale.sale_price ?? 0
+      existing.itemCount += 1
+      batchMap.set(batchName, existing)
+    }
+
+    const sortedBatches = Array.from(batchMap.entries())
+      .map(([name, data]) => ({
+        name,
+        totalRevenue: data.totalRevenue,
+        itemCount: data.itemCount,
+      }))
+      .sort((a, b) => b.totalRevenue - a.totalRevenue)
+
+    const batchLines = sortedBatches.map(
+      (batch) => `- ${batch.name} (${batch.itemCount} pcs) = ${Math.round(batch.totalRevenue / 1000)}k`
+    )
+
+    const summaryString = [`Total ${formattedGrandTotal} ${dateString} :`, ...batchLines].join('\n')
+
+    try {
+      await navigator.clipboard.writeText(summaryString)
+      showToast('Batch summary copied to clipboard!')
+    } catch {
+      showToast('Failed to copy batch summary to clipboard.', 'error')
+    }
+  }
+
   function openAddModal() {
     setEditingId(null)
     setForm(emptyForm)
@@ -826,13 +880,22 @@ export default function Sales() {
                         <span>{formatDate(dayGroup.saleDate)}</span>
                       </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void copySummary(dayGroup)}
-                      className="text-sm font-medium text-blue-700 hover:underline"
-                    >
-                      Copy Summary
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void copySummary(dayGroup)}
+                        className="text-sm font-medium text-blue-700 hover:underline"
+                      >
+                        Copy Summary
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyBatchSummary(dayGroup)}
+                        className="text-sm font-medium text-blue-700 hover:underline"
+                      >
+                        Copy Batch Summary
+                      </button>
+                    </div>
                   </div>
 
                   {isDateExpanded && (

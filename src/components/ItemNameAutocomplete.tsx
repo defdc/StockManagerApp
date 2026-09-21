@@ -151,9 +151,16 @@ export default function ItemNameAutocomplete({
   }, [existingRecords, records, extraSuggestions, extraRecords])
 
   const filteredRecords = useMemo(() => {
-    const q = value.trim().toLowerCase()
-    if (!q) return combinedRecords.slice(0, 10)
-    return combinedRecords.filter((r) => r.item_name.toLowerCase().includes(q)).slice(0, 10)
+    const trimmed = value.trim()
+    if (!trimmed) return combinedRecords.slice(0, 10)
+
+    const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+    return combinedRecords
+      .filter((r) => {
+        const normalizedItemName = r.item_name.toLowerCase()
+        return searchWords.every((word) => normalizedItemName.includes(word))
+      })
+      .slice(0, 10)
   }, [combinedRecords, value])
 
   const isExisting = combinedRecords.some((r) => r.item_name.toLowerCase() === value.trim().toLowerCase())
