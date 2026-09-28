@@ -47,8 +47,9 @@ const BOOKING_STATUSES: BookingStatus[] = ['active', 'converted_to_sale', 'cance
 
 const BundlePriceInput = FormattedPriceInput
 
-// ── Collapse state helpers (status sections) ──────────────────────────────────
+// ── Collapse state helpers (status & date sections) ───────────────────────────
 const BOOKINGS_COLLAPSED_KEY = 'bookings_collapsed_statuses'
+const BOOKINGS_COLLAPSED_DATES_KEY = 'bookings_collapsed_dates'
 
 function loadCollapsedStatuses(): Set<string> {
   try {
@@ -62,6 +63,23 @@ function loadCollapsedStatuses(): Set<string> {
 function saveCollapsedStatuses(set: Set<string>) {
   try {
     localStorage.setItem(BOOKINGS_COLLAPSED_KEY, JSON.stringify([...set]))
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadCollapsedDates(): Set<string> {
+  try {
+    const raw = localStorage.getItem(BOOKINGS_COLLAPSED_DATES_KEY)
+    return raw ? new Set<string>(JSON.parse(raw) as string[]) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function saveCollapsedDates(set: Set<string>) {
+  try {
+    localStorage.setItem(BOOKINGS_COLLAPSED_DATES_KEY, JSON.stringify([...set]))
   } catch {
     // ignore storage errors
   }
@@ -184,7 +202,7 @@ export default function Bookings() {
   }, [filtered, statusFilter])
 
   const [groupBy, setGroupBy] = useState<'status' | 'date'>('status')
-  const [collapsedDates, setCollapsedDates] = useState<Set<string>>(new Set())
+  const [collapsedDates, setCollapsedDates] = useState<Set<string>>(loadCollapsedDates)
 
   const groupedByDate = useMemo(() => {
     const map = new Map<string, BookingRow[]>()
@@ -222,6 +240,16 @@ export default function Bookings() {
       if (next.has(status)) next.delete(status)
       else next.add(status)
       saveCollapsedStatuses(next)
+      return next
+    })
+  }
+
+  function toggleDateCollapse(dateKey: string) {
+    setCollapsedDates((prev) => {
+      const next = new Set(prev)
+      if (next.has(dateKey)) next.delete(dateKey)
+      else next.add(dateKey)
+      saveCollapsedDates(next)
       return next
     })
   }
@@ -500,6 +528,29 @@ export default function Bookings() {
         setSaving(false)
         setFormError(error.message)
         return
+      }
+      // After successful booking update, sync to sales if a related sale exists
+      if (editingItemId) {
+        const { data: saleRow, error: saleFetchError } = await supabase
+          .from('sales')
+          .select('id')
+          .eq('inventory_item_id', editingItemId)
+          .maybeSingle()
+        if (!saleFetchError && saleRow) {
+          const { error: saleUpdateError } = await supabase
+            .from('sales')
+            .update({
+              buyer_name: form.buyer_name.trim(),
+              sale_price: Number(form.deal_price) || 0,
+              notes: form.notes.trim() || null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', saleRow.id)
+          if (saleUpdateError) {
+            console.error('Failed to sync sale:', saleUpdateError)
+            showToast(saleUpdateError.message, 'error')
+          }
+        }
       }
       // If cancelled, free up the inventory item back to ready.
       if (form.status === 'cancelled' && editingItemId) {
@@ -893,6 +944,33 @@ export default function Bookings() {
         return
       }
 
+      // Sync any converted sales for these items
+      const itemIds = bulkEditTarget
+        .map((b) => b.inventory_item_id)
+        .filter((id): id is string => Boolean(id))
+      if (itemIds.length > 0) {
+        const { data: existingSales } = await supabase
+          .from('sales')
+          .select('id, inventory_item_id')
+          .in('inventory_item_id', itemIds)
+        if (existingSales && existingSales.length > 0) {
+          const saleUpdatePromises = existingSales.map((sale) => {
+            const index = bulkEditTarget.findIndex((b) => b.inventory_item_id === sale.inventory_item_id)
+            const price = index >= 0 ? splitPrices[index] : 0
+            return supabase
+              .from('sales')
+              .update({
+                buyer_name: bulkEditForm.buyer_name.trim(),
+                sale_price: price,
+                notes: bulkEditForm.notes.trim() || null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', sale.id)
+          })
+          await Promise.all(saleUpdatePromises)
+        }
+      }
+
       void logActivity({
         action: 'Edit Bulk Booking',
         entity: 'bookings',
@@ -986,6 +1064,63 @@ export default function Bookings() {
         >
           Delete
         </button>
+      </div>
+    )
+  }
+
+  // Render section aggregate metrics in header (Desktop & Mobile)
+  function renderSectionMetrics(groupTitle: string, sectionBookings: BookingRow[]) {
+    const totalDeal = sectionBookings.reduce((sum, b) => sum + b.deal_price, 0)
+    const totalProfit = sectionBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0)
+
+    if (groupBy === 'date') {
+      const activeCount = sectionBookings.filter((b) => b.status === 'active').length
+      return (
+        <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
+          <span>
+            Active Bookings:{' '}
+            <strong className="font-semibold text-gray-900">{activeCount}</strong>
+          </span>
+          <span className="h-3 w-[1px] bg-gray-300" />
+          <span>
+            Total Deal Value:{' '}
+            <strong className="font-semibold text-gray-900">{formatIDR(totalDeal)}</strong>
+          </span>
+        </div>
+      )
+    }
+
+    const isCancelled = groupTitle === 'cancelled'
+    const isConverted = groupTitle === 'converted_to_sale'
+    const countLabel = isCancelled
+      ? 'Cancelled Bookings'
+      : isConverted
+        ? 'Converted Bookings'
+        : 'Active Bookings'
+    const profitLabel = isConverted ? 'Realized Profit' : 'Potential Profit'
+
+    return (
+      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
+        <span>
+          {countLabel}:{' '}
+          <strong className="font-semibold text-gray-900">{sectionBookings.length}</strong>
+        </span>
+        <span className="h-3 w-[1px] bg-gray-300" />
+        <span>
+          Total Deal Value:{' '}
+          <strong className="font-semibold text-gray-900">{formatIDR(totalDeal)}</strong>
+        </span>
+        {!isCancelled && (
+          <>
+            <span className="h-3 w-[1px] bg-gray-300" />
+            <span>
+              {profitLabel}:{' '}
+              <strong className={`font-semibold ${totalProfit >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                {formatIDR(totalProfit)}
+              </strong>
+            </span>
+          </>
+        )}
       </div>
     )
   }
@@ -1131,61 +1266,24 @@ export default function Bookings() {
                         if (groupBy === 'status') {
                           toggleStatusCollapse(groupTitle)
                         } else {
-                          setCollapsedDates((prev) => {
-                            const next = new Set(prev)
-                            if (next.has(groupTitle)) next.delete(groupTitle)
-                            else next.add(groupTitle)
-                            return next
-                          })
+                          toggleDateCollapse(groupTitle)
                         }
                       }}
                       className="flex items-center gap-1 font-semibold text-gray-800 hover:text-gray-900"
                     >
                       <span>{isCollapsed ? '▶' : '▼'}</span>
-                      <span>{groupBy === 'status' ? formatStatus(groupTitle) : formatDate(groupTitle)}</span>
+                      <span>
+                        {groupBy === 'status'
+                          ? formatStatus(groupTitle)
+                          : groupTitle === 'Unknown'
+                            ? 'Unknown Date'
+                            : formatDate(groupTitle)}
+                      </span>
                       <span className="ml-1 font-normal text-gray-500">({sectionBookings.length})</span>
                     </button>
                   </div>
 
-                  {groupBy === 'status' && groupTitle === 'active' && (
-                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
-                      <span>
-                        Items booked: <strong className="font-semibold text-gray-900">{sectionBookings.length}</strong>
-                      </span>
-                      <span className="h-3 w-[1px] bg-gray-300" />
-                      <span>
-                        Potential Revenue:{' '}
-                        <strong className="font-semibold text-gray-900">
-                          {formatIDR(sectionBookings.reduce((sum, b) => sum + b.deal_price, 0))}
-                        </strong>
-                      </span>
-                      <span className="h-3 w-[1px] bg-gray-300" />
-                      <span>
-                        Potential Profit:{' '}
-                        <strong className="font-semibold text-green-700">
-                          {formatIDR(sectionBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0))}
-                        </strong>
-                      </span>
-                    </div>
-                  )}
-
-                  {groupBy === 'date' && (
-                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600">
-                      <span>
-                        Active Bookings:{' '}
-                        <strong className="font-semibold text-gray-900">
-                          {sectionBookings.filter((b) => b.status === 'active').length}
-                        </strong>
-                      </span>
-                      <span className="h-3 w-[1px] bg-gray-300" />
-                      <span>
-                        Total Deal Value:{' '}
-                        <strong className="font-semibold text-gray-900">
-                          {formatIDR(sectionBookings.reduce((s, b) => s + b.deal_price, 0))}
-                        </strong>
-                      </span>
-                    </div>
-                  )}
+                  {renderSectionMetrics(groupTitle, sectionBookings)}
                 </div>
 
                 {/* Booking rows */}
@@ -1272,8 +1370,12 @@ export default function Bookings() {
                                   <span className="font-bold text-gray-900 text-sm">{formatIDR(firstBooking.deal_price)}</span>
                                 </div>
                                 <div>
-                                  <span className="text-gray-400 block text-[11px]">Deadline</span>
-                                  <span className="font-medium text-gray-800">{formatDate(firstBooking.deadline)}</span>
+                                  <span className="text-gray-400 block text-[11px]">
+                                    {groupBy === 'date' ? 'Deadline' : 'Date'}
+                                  </span>
+                                  <span className="font-medium text-gray-800">
+                                    {formatDate(groupBy === 'date' ? firstBooking.deadline : firstBooking.created_at)}
+                                  </span>
                                 </div>
                               </div>
                             )}
@@ -1310,7 +1412,11 @@ export default function Bookings() {
                                     </div>
                                     <div className="flex items-center justify-between text-[11px] text-gray-500 pl-6">
                                       <span>Batch: {b.inventory_items?.batch_name ?? '-'}</span>
-                                      <span>Deadline: {formatDate(b.deadline)}</span>
+                                      <span>
+                                        {groupBy === 'date'
+                                          ? `Deadline: ${formatDate(b.deadline)}`
+                                          : `Date: ${formatDate(b.created_at)}`}
+                                      </span>
                                     </div>
                                     <div className="pt-1 pl-6 flex gap-2">
                                       {renderMobileCardActions(b)}
@@ -1353,9 +1459,9 @@ export default function Bookings() {
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Buyer</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deal price</th>
-                            {groupBy === 'date' && (
-                              <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
-                            )}
+                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">
+                              {groupBy === 'date' ? 'Status' : 'Date'}
+                            </th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deadline</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
                           </tr>
@@ -1421,8 +1527,8 @@ export default function Bookings() {
                                       formatIDR(firstBooking.deal_price)
                                     )}
                                   </td>
-                                  {groupBy === 'date' && (
-                                    <td className="whitespace-nowrap px-3 py-2">
+                                  <td className="whitespace-nowrap px-3 py-2">
+                                    {groupBy === 'date' ? (
                                       <span
                                         className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                                           firstBooking.status === 'active'
@@ -1434,8 +1540,12 @@ export default function Bookings() {
                                       >
                                         {formatStatus(firstBooking.status)}
                                       </span>
-                                    </td>
-                                  )}
+                                    ) : (
+                                      <span className="text-gray-600">
+                                        {formatDate(firstBooking.created_at)}
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
                                   <td className="whitespace-nowrap px-3 py-2">
                                     {!isGrouped ? (
@@ -1472,8 +1582,8 @@ export default function Bookings() {
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-2">{b.buyer_name}</td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(b.deal_price)}</td>
-                                    {groupBy === 'date' && (
-                                      <td className="whitespace-nowrap px-3 py-2">
+                                    <td className="whitespace-nowrap px-3 py-2">
+                                      {groupBy === 'date' ? (
                                         <span
                                           className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                                             b.status === 'active'
@@ -1485,8 +1595,12 @@ export default function Bookings() {
                                         >
                                           {formatStatus(b.status)}
                                         </span>
-                                      </td>
-                                    )}
+                                      ) : (
+                                        <span className="text-gray-500">
+                                          {formatDate(b.created_at)}
+                                        </span>
+                                      )}
+                                    </td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatDate(b.deadline)}</td>
                                     <td className="whitespace-nowrap px-3 py-2">{renderBookingActions(b)}</td>
                                   </tr>

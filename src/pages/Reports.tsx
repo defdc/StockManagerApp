@@ -165,8 +165,8 @@ export default function Reports() {
                 <p className="mt-0.5 text-base font-semibold text-gray-900">{summary.fulfillmentSummary.shipping}</p>
               </div>
               <div className="rounded-md bg-gray-50 p-2.5">
-                <span className="text-xs font-medium text-gray-500">Parking + Shipping</span>
-                <p className="mt-0.5 text-base font-semibold text-gray-900">{summary.fulfillmentSummary.parking_shipping}</p>
+                <span className="text-xs font-medium text-gray-500">Shipping COD</span>
+                <p className="mt-0.5 text-base font-semibold text-gray-900">{summary.fulfillmentSummary.parking_shipping + summary.fulfillmentSummary.shipping_cod}</p>
               </div>
               <div className="rounded-md bg-gray-50 p-2.5">
                 <span className="text-xs font-medium text-gray-500">Delivered</span>

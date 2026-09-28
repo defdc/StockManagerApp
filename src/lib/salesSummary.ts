@@ -102,11 +102,11 @@ export function calculatePeriodSummary(
 
   const fulfillmentSummary = periodSales.reduce(
     (summary, sale) => {
-      const status = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
-      summary[status] = (summary[status] ?? 0) + 1
+      const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+      summary[rawStatus] = (summary[rawStatus] ?? 0) + 1
       return summary
     },
-    { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 } as Record<FulfillmentStatus, number>
+    { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 } as Record<FulfillmentStatus, number>
   )
 
   return {

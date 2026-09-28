@@ -13,17 +13,23 @@ export const EXPENSE_TYPES: ExpenseType[] = [
 ]
 export const FULFILLMENT_STATUSES: FulfillmentStatus[] = ['parking', 'shipping', 'parking_shipping', 'delivered']
 
-export const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
+export const FULFILLMENT_LABELS: Record<string, string> = {
   parking: 'Parking',
   shipping: 'Shipping',
-  parking_shipping: 'Parking + Shipping',
+  parking_shipping: 'Shipping COD',
+  shipping_cod: 'Shipping COD',
+  'Shipping COD': 'Shipping COD',
+  'Parking + Shipping': 'Shipping COD',
   delivered: 'Delivered',
 }
 
-export const FULFILLMENT_BADGE_CLASSES: Record<FulfillmentStatus, string> = {
+export const FULFILLMENT_BADGE_CLASSES: Record<string, string> = {
   parking: 'bg-gray-100 text-gray-700',
   shipping: 'bg-blue-100 text-blue-700',
   parking_shipping: 'bg-orange-100 text-orange-700',
+  shipping_cod: 'bg-orange-100 text-orange-700',
+  'Shipping COD': 'bg-orange-100 text-orange-700',
+  'Parking + Shipping': 'bg-orange-100 text-orange-700',
   delivered: 'bg-green-100 text-green-700',
 }
 

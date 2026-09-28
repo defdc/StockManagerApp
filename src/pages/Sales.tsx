@@ -283,44 +283,68 @@ export default function Sales() {
   async function handleBulkDelete() {
     setBulkActionSaving(true)
     setBulkActionError(null)
+
+    const itemIds = selectedSales
+      .map((s) => s.inventory_item_id)
+      .filter((id): id is string => Boolean(id))
+
     for (const sale of selectedSales) {
       const { error } = await supabase.from('sales').delete().eq('id', sale.id)
       if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
-      if (sale.inventory_item_id) {
-        await supabase.from('inventory_items').update({ status: 'ready' }).eq('id', sale.inventory_item_id).eq('status', 'sold')
-      }
     }
+
+    if (itemIds.length > 0) {
+      await supabase
+        .from('inventory_items')
+        .update({ status: 'ready', updated_at: new Date().toISOString() })
+        .in('id', itemIds)
+        .eq('status', 'sold')
+
+      await supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .in('inventory_item_id', itemIds)
+        .eq('status', 'converted_to_sale')
+    }
+
     setBulkActionSaving(false)
     setShowBulkDeleteConfirm(false)
     setSelectedSaleIds([])
+    showToast('Selected sales deleted successfully.')
     loadSales()
   }
 
   async function handleBulkUndo() {
     setBulkActionSaving(true)
     setBulkActionError(null)
+
+    const itemIds = selectedSales
+      .map((s) => s.inventory_item_id)
+      .filter((id): id is string => Boolean(id))
+
     for (const sale of selectedSales) {
-      let originatingBookingId: string | null = null
-      if (sale.inventory_item_id) {
-        let q = supabase.from('bookings').select('id').eq('inventory_item_id', sale.inventory_item_id).eq('status', 'converted_to_sale').order('updated_at', { ascending: false }).limit(1)
-        if (sale.booking_group_id) q = q.eq('booking_group_id', sale.booking_group_id)
-        const { data: bks } = await q
-        originatingBookingId = bks?.[0]?.id ?? null
-      }
       const { error } = await supabase.from('sales').delete().eq('id', sale.id)
       if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
-      if (originatingBookingId) {
-        await supabase.from('bookings').update({ status: 'active', updated_at: new Date().toISOString() }).eq('id', originatingBookingId)
-        if (sale.inventory_item_id) {
-          await supabase.from('inventory_items').update({ status: 'booked', updated_at: new Date().toISOString() }).eq('id', sale.inventory_item_id)
-        }
-      } else if (sale.inventory_item_id) {
-        await supabase.from('inventory_items').update({ status: 'ready', updated_at: new Date().toISOString() }).eq('id', sale.inventory_item_id).eq('status', 'sold')
-      }
     }
+
+    if (itemIds.length > 0) {
+      await supabase
+        .from('inventory_items')
+        .update({ status: 'ready', updated_at: new Date().toISOString() })
+        .in('id', itemIds)
+        .eq('status', 'sold')
+
+      await supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .in('inventory_item_id', itemIds)
+        .eq('status', 'converted_to_sale')
+    }
+
     setBulkActionSaving(false)
     setShowBulkUndoConfirm(false)
     setSelectedSaleIds([])
+    showToast('Selected sales undone successfully.')
     loadSales()
   }
 
@@ -611,9 +635,15 @@ export default function Sales() {
     if (s.inventory_item_id) {
       await supabase
         .from('inventory_items')
-        .update({ status: 'ready' })
+        .update({ status: 'ready', updated_at: new Date().toISOString() })
         .eq('id', s.inventory_item_id)
         .eq('status', 'sold')
+
+      await supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .eq('inventory_item_id', s.inventory_item_id)
+        .eq('status', 'converted_to_sale')
     }
     void logActivity({
       action: 'Delete',
@@ -635,22 +665,6 @@ export default function Sales() {
     if (!undoingSale) return
     const s = undoingSale
 
-    let originatingBookingId: string | null = null
-    if (s.inventory_item_id) {
-      let bookingQuery = supabase
-        .from('bookings')
-        .select('id')
-        .eq('inventory_item_id', s.inventory_item_id)
-        .eq('status', 'converted_to_sale')
-        .order('updated_at', { ascending: false })
-        .limit(1)
-
-      if (s.booking_group_id) bookingQuery = bookingQuery.eq('booking_group_id', s.booking_group_id)
-
-      const { data: bookings } = await bookingQuery
-      originatingBookingId = bookings?.[0]?.id ?? null
-    }
-
     const { error: deleteError } = await supabase.from('sales').delete().eq('id', s.id)
     if (deleteError) {
       showToast(deleteError.message, 'error')
@@ -658,23 +672,18 @@ export default function Sales() {
       return
     }
 
-    if (originatingBookingId) {
-      await supabase
-        .from('bookings')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .eq('id', originatingBookingId)
-      if (s.inventory_item_id) {
-        await supabase
-          .from('inventory_items')
-          .update({ status: 'booked', updated_at: new Date().toISOString() })
-          .eq('id', s.inventory_item_id)
-      }
-    } else if (s.inventory_item_id) {
+    if (s.inventory_item_id) {
       await supabase
         .from('inventory_items')
         .update({ status: 'ready', updated_at: new Date().toISOString() })
         .eq('id', s.inventory_item_id)
         .eq('status', 'sold')
+
+      await supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .eq('inventory_item_id', s.inventory_item_id)
+        .eq('status', 'converted_to_sale')
     }
 
     void logActivity({
@@ -685,7 +694,6 @@ export default function Sales() {
       details: {
         buyer_name: s.buyer_name,
         inventory_item_id: s.inventory_item_id,
-        restored_booking_id: originatingBookingId,
       },
     })
 

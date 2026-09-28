@@ -1,7 +1,7 @@
 export type ItemStatus = 'ready' | 'booked' | 'sold' | 'cancelled'
 export type BookingStatus = 'active' | 'cancelled' | 'converted_to_sale'
 export type ExpenseType = 'packing' | 'shipping' | 'marketplace_fee' | 'event_fee' | 'other'
-export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'delivered'
+export type FulfillmentStatus = 'parking' | 'shipping' | 'parking_shipping' | 'shipping_cod' | 'delivered'
 
 export type UserRole = 'admin' | 'editor' | 'viewer'
 

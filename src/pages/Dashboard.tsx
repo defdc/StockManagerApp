@@ -205,11 +205,11 @@ export default function Dashboard() {
         )
         const fulfillmentSummary = sales.reduce(
           (summary, sale) => {
-            const fulfillmentStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
-            summary[fulfillmentStatus] += 1
+            const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+            summary[rawStatus] = (summary[rawStatus] ?? 0) + 1
             return summary
           },
-          { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 }
+          { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 } as Record<FulfillmentStatus, number>
         )
 
         // Calculate Period Summaries
@@ -403,7 +403,7 @@ export default function Dashboard() {
             Parking: {data.fulfillmentSummary.parking} · Shipping: {data.fulfillmentSummary.shipping} · Delivered: {data.fulfillmentSummary.delivered}
           </p>
           <p className="mt-1 text-xs text-gray-400">
-            Parking + Shipping: {data.fulfillmentSummary.parking_shipping}
+            Shipping COD: {data.fulfillmentSummary.parking_shipping + data.fulfillmentSummary.shipping_cod}
           </p>
         </div>
         <StatCard label="Highest Profit Batch" value={data.highestProfitBatch} />

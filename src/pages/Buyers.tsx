@@ -11,7 +11,9 @@ type BuyerBooking = Booking & { inventory_items: { item_name: string; batch_name
 type BuyerSale = Sale & { inventory_items: { item_name: string } | null }
 
 interface BuyerSummary {
+  id: string
   buyer: string
+  booked: number
   bookings: BuyerBooking[]
   sales: BuyerSale[]
   bookedRevenue: number
@@ -41,7 +43,7 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 - Packing: Rp. 3k
 - Ongkir: Rp. 
 - TOTAL:
-
+ 
 (Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
 
 💳 PEMBAYARAN (a.n Benedictus Jody Setiawan)
@@ -59,6 +61,8 @@ export default function Buyers() {
   const [bookings, setBookings] = useState<BuyerBooking[]>([])
   const [sales, setSales] = useState<BuyerSale[]>([])
   const [search, setSearch] = useState('')
+  const [showOnlyActiveBookings, setShowOnlyActiveBookings] = useState(false)
+  const [invoicedBuyers, setInvoicedBuyers] = useState<Set<string>>(new Set())
   const [selectedBuyer, setSelectedBuyer] = useState<BuyerSummary | null>(null)
   const [invoiceBuyer, setInvoiceBuyer] = useState<BuyerSummary | null>(null)
   const [includeItemList, setIncludeItemList] = useState(false)
@@ -106,7 +110,9 @@ export default function Buyers() {
       const existing = summaries.get(name)
       if (existing) return existing
       const summary: BuyerSummary = {
+        id: name,
         buyer: name,
+        booked: 0,
         bookings: [],
         sales: [],
         bookedRevenue: 0,
@@ -114,7 +120,7 @@ export default function Buyers() {
         revenue: 0,
         netProfit: 0,
         lastActivity: null,
-        fulfillmentSummary: { parking: 0, shipping: 0, parking_shipping: 0, delivered: 0 },
+        fulfillmentSummary: { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 },
       }
       summaries.set(name, summary)
       return summary
@@ -124,6 +130,7 @@ export default function Buyers() {
       const summary = ensureBuyer(booking.buyer_name)
       summary.bookings.push(booking)
       if (booking.status === 'active') {
+        summary.booked += 1
         summary.bookedRevenue += booking.deal_price
       }
       if (!summary.lastActivity || booking.created_at > summary.lastActivity) summary.lastActivity = booking.created_at
@@ -135,12 +142,13 @@ export default function Buyers() {
       summary.salesRevenue += sale.sale_price
       summary.revenue += sale.sale_price
       summary.netProfit += sale.net_profit
-      const fulfillmentStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
-      summary.fulfillmentSummary[fulfillmentStatus] += 1
+      const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+      summary.fulfillmentSummary[rawStatus] = (summary.fulfillmentSummary[rawStatus] ?? 0) + 1
       if (!summary.lastActivity || sale.sale_date > summary.lastActivity) summary.lastActivity = sale.sale_date
     }
 
     return [...summaries.values()]
+      .filter((summary) => !showOnlyActiveBookings || summary.booked > 0)
       .map((summary) => ({
         summary,
         rank: smartSearchRank(search, [{ value: summary.buyer }]),
@@ -148,7 +156,19 @@ export default function Buyers() {
       .filter((entry) => entry.rank !== null)
       .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.summary.revenue - a.summary.revenue)
       .map((entry) => entry.summary)
-  }, [bookings, sales, search])
+  }, [bookings, sales, search, showOnlyActiveBookings])
+
+  function toggleInvoiced(buyerId: string) {
+    setInvoicedBuyers((prev) => {
+      const next = new Set(prev)
+      if (next.has(buyerId)) {
+        next.delete(buyerId)
+      } else {
+        next.add(buyerId)
+      }
+      return next
+    })
+  }
 
   function handleCopyInvoice(buyer: BuyerSummary) {
     const activeBookings = buyer.bookings.filter((b) => b.status === 'active')
@@ -173,13 +193,24 @@ export default function Buyers() {
         <h1 className="text-xl font-semibold text-gray-900">Buyers</h1>
       </div>
 
-      <input
-        type="text"
-        placeholder="Search buyer..."
-        value={search}
-        onChange={(event) => setSearch(event.target.value)}
-        className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-      />
+      <div className="flex flex-wrap items-center gap-4">
+        <input
+          type="text"
+          placeholder="Search buyer..."
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        />
+        <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showOnlyActiveBookings}
+            onChange={(e) => setShowOnlyActiveBookings(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+          />
+          Show only with active bookings
+        </label>
+      </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
       {loading ? (
@@ -195,41 +226,62 @@ export default function Buyers() {
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Revenue</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Profit</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Last Activity</th>
+                <th className="whitespace-nowrap px-3 py-2 text-center font-medium text-gray-600">Invoiced</th>
                 <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {buyerSummaries.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
+                  <td colSpan={8} className="px-3 py-6 text-center text-gray-400">
                     No buyers found.
                   </td>
                 </tr>
               ) : (
                 buyerSummaries.map((buyer) => {
-                  const activeBookingsCount = buyer.bookings.filter((booking) => booking.status === 'active').length
+                  const isChecked = invoicedBuyers.has(buyer.id) && buyer.booked > 0
+                  const isDisabled = buyer.booked === 0
+
                   return (
-                    <tr key={buyer.buyer} className="hover:bg-gray-50">
+                    <tr key={buyer.id} className="hover:bg-gray-50">
                       <td className="whitespace-nowrap px-3 py-2">
                         <button onClick={() => setSelectedBuyer(buyer)} className="font-medium text-blue-700 hover:underline">
                           {buyer.buyer}
                         </button>
                       </td>
-                      <td className="whitespace-nowrap px-3 py-2">{activeBookingsCount}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{buyer.booked}</td>
                       <td className="whitespace-nowrap px-3 py-2">{buyer.sales.length}</td>
                       <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.revenue)}</td>
                       <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.netProfit)}</td>
                       <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastActivity)}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={isDisabled}
+                          onChange={() => toggleInvoiced(buyer.id)}
+                          title={
+                            isDisabled
+                              ? 'No active bookings'
+                              : isChecked
+                                ? 'Mark as not invoiced'
+                                : 'Mark as invoiced'
+                          }
+                          aria-label={`Mark ${buyer.buyer} as invoiced`}
+                          className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                        />
+                      </td>
                       <td className="whitespace-nowrap px-3 py-2">
-                        <button
-                          type="button"
-                          onClick={() => handleCopyInvoice(buyer)}
-                          disabled={activeBookingsCount === 0}
-                          title={activeBookingsCount === 0 ? 'No active bookings to invoice' : 'Generate & copy invoice'}
-                          className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          Copy Invoice
-                        </button>
+                        {buyer.booked > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleCopyInvoice(buyer)}
+                            title="Generate & copy invoice"
+                            className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800"
+                          >
+                            Copy Invoice
+                          </button>
+                        )}
                       </td>
                     </tr>
                   )
@@ -323,8 +375,8 @@ export default function Buyers() {
                   <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.shipping} items</p>
                 </div>
                 <div className="rounded-md bg-gray-50 p-3 text-sm">
-                  <p className="text-gray-500">Parking + Shipping</p>
-                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.parking_shipping} items</p>
+                  <p className="text-gray-500">Shipping COD</p>
+                  <p className="font-medium text-gray-900">{selectedBuyer.fulfillmentSummary.parking_shipping + selectedBuyer.fulfillmentSummary.shipping_cod} items</p>
                 </div>
                 <div className="rounded-md bg-gray-50 p-3 text-sm">
                   <p className="text-gray-500">Delivered</p>
