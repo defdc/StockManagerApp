@@ -6,7 +6,6 @@ import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
-import { smartSearchRank } from '../lib/search'
 import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { Booking, InventoryItem, Sale } from '../types/database'
 import Modal from '../components/Modal'
@@ -172,19 +171,33 @@ export default function Inventory() {
   // ── Filtering & grouping ─────────────────────────────────────────────────
 
   const filtered = useMemo(() => {
+    const normalizedStatusFilter = statusFilter.trim().toLowerCase()
+    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+
     return items
-      .map((item) => ({
-        item,
-        rank: smartSearchRank(search, [
-          { value: item.item_name },
-          { value: item.category },
-          { value: item.batch_name },
-          { value: item.notes, kind: 'notes' },
-        ]),
-      }))
-      .filter(({ item, rank }) => (statusFilter ? item.status === statusFilter : true) && rank !== null)
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || a.item.item_name.localeCompare(b.item.item_name))
-      .map(({ item }) => item)
+      .filter((item) => {
+        // 1. Strict Status Check
+        const matchesStatus =
+          !normalizedStatusFilter || normalizedStatusFilter === 'all'
+            ? true
+            : (item.status || '').toLowerCase() === normalizedStatusFilter
+
+        // 2. Multi-Keyword Search Check
+        const normalizedItemName = (item.item_name || '').toLowerCase()
+        const normalizedBatchName = (item.batch_name || '').toLowerCase()
+        const normalizedCategory = (item.category || '').toLowerCase()
+
+        const matchesSearch = searchWords.every(
+          (word) =>
+            normalizedItemName.includes(word) ||
+            normalizedBatchName.includes(word) ||
+            normalizedCategory.includes(word)
+        )
+
+        // Both must be true
+        return matchesStatus && matchesSearch
+      })
+      .sort((a, b) => a.item_name.localeCompare(b.item_name))
   }, [items, search, statusFilter])
 
   // Group items by category for the collapsible view
@@ -682,7 +695,7 @@ export default function Inventory() {
       <div className="flex flex-wrap gap-2">
         <input
           type="text"
-          placeholder="Search item, category, batch, or notes..."
+          placeholder="Search item, category, or batch..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"

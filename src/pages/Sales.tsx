@@ -91,6 +91,8 @@ export default function Sales() {
   const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
   const [showBulkShippingModal, setShowBulkShippingModal] = useState(false)
   const [bulkShippingStatus, setBulkShippingStatus] = useState<FulfillmentStatus>('parking')
+  const [showBulkDateModal, setShowBulkDateModal] = useState(false)
+  const [bulkSaleDate, setBulkSaleDate] = useState(todayISO())
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false)
   const [showBulkUndoConfirm, setShowBulkUndoConfirm] = useState(false)
   const [bulkActionSaving, setBulkActionSaving] = useState(false)
@@ -250,6 +252,32 @@ export default function Sales() {
     setShowBulkShippingModal(false)
     setSelectedSaleIds([])
     loadSales()
+  }
+
+  async function handleBulkSaleDate(e: React.FormEvent) {
+    e.preventDefault()
+    if (!bulkSaleDate) return
+    setBulkActionSaving(true)
+    setBulkActionError(null)
+    try {
+      const { error } = await supabase
+        .from('sales')
+        .update({ sale_date: bulkSaleDate, updated_at: new Date().toISOString() })
+        .in('id', selectedSaleIds)
+
+      if (error) throw error
+
+      showToast('Successfully updated sale dates!')
+      setShowBulkDateModal(false)
+      setSelectedSaleIds([])
+      await loadSales()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to update sale dates.'
+      setBulkActionError(message)
+      showToast(message, 'error')
+    } finally {
+      setBulkActionSaving(false)
+    }
   }
 
   async function handleBulkDelete() {
@@ -815,6 +843,17 @@ export default function Sales() {
                   Change Shipping Status
                 </button>
                 <button
+                  onClick={() => {
+                    const firstSelected = sales.find((s) => selectedSaleIds.includes(s.id))
+                    setBulkSaleDate(firstSelected?.sale_date || todayISO())
+                    setBulkActionError(null)
+                    setShowBulkDateModal(true)
+                  }}
+                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+                >
+                  Change Sale Date
+                </button>
+                <button
                   onClick={() => { setBulkActionError(null); setShowBulkUndoConfirm(true) }}
                   className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
                 >
@@ -1213,6 +1252,43 @@ export default function Sales() {
               <button type="button" onClick={() => setShowBulkShippingModal(false)} className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700">Cancel</button>
               <button type="submit" disabled={bulkActionSaving} className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
                 {bulkActionSaving ? 'Saving...' : 'Apply to all selected'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {showBulkDateModal && (
+        <Modal
+          title={`Change sale date — ${selectedSaleIds.length} sale${selectedSaleIds.length === 1 ? '' : 's'}`}
+          onClose={() => setShowBulkDateModal(false)}
+        >
+          <form onSubmit={handleBulkSaleDate} className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">New sale date *</label>
+              <input
+                type="date"
+                required
+                value={bulkSaleDate}
+                onChange={(e) => setBulkSaleDate(e.target.value)}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+            {bulkActionError && <p className="text-sm text-red-600">{bulkActionError}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkDateModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={bulkActionSaving || !bulkSaleDate}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {bulkActionSaving ? 'Updating...' : 'Save/Update'}
               </button>
             </div>
           </form>
