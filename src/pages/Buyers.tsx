@@ -37,23 +37,29 @@ export function generateInvoiceText(buyerName: string, activeBookings: BuyerBook
     itemListSection = itemsText + '\n'
   }
 
-  return `*INVOICE - BUYER ${buyerName.toUpperCase()}* 🦄
+  return `*INVOICE - LOYAL BUYER ${buyerName.toUpperCase()}* PINKIEPIE.GARAGE 🦄
 *🛒 PESANAN*
-${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
+${itemListSection}- Total item (${qty} pcs): ${formattedTotal} {Jika ada yang sudah dibayar, silakan dikurangi dari total ini}
 - Packing: Rp. 3k
-- Ongkir: Rp. 
+- Ongkir: (tergantung lokasi, estimasi di bawah)
 - TOTAL:
  
 (Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
 
 💳 PEMBAYARAN (a.n Benedictus Jody Setiawan)
-- BCA: 6041522337
-- DANA: 08161928280
 
-*⚠️ KETENTUAN WAJIB*
-1. Bayar maksimal buyer baru *1x10 menit* (Lewat dari itu = *B&R/Cancel*). Diproses setelah payment.
-2. *Wajib* sertakan video unboxing utuh jika ada klaim retur.
-3. *Wajib* isi format order dengan *Lengkap* (terutama No. HP/WA aktif).`
+•⁠  ⁠BCA: 6041522337
+•⁠  ⁠DANA: 08161928280
+
+⚠️ KETENTUAN WAJIB
+
+1   ⁠Bayar maksimal 1x24 jam (Lewat dari itu = B&R/Cancel). Diproses setelah payment.
+2.  Pastikan Nama, Alamat, dan No. HP sudah BENAR.
+3.⁠  ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
+4.⁠  ⁠📦 Syarat Komplain Lain (Kompensasi): Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
+5.⁠   ⁠Wajib kirim bukti transfer ke sini.
+
+Thank you for shopping! ✨
 }
 
 export default function Buyers() {
