@@ -37,9 +37,9 @@ export function generateInvoiceText(buyerName: string, activeBookings: BuyerBook
     itemListSection = itemsText + '\n'
   }
 
-  return `*INVOICE - LOYAL BUYER ${buyerName.toUpperCase()}* PINKIEPIE.GARAGE 🦄
+  return `*INVOICE - LOYAL BUYER ${buyerName.toUpperCase()} PINKIEPIE.GARAGE* 🦄
 *🛒 PESANAN*
-${itemListSection}- Total item (${qty} pcs): ${formattedTotal} {Jika ada yang sudah dibayar, silakan dikurangi dari total ini}
+${itemListSection}- Total item (${qty} pcs): ${formattedTotal} 
 - Packing: Rp. 3k
 - Ongkir: (tergantung lokasi, estimasi di bawah)
 - TOTAL:
