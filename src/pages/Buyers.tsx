@@ -59,7 +59,7 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal} {Jika ada yang su
 4.⁠  ⁠📦 Syarat Komplain Lain (Kompensasi): Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
 5.⁠   ⁠Wajib kirim bukti transfer ke sini.
 
-Thank you for shopping! ✨
+Thank you for shopping! ✨`
 }
 
 export default function Buyers() {
