@@ -26,6 +26,8 @@ export interface InventoryItem {
   category: string | null
   quantity: number
   modal_price: number
+  sold_price?: number | null
+  buyer_name?: string | null
   batch_name?: string | null
   batch_modal_total?: number | null
   status: ItemStatus

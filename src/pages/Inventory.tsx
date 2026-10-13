@@ -15,6 +15,7 @@ import CategoryAutocomplete from '../components/CategoryAutocomplete'
 import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 import { getLiveModalPrice } from '../lib/inventoryModal'
+import { resolveItemTransactionDetails } from '../lib/itemTransactionSync'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,17 @@ function saveCollapsed(set: Set<string>) {
   }
 }
 
+/**
+ * Split UUIDs into batches for `.in('id', ...)` filters. PostgREST encodes the filter in the
+ * URL, so selecting hundreds of rows at once can exceed URL length limits.
+ */
+const ID_CHUNK_SIZE = 150
+function chunkIds(ids: string[], size = ID_CHUNK_SIZE): string[][] {
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += size) chunks.push(ids.slice(i, i + size))
+  return chunks
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Inventory() {
@@ -114,6 +126,11 @@ export default function Inventory() {
   const [drawerSales, setDrawerSales] = useState<Sale[]>([])
   const [drawerLoading, setDrawerLoading] = useState(false)
 
+  const drawerResolvedDetails = useMemo(() => {
+    if (!drawerItem) return { salePrice: null, buyerName: null, hasSaleOrConvertedBooking: false }
+    return resolveItemTransactionDetails(drawerItem, drawerSales, drawerBookings)
+  }, [drawerItem, drawerSales, drawerBookings])
+
   // ── Data loading ─────────────────────────────────────────────────────────
 
   async function loadItems() {
@@ -121,9 +138,24 @@ export default function Inventory() {
     setError(null)
     try {
       const data = await fetchAllRows<InventoryItem>((from, to) =>
-        supabase.from('inventory_items').select('*').order('created_at', { ascending: false }).range(from, to)
+        supabase
+          .from('inventory_items')
+          .select('*')
+          .order('created_at', { ascending: false })
+          // Unique tie-breaker: bulk-inserted rows share an identical created_at, so without
+          // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
+          .order('id', { ascending: false })
+          .range(from, to)
       )
-      setItems(data ?? [])
+      // Defensive de-duplication by UUID so every row (and React key) is unique.
+      const uniqueById = new Map<string, InventoryItem>()
+      for (const row of data ?? []) {
+        if (row?.id && !uniqueById.has(row.id)) uniqueById.set(row.id, row)
+      }
+      const uniqueItems = [...uniqueById.values()]
+      setItems(uniqueItems)
+      // Drop selections that no longer exist (deleted / reloaded rows).
+      setSelectedItemIds((current) => current.filter((id) => uniqueById.has(id)))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load inventory items.')
     } finally {
@@ -270,15 +302,29 @@ export default function Inventory() {
     return [...batchMap.values()].sort((a, b) => b.latestAt.localeCompare(a.latestAt))
   }, [items])
 
-  // ── Selection helpers ────────────────────────────────────────────────────
+  // ── Selection helpers (keyed exclusively by database UUID) ───────────────
+
+  // O(1) membership checks — item names are NOT unique (e.g. 77 rows named "Loose").
+  const selectedIdSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds])
 
   const selectedItems = useMemo(
-    () => items.filter((item) => selectedItemIds.includes(item.id)),
-    [items, selectedItemIds]
+    () => items.filter((item) => selectedIdSet.has(item.id)),
+    [items, selectedIdSet]
   )
 
+  const filteredIds = useMemo(() => filtered.map((item) => item.id), [filtered])
+
   const allFilteredSelected =
-    filtered.length > 0 && filtered.every((item) => selectedItemIds.includes(item.id))
+    filteredIds.length > 0 && filteredIds.every((id) => selectedIdSet.has(id))
+
+  function addIdsToSelection(ids: string[]) {
+    setSelectedItemIds((current) => Array.from(new Set([...current, ...ids])))
+  }
+
+  function removeIdsFromSelection(ids: string[]) {
+    const toRemove = new Set(ids)
+    setSelectedItemIds((current) => current.filter((id) => !toRemove.has(id)))
+  }
 
   function toggleItemSelection(itemId: string) {
     setSelectedItemIds((current) =>
@@ -287,25 +333,26 @@ export default function Inventory() {
   }
 
   function toggleSelectAll() {
-    const filteredIds = filtered.map((item) => item.id)
     if (allFilteredSelected) {
-      setSelectedItemIds((current) => current.filter((id) => !filteredIds.includes(id)))
+      removeIdsFromSelection(filteredIds)
       return
     }
-    setSelectedItemIds((current) => Array.from(new Set([...current, ...filteredIds])))
+    addIdsToSelection(filteredIds)
   }
 
-  // Category selection helpers
+  // Category selection helpers — operate on the UUIDs of that group's child items
   function isCategoryFullySelected(catItems: InventoryItem[]) {
-    return catItems.length > 0 && catItems.every((i) => selectedItemIds.includes(i.id));
+    return catItems.length > 0 && catItems.every((i) => selectedIdSet.has(i.id))
+  }
+  function isCategoryPartiallySelected(catItems: InventoryItem[]) {
+    return catItems.some((i) => selectedIdSet.has(i.id)) && !isCategoryFullySelected(catItems)
   }
   function toggleCategorySelection(catItems: InventoryItem[]) {
-    const ids = catItems.map((i) => i.id);
-    const allSelected = ids.every((id) => selectedItemIds.includes(id));
-    if (allSelected) {
-      setSelectedItemIds((current) => current.filter((id) => !ids.includes(id)));
+    const ids = catItems.map((i) => i.id)
+    if (isCategoryFullySelected(catItems)) {
+      removeIdsFromSelection(ids)
     } else {
-      setSelectedItemIds((current) => Array.from(new Set([...current, ...ids])));
+      addIdsToSelection(ids)
     }
   }
 
@@ -563,10 +610,19 @@ export default function Inventory() {
       return
     }
 
-    const { error: itemError } = await supabase
-      .from('inventory_items')
-      .update({ status: 'booked', updated_at: new Date().toISOString() })
-      .in('id', selectedItems.map((item) => item.id))
+    const selectedUuids = selectedItems.map((item) => item.id)
+    const now = new Date().toISOString()
+    let itemError: { message: string } | null = null
+    for (const idChunk of chunkIds(selectedUuids)) {
+      const { error } = await supabase
+        .from('inventory_items')
+        .update({ status: 'booked', updated_at: now })
+        .in('id', idChunk)
+      if (error) {
+        itemError = error
+        break
+      }
+    }
 
     setBulkBookingSaving(false)
     if (itemError) {
@@ -585,12 +641,11 @@ export default function Inventory() {
     loadItems()
   }
   async function handleBulkDelete() {
-    if (selectedItemIds.length === 0) return
+    // Resolve selected UUIDs against the loaded rows (never by name).
+    const targetItems = selectedItems
+    if (targetItems.length === 0) return
 
-    const itemMap = new Map(items.map((item) => [item.id, item]))
-    const hasInvalidItems = selectedItemIds.some((id) => {
-      const item = itemMap.get(id)
-      if (!item) return false
+    const hasInvalidItems = targetItems.some((item) => {
       const statusLower = item.status?.toLowerCase()
       const hasTransaction = Boolean(
         (item as unknown as Record<string, unknown>).booking_id ||
@@ -607,19 +662,33 @@ export default function Inventory() {
       return
     }
 
+    const targetIds = targetItems.map((item) => item.id)
+    const count = targetIds.length
     const confirmed = window.confirm(
-      `Are you sure you want to delete ${selectedItemIds.length} selected item${selectedItemIds.length === 1 ? '' : 's'}? This action cannot be undone.`
+      `Are you sure you want to delete ${count} selected item${count === 1 ? '' : 's'}? This action cannot be undone.`
     )
     if (!confirmed) return
 
     setBulkDeleteSaving(true)
-    const { error } = await supabase.from('inventory_items').delete().in('id', selectedItemIds)
+    let deleteError: { message: string } | null = null
+    for (const idChunk of chunkIds(targetIds)) {
+      const { error } = await supabase
+        .from('inventory_items')
+        .delete()
+        .in('id', idChunk)
+        .eq('status', 'ready')
+      if (error) {
+        deleteError = error
+        break
+      }
+    }
     setBulkDeleteSaving(false)
 
-    if (error) {
-      showToast(error.message, 'error')
+    if (deleteError) {
+      showToast(deleteError.message, 'error')
+      loadItems()
     } else {
-      showToast(`Successfully deleted ${selectedItemIds.length} item${selectedItemIds.length === 1 ? '' : 's'}`)
+      showToast(`Successfully deleted ${count} item${count === 1 ? '' : 's'}`)
       setSelectedItemIds([])
       loadItems()
     }
@@ -774,26 +843,27 @@ export default function Inventory() {
 
             return (
               <div key={category} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-                {/* Category header */}
-                <button
-                  type="button"
-                  onClick={() => toggleCategory(category)}
-                  className="flex w-full items-center justify-between bg-gray-50 px-3 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-100"
-                >
+                {/* Category header — checkbox is a sibling of (not nested in) the collapse button */}
+                <div className="flex w-full items-center gap-3 bg-gray-50 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">
                   <input
                     type="checkbox"
                     checked={isCategoryFullySelected(catItems)}
-                    onChange={(e) => {
-                      e.stopPropagation();
-                      toggleCategorySelection(catItems);
+                    ref={(el) => {
+                      if (el) el.indeterminate = isCategoryPartiallySelected(catItems)
                     }}
-                    className="h-4 w-4 rounded border-gray-300"
+                    onChange={() => toggleCategorySelection(catItems)}
+                    aria-label={`Select all ${catItems.length} items in ${category}`}
+                    className="h-4 w-4 shrink-0 rounded border-gray-300"
                   />
-                  <span className="flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => toggleCategory(category)}
+                    className="flex flex-1 items-center text-left"
+                  >
                     {isCollapsed ? '▶' : '▼'} {category}
                     <span className="ml-2 font-normal text-gray-500">({catItems.length})</span>
-                  </span>
-                </button>
+                  </button>
+                </div>
 
                 {/* Item rows */}
                 {!isCollapsed && (
@@ -806,7 +876,7 @@ export default function Inventory() {
                           <div className="flex items-start gap-2.5">
                             <input
                               type="checkbox"
-                              checked={selectedItemIds.includes(item.id)}
+                              checked={selectedIdSet.has(item.id)}
                               onChange={() => toggleItemSelection(item.id)}
                               aria-label={`Select ${item.item_name}`}
                               className="mt-1 h-4 w-4 shrink-0 rounded border-gray-300"
@@ -882,7 +952,7 @@ export default function Inventory() {
                               <td className="whitespace-nowrap px-3 py-2">
                                 <input
                                   type="checkbox"
-                                  checked={selectedItemIds.includes(item.id)}
+                                  checked={selectedIdSet.has(item.id)}
                                   onChange={() => toggleItemSelection(item.id)}
                                   aria-label={`Select ${item.item_name}`}
                                   className="h-4 w-4 rounded border-gray-300"
@@ -1304,6 +1374,20 @@ export default function Inventory() {
                     {formatStatus(drawerItem.status)}
                   </span>
                 </p>
+                {!drawerLoading && (drawerItem.status === 'sold' || drawerResolvedDetails.salePrice !== null || drawerResolvedDetails.buyerName) && (
+                  <>
+                    <p className="text-sm text-gray-500">
+                      Sold price:{' '}
+                      <span className="font-medium text-gray-700">
+                        {drawerResolvedDetails.salePrice !== null ? formatIDR(drawerResolvedDetails.salePrice) : '-'}
+                      </span>
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      Buyer:{' '}
+                      <span className="font-medium text-gray-700">{drawerResolvedDetails.buyerName ?? '-'}</span>
+                    </p>
+                  </>
+                )}
                 <p className="text-sm text-gray-500">Added: {formatDate(drawerItem.created_at)}</p>
                 {drawerItem.notes && (
                   <p className="text-sm text-gray-500">Notes: {drawerItem.notes}</p>
@@ -1347,18 +1431,35 @@ export default function Inventory() {
                 <section>
                   <h3 className="mb-2 font-medium text-gray-900">Sales History</h3>
                   {drawerSales.length === 0 ? (
-                    <p className="text-sm text-gray-400">No sales found.</p>
+                    drawerItem.status === 'sold' && (drawerResolvedDetails.salePrice !== null || drawerResolvedDetails.buyerName) ? (
+                      <div className="rounded-md border border-gray-200 p-3 text-sm">
+                        <p className="font-medium text-gray-800">{drawerResolvedDetails.buyerName ?? '-'}</p>
+                        <p className="text-gray-500">
+                          Sale price: {drawerResolvedDetails.salePrice !== null ? formatIDR(drawerResolvedDetails.salePrice) : '-'}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-400">No sales found.</p>
+                    )
                   ) : (
                     <ul className="space-y-2 text-sm">
-                      {drawerSales.map((sale) => (
-                        <li key={sale.id} className="rounded-md border border-gray-200 p-3">
-                          <p className="font-medium text-gray-800">{sale.buyer_name}</p>
-                          <p className="text-gray-500">Sale date: {formatDate(sale.sale_date)}</p>
-                          <p className="text-gray-500">Sale price: {formatIDR(sale.sale_price)}</p>
-                          <p className="text-gray-500">Gross profit: {formatIDR(sale.gross_profit)}</p>
-                          <p className="text-gray-500">Net profit: {formatIDR(sale.net_profit)}</p>
-                        </li>
-                      ))}
+                      {drawerSales.map((sale) => {
+                        const effectiveSalePrice =
+                          sale.sale_price > 0
+                            ? sale.sale_price
+                            : (drawerResolvedDetails.salePrice ?? sale.sale_price)
+                        const effectiveBuyerName =
+                          sale.buyer_name?.trim() || drawerResolvedDetails.buyerName || '-'
+                        return (
+                          <li key={sale.id} className="rounded-md border border-gray-200 p-3">
+                            <p className="font-medium text-gray-800">{effectiveBuyerName}</p>
+                            <p className="text-gray-500">Sale date: {formatDate(sale.sale_date)}</p>
+                            <p className="text-gray-500">Sale price: {formatIDR(effectiveSalePrice)}</p>
+                            <p className="text-gray-500">Gross profit: {formatIDR(sale.gross_profit)}</p>
+                            <p className="text-gray-500">Net profit: {formatIDR(sale.net_profit)}</p>
+                          </li>
+                        )
+                      })}
                     </ul>
                   )}
                 </section>

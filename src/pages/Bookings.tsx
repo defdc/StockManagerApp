@@ -9,6 +9,7 @@ import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
+import { updateInventoryItemSoldState } from '../lib/itemTransactionSync'
 import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -140,6 +141,7 @@ export default function Bookings() {
           .from('bookings')
           .select('*, inventory_items(item_name, modal_price, batch_name)')
           .order('created_at', { ascending: false })
+          .order('id', { ascending: false })
           .range(from, to) as unknown as PromiseLike<{ data: BookingRow[] | null; error: { message: string } | null }>
       )
       setBookings(data ?? [])
@@ -302,7 +304,15 @@ export default function Bookings() {
 
     const firstBuyer = selectedBookings[0]?.buyer_name ?? ''
     const allSameBuyer = selectedBookings.every((booking) => booking.buyer_name === firstBuyer)
-    const totalDealPrice = selectedBookings.reduce((sum, booking) => sum + booking.deal_price, 0)
+    const sumDealPrice = selectedBookings.reduce((sum, booking) => sum + (booking.deal_price || 0), 0)
+    const sharedGroupTotal =
+      selectedBookings.length > 0 &&
+      selectedBookings.every(
+        (b) => b.booking_group_id && b.booking_group_id === selectedBookings[0].booking_group_id
+      )
+        ? (selectedBookings[0]?.group_total_deal_price ?? 0)
+        : 0
+    const totalDealPrice = sumDealPrice > 0 ? sumDealPrice : sharedGroupTotal
 
     setBulkSaleForm({
       ...emptyBulkSaleForm,
@@ -339,7 +349,7 @@ export default function Bookings() {
       buyer_name: b.buyer_name,
       deal_price: String(b.deal_price),
       deadline: b.deadline ?? '',
-      status: b.status === 'converted_to_sale' ? 'active' : b.status,
+      status: b.status,
       notes: b.notes ?? '',
     })
     setFormError(null)
@@ -360,7 +370,8 @@ export default function Bookings() {
   function openBulkEditModal(groupBookings: BookingRow[]) {
     if (groupBookings.length === 0) return
     const firstBooking = groupBookings[0]
-    const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+    const sumDealPrice = groupBookings.reduce((sum, b) => sum + (b.deal_price || 0), 0)
+    const totalDealPrice = sumDealPrice > 0 ? sumDealPrice : (firstBooking.group_total_deal_price ?? 0)
     setBulkEditTarget(groupBookings)
     setBulkEditForm({
       buyer_name: firstBooking.buyer_name ?? '',
@@ -512,15 +523,17 @@ export default function Bookings() {
       setSaving(true)
       setFormError(null)
 
+      const buyerName = form.buyer_name.trim()
       const dealPrice = Number(form.deal_price) || 0
+      const now = new Date().toISOString()
       const payload = {
         inventory_item_id: form.inventory_item_id,
-        buyer_name: form.buyer_name.trim(),
+        buyer_name: buyerName,
         deal_price: dealPrice,
         deadline: form.deadline || null,
         status: form.status,
         notes: form.notes.trim() || null,
-        updated_at: new Date().toISOString(),
+        updated_at: now,
       }
 
       const { error } = await supabase.from('bookings').update(payload).eq('id', editingId)
@@ -529,27 +542,35 @@ export default function Bookings() {
         setFormError(error.message)
         return
       }
-      // After successful booking update, sync to sales if a related sale exists
+      // After successful booking update, sync to sales and inventory_items if a related sale exists
       if (editingItemId) {
-        const { data: saleRow, error: saleFetchError } = await supabase
+        const { data: saleRows, error: saleFetchError } = await supabase
           .from('sales')
-          .select('id')
+          .select('id, modal_price, marketplace_fee, packing_cost')
           .eq('inventory_item_id', editingItemId)
-          .maybeSingle()
-        if (!saleFetchError && saleRow) {
-          const { error: saleUpdateError } = await supabase
-            .from('sales')
-            .update({
-              buyer_name: form.buyer_name.trim(),
-              sale_price: Number(form.deal_price) || 0,
-              notes: form.notes.trim() || null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', saleRow.id)
-          if (saleUpdateError) {
-            console.error('Failed to sync sale:', saleUpdateError)
-            showToast(saleUpdateError.message, 'error')
+        if (!saleFetchError && saleRows && saleRows.length > 0) {
+          for (const saleRow of saleRows) {
+            const grossProfit = dealPrice - (saleRow.modal_price || 0)
+            const netProfit = grossProfit - (saleRow.marketplace_fee || 0) - (saleRow.packing_cost || 0)
+            const { error: saleUpdateError } = await supabase
+              .from('sales')
+              .update({
+                buyer_name: buyerName,
+                sale_price: dealPrice,
+                gross_profit: grossProfit,
+                net_profit: netProfit,
+                notes: form.notes.trim() || null,
+                updated_at: now,
+              })
+              .eq('id', saleRow.id)
+            if (saleUpdateError) {
+              console.error('Failed to sync sale:', saleUpdateError)
+              showToast(saleUpdateError.message, 'error')
+            }
           }
+          await updateInventoryItemSoldState(editingItemId, dealPrice, buyerName)
+        } else if (form.status === 'converted_to_sale') {
+          await updateInventoryItemSoldState(editingItemId, dealPrice, buyerName)
         }
       }
       // If cancelled, free up the inventory item back to ready.
@@ -744,6 +765,24 @@ export default function Bookings() {
     loadBookings()
   }
 
+  function resolveBookingEffectiveDealPrice(b: BookingRow): number {
+    if (b.deal_price > 0) return b.deal_price
+    if (b.booking_group_id && (b.group_total_deal_price ?? 0) > 0) {
+      const groupMembers = bookings
+        .filter((row) => row.booking_group_id === b.booking_group_id)
+        .sort((x, y) => {
+          const cmp = x.created_at.localeCompare(y.created_at)
+          return cmp !== 0 ? cmp : x.id.localeCompare(y.id)
+        })
+      if (groupMembers.length > 0) {
+        const splits = splitAmount(b.group_total_deal_price ?? 0, groupMembers.length)
+        const idx = groupMembers.findIndex((row) => row.id === b.id)
+        return splits[idx >= 0 ? idx : 0] ?? 0
+      }
+    }
+    return b.deal_price
+  }
+
   async function handleSingleConvertSubmit(e: FormEvent) {
     e.preventDefault()
     const b = singleConvertTarget
@@ -752,17 +791,19 @@ export default function Bookings() {
     setSingleConvertSaving(true)
 
     // Use the modal_price that was snapshotted at booking-creation time.
-    // Do NOT re-fetch the item's current modal_price — it may have changed.
-    const modalPrice = b.modal_price
-    const salePrice = b.deal_price
+    // Fallback to item's modal_price only if snapshot is 0/missing.
+    const modalPrice = b.modal_price > 0 ? b.modal_price : (b.inventory_items?.modal_price ?? 0)
+    const salePrice = resolveBookingEffectiveDealPrice(b)
+    const buyerName = b.buyer_name.trim()
     const grossProfit = salePrice - modalPrice
     const netProfit = grossProfit
+    const now = new Date().toISOString()
 
     const { error: saleError } = await supabase.from('sales').insert({
       inventory_item_id: b.inventory_item_id,
       customer_id: b.customer_id,
       booking_group_id: b.booking_group_id,
-      buyer_name: b.buyer_name,
+      buyer_name: buyerName,
       sale_price: salePrice,
       modal_price: modalPrice,
       marketplace_fee: 0,
@@ -780,13 +821,30 @@ export default function Bookings() {
       return
     }
 
-    await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', b.inventory_item_id)
-    await supabase.from('bookings').update({ status: 'converted_to_sale' }).eq('id', b.id)
+    if (b.inventory_item_id) {
+      const { error: itemError } = await updateInventoryItemSoldState(b.inventory_item_id, salePrice, buyerName)
+      if (itemError) {
+        setSingleConvertSaving(false)
+        showToast(itemError.message, 'error')
+        return
+      }
+    }
+
+    await supabase
+      .from('bookings')
+      .update({
+        status: 'converted_to_sale',
+        deal_price: salePrice,
+        buyer_name: buyerName,
+        updated_at: now,
+      })
+      .eq('id', b.id)
+
     void logActivity({
       action: 'Sale',
       entity: 'sales',
       userId: user?.id,
-      details: { buyer_name: b.buyer_name, booking_id: b.id, inventory_item_id: b.inventory_item_id },
+      details: { buyer_name: buyerName, booking_id: b.id, inventory_item_id: b.inventory_item_id },
     })
 
     setSingleConvertSaving(false)
@@ -808,10 +866,16 @@ export default function Bookings() {
       return
     }
 
-    // Bulk Purchase mode: all bookings must share the same buyer
+    const totalSalePrice = Number(bulkSaleForm.total_sale_price) || 0
+
+    // Bulk Purchase mode: all bookings must share the same buyer and have a valid total price
     if (bulkPurchase) {
       if (!bulkSaleForm.buyer_name.trim()) {
         setBulkSaleError('Buyer name is required for Bulk Purchase.')
+        return
+      }
+      if (totalSalePrice <= 0) {
+        setBulkSaleError('Total sale price must be greater than 0 for Bulk Purchase.')
         return
       }
       const uniqueBuyers = new Set(selectedBookings.map((b) => b.buyer_name.trim().toLowerCase()))
@@ -826,32 +890,42 @@ export default function Bookings() {
     setBulkSaleSaving(true)
     setBulkSaleError(null)
 
-    const totalSalePrice = Number(bulkSaleForm.total_sale_price) || 0
     const splitSalePrices = splitAmount(totalSalePrice, selectedBookings.length)
+    const now = new Date().toISOString()
 
-    const salesPayload = selectedBookings.map((booking, index) => {
-      // Use modal_price snapshotted at booking-creation time (frozen, never recalculated).
-      const modalPrice = booking.modal_price
-      const salePrice = bulkPurchase ? splitSalePrices[index] : booking.deal_price
+    const resolvedItems = selectedBookings.map((booking, index) => {
+      const modalPrice = booking.modal_price > 0 ? booking.modal_price : (booking.inventory_items?.modal_price ?? 0)
+      const salePrice = bulkPurchase
+        ? (splitSalePrices[index] ?? 0)
+        : resolveBookingEffectiveDealPrice(booking)
+      const buyerName = bulkPurchase ? bulkSaleForm.buyer_name.trim() : booking.buyer_name.trim()
       const grossProfit = salePrice - modalPrice
       return {
-        inventory_item_id: booking.inventory_item_id,
-        customer_id: booking.customer_id,
-        // Always preserve each booking's own group — never merge groups
-        booking_group_id: booking.booking_group_id,
-        buyer_name: bulkPurchase ? bulkSaleForm.buyer_name.trim() : booking.buyer_name.trim(),
-        sale_price: salePrice,
-        modal_price: modalPrice,
-        marketplace_fee: 0,
-        packing_cost: 0,
-        gross_profit: grossProfit,
-        net_profit: grossProfit,
-        sale_date: bulkSaleForm.sale_date || todayISO(),
-        fulfillment_status: bulkFulfillmentStatus,
-        notes: bulkSaleForm.notes.trim() || null,
-        created_by: user?.id,
+        booking,
+        salePrice,
+        modalPrice,
+        buyerName,
+        grossProfit,
       }
     })
+
+    const salesPayload = resolvedItems.map(({ booking, salePrice, modalPrice, buyerName, grossProfit }) => ({
+      inventory_item_id: booking.inventory_item_id,
+      customer_id: booking.customer_id,
+      // Always preserve each booking's own group — never merge groups
+      booking_group_id: booking.booking_group_id,
+      buyer_name: buyerName,
+      sale_price: salePrice,
+      modal_price: modalPrice,
+      marketplace_fee: 0,
+      packing_cost: 0,
+      gross_profit: grossProfit,
+      net_profit: grossProfit,
+      sale_date: bulkSaleForm.sale_date || todayISO(),
+      fulfillment_status: bulkFulfillmentStatus,
+      notes: bulkSaleForm.notes.trim() || null,
+      created_by: user?.id,
+    }))
 
     const { error: saleError } = await supabase.from('sales').insert(salesPayload)
     if (saleError) {
@@ -860,34 +934,41 @@ export default function Bookings() {
       return
     }
 
-    const inventoryItemIds = selectedBookings
-      .map((booking) => booking.inventory_item_id)
-      .filter((id): id is string => Boolean(id))
-    const { error: itemError } = await supabase
-      .from('inventory_items')
-      .update({ status: 'sold', updated_at: new Date().toISOString() })
-      .in('id', inventoryItemIds)
-
-    if (itemError) {
+    // Atomically update each inventory item with its individual sold state and price/buyer
+    const itemResults = await Promise.all(
+      resolvedItems.map(({ booking, salePrice, buyerName }) =>
+        booking.inventory_item_id
+          ? updateInventoryItemSoldState(booking.inventory_item_id, salePrice, buyerName)
+          : Promise.resolve({ error: null })
+      )
+    )
+    const failedItem = itemResults.find((r) => r.error)
+    if (failedItem?.error) {
       setBulkSaleSaving(false)
-      setBulkSaleError(itemError.message)
+      setBulkSaleError(failedItem.error.message)
       return
     }
 
-    const { error: bookingError } = await supabase
-      .from('bookings')
-      .update({
-        status: 'converted_to_sale',
-        updated_at: new Date().toISOString(),
-      })
-      .in(
-        'id',
-        selectedBookings.map((booking) => booking.id)
+    // Atomically update each booking with converted_to_sale status and individual deal_price / buyer_name
+    const bookingResults = await Promise.all(
+      resolvedItems.map(({ booking, salePrice, buyerName }) =>
+        supabase
+          .from('bookings')
+          .update({
+            status: 'converted_to_sale',
+            buyer_name: buyerName,
+            deal_price: salePrice,
+            ...(bulkPurchase ? { group_total_deal_price: totalSalePrice } : {}),
+            updated_at: now,
+          })
+          .eq('id', booking.id)
       )
+    )
+    const failedBooking = bookingResults.find((r) => r.error)
 
     setBulkSaleSaving(false)
-    if (bookingError) {
-      setBulkSaleError(bookingError.message)
+    if (failedBooking?.error) {
+      setBulkSaleError(failedBooking.error.message)
       return
     }
 
@@ -917,20 +998,22 @@ export default function Bookings() {
     setBulkEditSaving(true)
     setBulkEditError(null)
 
+    const buyerName = bulkEditForm.buyer_name.trim()
     const totalDealPrice = Number(bulkEditForm.total_deal_price) || 0
     const splitPrices = splitAmount(totalDealPrice, bulkEditTarget.length)
+    const now = new Date().toISOString()
 
     try {
       const updatePromises = bulkEditTarget.map((b, index) =>
         supabase
           .from('bookings')
           .update({
-            buyer_name: bulkEditForm.buyer_name.trim(),
+            buyer_name: buyerName,
             group_total_deal_price: totalDealPrice,
             deal_price: splitPrices[index] ?? 0,
             deadline: bulkEditForm.deadline || null,
             notes: bulkEditForm.notes.trim() || null,
-            updated_at: new Date().toISOString(),
+            updated_at: now,
           })
           .eq('id', b.id)
       )
@@ -944,28 +1027,35 @@ export default function Bookings() {
         return
       }
 
-      // Sync any converted sales for these items
+      // Sync any converted sales and inventory_items for these items
       const itemIds = bulkEditTarget
         .map((b) => b.inventory_item_id)
         .filter((id): id is string => Boolean(id))
       if (itemIds.length > 0) {
         const { data: existingSales } = await supabase
           .from('sales')
-          .select('id, inventory_item_id')
+          .select('id, inventory_item_id, modal_price, marketplace_fee, packing_cost')
           .in('inventory_item_id', itemIds)
         if (existingSales && existingSales.length > 0) {
-          const saleUpdatePromises = existingSales.map((sale) => {
+          const saleUpdatePromises = existingSales.map(async (sale) => {
             const index = bulkEditTarget.findIndex((b) => b.inventory_item_id === sale.inventory_item_id)
-            const price = index >= 0 ? splitPrices[index] : 0
-            return supabase
+            const price = index >= 0 ? (splitPrices[index] ?? 0) : 0
+            const grossProfit = price - (sale.modal_price || 0)
+            const netProfit = grossProfit - (sale.marketplace_fee || 0) - (sale.packing_cost || 0)
+            await supabase
               .from('sales')
               .update({
-                buyer_name: bulkEditForm.buyer_name.trim(),
+                buyer_name: buyerName,
                 sale_price: price,
+                gross_profit: grossProfit,
+                net_profit: netProfit,
                 notes: bulkEditForm.notes.trim() || null,
-                updated_at: new Date().toISOString(),
+                updated_at: now,
               })
               .eq('id', sale.id)
+            if (sale.inventory_item_id) {
+              await updateInventoryItemSoldState(sale.inventory_item_id, price, buyerName)
+            }
           })
           await Promise.all(saleUpdatePromises)
         }
@@ -977,7 +1067,7 @@ export default function Bookings() {
         userId: user?.id,
         details: {
           count: bulkEditTarget.length,
-          buyer_name: bulkEditForm.buyer_name.trim(),
+          buyer_name: buyerName,
           booking_group_id: bulkEditTarget[0].booking_group_id,
           total_deal_price: totalDealPrice,
         },
@@ -1826,6 +1916,9 @@ export default function Bookings() {
                     className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                   >
                     <option value="active">{formatStatus('active')}</option>
+                    {form.status === 'converted_to_sale' && (
+                      <option value="converted_to_sale">{formatStatus('converted_to_sale')}</option>
+                    )}
                     <option value="cancelled">{formatStatus('cancelled')}</option>
                   </select>
                   <p className="mt-1 text-xs text-gray-400">Use the "Convert to sale" action on the list to mark this as sold.</p>

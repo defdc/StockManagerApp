@@ -9,6 +9,7 @@ import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
+import { revertInventoryItemsSaleState, updateInventoryItemSoldState } from '../lib/itemTransactionSync'
 import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -107,6 +108,7 @@ export default function Sales() {
           .from('sales')
           .select('*, inventory_items(item_name, batch_name)')
           .order('sale_date', { ascending: false })
+          .order('id', { ascending: false })
           .range(from, to) as unknown as PromiseLike<{ data: SaleRow[] | null; error: { message: string } | null }>
       )
       setSales(data ?? [])
@@ -280,6 +282,34 @@ export default function Sales() {
     }
   }
 
+  async function revertSoldItemsAndBookings(itemIds: string[]) {
+    if (itemIds.length === 0) return
+    const now = new Date().toISOString()
+
+    const { data: restoredBookings } = await supabase
+      .from('bookings')
+      .update({ status: 'active', updated_at: now })
+      .in('inventory_item_id', itemIds)
+      .eq('status', 'converted_to_sale')
+      .select('inventory_item_id')
+
+    const bookedItemIds = Array.from(
+      new Set(
+        (restoredBookings ?? [])
+          .map((b) => b.inventory_item_id)
+          .filter((id): id is string => Boolean(id))
+      )
+    )
+    const readyItemIds = itemIds.filter((id) => !bookedItemIds.includes(id))
+
+    if (bookedItemIds.length > 0) {
+      await revertInventoryItemsSaleState(bookedItemIds, 'booked')
+    }
+    if (readyItemIds.length > 0) {
+      await revertInventoryItemsSaleState(readyItemIds, 'ready')
+    }
+  }
+
   async function handleBulkDelete() {
     setBulkActionSaving(true)
     setBulkActionError(null)
@@ -293,19 +323,7 @@ export default function Sales() {
       if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
     }
 
-    if (itemIds.length > 0) {
-      await supabase
-        .from('inventory_items')
-        .update({ status: 'ready', updated_at: new Date().toISOString() })
-        .in('id', itemIds)
-        .eq('status', 'sold')
-
-      await supabase
-        .from('bookings')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .in('inventory_item_id', itemIds)
-        .eq('status', 'converted_to_sale')
-    }
+    await revertSoldItemsAndBookings(itemIds)
 
     setBulkActionSaving(false)
     setShowBulkDeleteConfirm(false)
@@ -327,19 +345,7 @@ export default function Sales() {
       if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
     }
 
-    if (itemIds.length > 0) {
-      await supabase
-        .from('inventory_items')
-        .update({ status: 'ready', updated_at: new Date().toISOString() })
-        .in('id', itemIds)
-        .eq('status', 'sold')
-
-      await supabase
-        .from('bookings')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .in('inventory_item_id', itemIds)
-        .eq('status', 'converted_to_sale')
-    }
+    await revertSoldItemsAndBookings(itemIds)
 
     setBulkActionSaving(false)
     setShowBulkUndoConfirm(false)
@@ -500,9 +506,11 @@ export default function Sales() {
     setSaving(true)
     setGroupEditError(null)
 
+    const buyerName = groupEditForm.buyer_name.trim()
     const totalSalePrice = Number(groupEditForm.total_sale_price) || 0
     const childSales = groupEditTarget.sales
     const splitSalePrices = splitAmount(totalSalePrice, childSales.length)
+    const now = new Date().toISOString()
 
     try {
       const updatePromises = childSales.map((s, index) => {
@@ -514,14 +522,14 @@ export default function Sales() {
         return supabase
           .from('sales')
           .update({
-            buyer_name: groupEditForm.buyer_name.trim(),
+            buyer_name: buyerName,
             sale_price: itemSalePrice,
             gross_profit: grossProfit,
             net_profit: netProfit,
             sale_date: groupEditForm.sale_date || todayISO(),
             fulfillment_status: groupEditForm.fulfillment_status,
             notes: groupEditForm.notes.trim() || null,
-            updated_at: new Date().toISOString(),
+            updated_at: now,
           })
           .eq('id', s.id)
       })
@@ -535,13 +543,33 @@ export default function Sales() {
         return
       }
 
+      // Atomically sync individual item attributes to inventory_items and bookings
+      await Promise.all(
+        childSales.map(async (s, index) => {
+          if (!s.inventory_item_id) return
+          const itemSalePrice = splitSalePrices[index] ?? 0
+          await updateInventoryItemSoldState(s.inventory_item_id, itemSalePrice, buyerName)
+          await supabase
+            .from('bookings')
+            .update({
+              buyer_name: buyerName,
+              deal_price: itemSalePrice,
+              group_total_deal_price: totalSalePrice,
+              status: 'converted_to_sale',
+              updated_at: now,
+            })
+            .eq('inventory_item_id', s.inventory_item_id)
+            .neq('status', 'cancelled')
+        })
+      )
+
       void logActivity({
         action: 'Edit Group Sale',
         entity: 'sales',
         userId: user?.id,
         details: {
           count: childSales.length,
-          buyer_name: groupEditForm.buyer_name.trim(),
+          buyer_name: buyerName,
           booking_group_id: groupEditTarget.bookingGroupId,
           total_sale_price: totalSalePrice,
         },
@@ -573,8 +601,11 @@ export default function Sales() {
     setSaving(true)
     setFormError(null)
 
+    const buyerName = form.buyer_name.trim()
+    const now = new Date().toISOString()
+
     const payload = {
-      buyer_name: form.buyer_name.trim(),
+      buyer_name: buyerName,
       sale_price: salePrice,
       modal_price: modalPrice,
       marketplace_fee: marketplaceFee,
@@ -584,7 +615,7 @@ export default function Sales() {
       sale_date: form.sale_date || todayISO(),
       fulfillment_status: form.fulfillment_status,
       notes: form.notes.trim() || null,
-      updated_at: new Date().toISOString(),
+      updated_at: now,
     }
 
     if (editingId) {
@@ -594,10 +625,34 @@ export default function Sales() {
         setFormError(error.message)
         return
       }
+      if (form.inventory_item_id) {
+        await updateInventoryItemSoldState(form.inventory_item_id, salePrice, buyerName)
+        await supabase
+          .from('bookings')
+          .update({
+            buyer_name: buyerName,
+            deal_price: salePrice,
+            status: 'converted_to_sale',
+            updated_at: now,
+          })
+          .eq('inventory_item_id', form.inventory_item_id)
+          .neq('status', 'cancelled')
+      }
     } else {
+      const { data: activeBookings } = await supabase
+        .from('bookings')
+        .select('id, booking_group_id, customer_id')
+        .eq('inventory_item_id', form.inventory_item_id)
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(1)
+      const linkedBooking = activeBookings?.[0] ?? null
+
       const { error } = await supabase.from('sales').insert({
         ...payload,
         inventory_item_id: form.inventory_item_id,
+        booking_group_id: linkedBooking?.booking_group_id ?? null,
+        customer_id: linkedBooking?.customer_id ?? null,
         created_by: user?.id,
       })
       if (error) {
@@ -605,12 +660,23 @@ export default function Sales() {
         setFormError(error.message)
         return
       }
-      await supabase.from('inventory_items').update({ status: 'sold' }).eq('id', form.inventory_item_id)
+      await updateInventoryItemSoldState(form.inventory_item_id, salePrice, buyerName)
+      await supabase
+        .from('bookings')
+        .update({
+          buyer_name: buyerName,
+          deal_price: salePrice,
+          status: 'converted_to_sale',
+          updated_at: now,
+        })
+        .eq('inventory_item_id', form.inventory_item_id)
+        .eq('status', 'active')
+
       void logActivity({
         action: 'Sale',
         entity: 'sales',
         userId: user?.id,
-        details: { buyer_name: form.buyer_name.trim(), inventory_item_id: form.inventory_item_id },
+        details: { buyer_name: buyerName, inventory_item_id: form.inventory_item_id },
       })
     }
 
@@ -633,17 +699,7 @@ export default function Sales() {
       return
     }
     if (s.inventory_item_id) {
-      await supabase
-        .from('inventory_items')
-        .update({ status: 'ready', updated_at: new Date().toISOString() })
-        .eq('id', s.inventory_item_id)
-        .eq('status', 'sold')
-
-      await supabase
-        .from('bookings')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .eq('inventory_item_id', s.inventory_item_id)
-        .eq('status', 'converted_to_sale')
+      await revertSoldItemsAndBookings([s.inventory_item_id])
     }
     void logActivity({
       action: 'Delete',
@@ -673,17 +729,7 @@ export default function Sales() {
     }
 
     if (s.inventory_item_id) {
-      await supabase
-        .from('inventory_items')
-        .update({ status: 'ready', updated_at: new Date().toISOString() })
-        .eq('id', s.inventory_item_id)
-        .eq('status', 'sold')
-
-      await supabase
-        .from('bookings')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .eq('inventory_item_id', s.inventory_item_id)
-        .eq('status', 'converted_to_sale')
+      await revertSoldItemsAndBookings([s.inventory_item_id])
     }
 
     void logActivity({
@@ -1444,13 +1490,37 @@ export default function Sales() {
                   label="Item *"
                   value={form.inventory_item_id || null}
                   allowedStatuses={SELLABLE_ITEM_STATUSES}
-                  onChange={(item) =>
+                  onChange={(item) => {
                     setForm((current) => ({
                       ...current,
                       inventory_item_id: item?.id ?? '',
                       modal_price: item ? String(Math.round(item.modal_price)) : current.modal_price,
                     }))
-                  }
+                    if (item?.id && item.status === 'booked') {
+                      void supabase
+                        .from('bookings')
+                        .select('buyer_name, deal_price')
+                        .eq('inventory_item_id', item.id)
+                        .eq('status', 'active')
+                        .order('created_at', { ascending: false })
+                        .limit(1)
+                        .then(({ data }) => {
+                          const activeBooking = data?.[0]
+                          if (!activeBooking) return
+                          setForm((current) => {
+                            if (current.inventory_item_id !== item.id) return current
+                            return {
+                              ...current,
+                              buyer_name: current.buyer_name.trim() || activeBooking.buyer_name || '',
+                              sale_price:
+                                (Number(current.sale_price) || 0) > 0
+                                  ? current.sale_price
+                                  : String(Math.round(activeBooking.deal_price || 0)),
+                            }
+                          })
+                        })
+                    }
+                  }}
                   placeholder="Search ready or booked items..."
                 />
               )}

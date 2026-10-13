@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { fetchAllRows } from '../lib/supabasePagination'
-import { formatDate, formatIDR } from '../lib/format'
+import { formatDate, formatIDR, splitAmount } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import Modal from '../components/Modal'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 import type { Booking, InventoryItem, Sale } from '../types/database'
+import {
+  detectFlatInventorySaleFields,
+  isConvertedBookingStatus,
+  resolveItemTransactionDetails,
+  type InventoryItemWithRelations,
+} from '../lib/itemTransactionSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 
@@ -67,14 +73,23 @@ export default function Batches() {
 
     try {
       const [inventoryItems, sales, bookings] = await Promise.all([
-        fetchAllRows<InventoryItem>((from, to) =>
-          supabase.from('inventory_items').select('*').order('created_at', { ascending: true }).range(from, to)
+        fetchAllRows<InventoryItemWithRelations>((from, to) =>
+          supabase
+            .from('inventory_items')
+            .select('*, sales(sale_price, buyer_name, created_at), bookings(deal_price, buyer_name, status)')
+            .order('created_at', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to) as unknown as PromiseLike<{
+            data: InventoryItemWithRelations[] | null
+            error: { message: string } | null
+          }>
         ),
         fetchAllRows<SaleRow>((from, to) =>
           supabase
             .from('sales')
             .select('*, inventory_items(batch_name, item_name)')
             .order('sale_date', { ascending: false })
+            .order('id', { ascending: false })
             .range(from, to)
         ),
         fetchAllRows<BookingRow>((from, to) =>
@@ -82,13 +97,57 @@ export default function Batches() {
             .from('bookings')
             .select('*, inventory_items(batch_name, item_name)')
             .order('created_at', { ascending: false })
+            .order('id', { ascending: false })
             .range(from, to)
         ),
       ])
 
-      const salesByItemId = new Map<string, SaleRow>()
+      if (inventoryItems.length > 0) {
+        detectFlatInventorySaleFields(inventoryItems[0] as unknown as Record<string, unknown>)
+      }
+
+      // Normalize grouped bookings where child deal_price is 0 but group_total_deal_price > 0
+      const bookingsByGroup = new Map<string, BookingRow[]>()
+      for (const b of bookings) {
+        if (b.booking_group_id) {
+          const list = bookingsByGroup.get(b.booking_group_id) ?? []
+          list.push(b)
+          bookingsByGroup.set(b.booking_group_id, list)
+        }
+      }
+      for (const groupBookings of bookingsByGroup.values()) {
+        const groupTotal =
+          groupBookings.find((b) => (b.group_total_deal_price ?? 0) > 0)?.group_total_deal_price ?? 0
+        const allZero = groupBookings.every((b) => !b.deal_price || b.deal_price <= 0)
+        if (groupTotal > 0 && allZero) {
+          const splitPrices = splitAmount(groupTotal, groupBookings.length)
+          groupBookings.forEach((b, idx) => {
+            b.deal_price = splitPrices[idx] ?? 0
+          })
+        }
+      }
+
+      const salesByItemId = new Map<string, SaleRow[]>()
       for (const sale of sales) {
-        if (sale.inventory_item_id) salesByItemId.set(sale.inventory_item_id, sale)
+        if (sale.inventory_item_id) {
+          const existing = salesByItemId.get(sale.inventory_item_id) ?? []
+          existing.push(sale)
+          salesByItemId.set(sale.inventory_item_id, existing)
+        }
+      }
+
+      const bookingsByItemId = new Map<string, BookingRow[]>()
+      for (const booking of bookings) {
+        if (booking.inventory_item_id) {
+          const existing = bookingsByItemId.get(booking.inventory_item_id) ?? []
+          existing.push(booking)
+          bookingsByItemId.set(booking.inventory_item_id, existing)
+        }
+      }
+
+      const itemById = new Map<string, InventoryItemWithRelations>()
+      for (const item of inventoryItems) {
+        itemById.set(item.id, item)
       }
 
       const batchMap = new Map<string, BatchSummary>()
@@ -129,17 +188,20 @@ export default function Batches() {
 
         batch.totalItems += 1
 
+        const resolved = resolveItemTransactionDetails(
+          item,
+          salesByItemId.get(item.id) ?? [],
+          bookingsByItemId.get(item.id) ?? []
+        )
+
         const itemWithSale: InventoryItemWithSale = {
           ...item,
-          salePrice: null,
-          buyerName: null,
+          salePrice: resolved.salePrice,
+          buyerName: resolved.buyerName,
         }
 
-        const matchingSale = salesByItemId.get(item.id)
-        if (matchingSale) {
-          itemWithSale.salePrice = matchingSale.sale_price
-          itemWithSale.buyerName = matchingSale.buyer_name
-          batch.salesRevenue += matchingSale.sale_price
+        if (resolved.hasSaleOrConvertedBooking && resolved.salePrice !== null) {
+          batch.salesRevenue += resolved.salePrice
         }
 
         if (item.status === 'ready') batch.readyCount += 1
@@ -150,8 +212,11 @@ export default function Batches() {
       }
 
       for (const booking of bookings) {
-        if (booking.status === 'cancelled' || booking.status === 'converted_to_sale') continue
-        const batchName = booking.inventory_items?.batch_name?.trim() || 'Unassigned'
+        if (booking.status === 'cancelled' || isConvertedBookingStatus(booking.status)) continue
+        const linkedItem = booking.inventory_item_id ? itemById.get(booking.inventory_item_id) : undefined
+        if ((linkedItem?.status ?? '').toLowerCase() === 'sold') continue
+        const batchName =
+          booking.inventory_items?.batch_name?.trim() || linkedItem?.batch_name?.trim() || 'Unassigned'
         const batch = ensureBatch(batchName)
         batch.bookedRevenue += booking.deal_price
       }
@@ -167,7 +232,11 @@ export default function Batches() {
         else batch.status = 'Profit'
       }
 
-      setBatches(Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName)))
+      const sortedBatches = Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName))
+      setBatches(sortedBatches)
+      setSelectedBatch((current) =>
+        current ? sortedBatches.find((b) => b.batchName === current.batchName) ?? null : null
+      )
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load batches.')
     } finally {
