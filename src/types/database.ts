@@ -135,6 +135,7 @@ export interface ActivityLog {
   id: string
   action: string
   entity: string
+  description?: string | null
   entity_id: string | null
   details: Record<string, unknown>
   created_by: string | null

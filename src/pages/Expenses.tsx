@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
+import { logActivity } from '../lib/activityLog'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import { EXPENSE_TYPES } from '../lib/constants'
 import type { Expense, ExpenseType } from '../types/database'
@@ -89,6 +90,24 @@ export default function Expenses() {
       setFormError(error.message)
       return
     }
+
+    if (editingId) {
+      void logActivity({
+        action: 'Edit Expense',
+        description: `Updated expense of ${formatIDR(Number(form.amount) || 0)} (${form.type})`,
+        entityId: editingId,
+        userId: user?.id,
+        details: { type: form.type, amount: Number(form.amount) || 0 },
+      })
+    } else {
+      void logActivity({
+        action: 'Add Expense',
+        description: `Added expense of ${formatIDR(Number(form.amount) || 0)} (${form.type})`,
+        userId: user?.id,
+        details: { type: form.type, amount: Number(form.amount) || 0 },
+      })
+    }
+
     setShowModal(false)
     loadExpenses()
   }
@@ -105,6 +124,13 @@ export default function Expenses() {
       showToast(error.message, 'error')
       setDeletingExpense(null)
     } else {
+      void logActivity({
+        action: 'Delete Expense',
+        description: `Deleted expense of ${formatIDR(e.amount)} (${e.type})`,
+        entityId: e.id,
+        userId: user?.id,
+        details: { type: e.type, amount: e.amount },
+      })
       setDeletingExpense(null)
       showToast('Expense deleted.')
       loadExpenses()

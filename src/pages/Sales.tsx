@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { fetchAllRows } from '../lib/supabasePagination'
+import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, todayISO, splitAmount } from '../lib/format'
@@ -77,6 +78,7 @@ export default function Sales() {
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingItemName, setEditingItemName] = useState<string>('')
+  const [selectedItemName, setSelectedItemName] = useState<string>('')
   const [form, setForm] = useState(emptyForm)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
@@ -88,7 +90,6 @@ export default function Sales() {
   const [groupEditError, setGroupEditError] = useState<string | null>(null)
   const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | FulfillmentStatus>('all')
 
-  // ── Bulk selection state ─────────────────────────────────────────────────────
   const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
   const [showBulkShippingModal, setShowBulkShippingModal] = useState(false)
   const [bulkShippingStatus, setBulkShippingStatus] = useState<FulfillmentStatus>('parking')
@@ -99,8 +100,15 @@ export default function Sales() {
   const [bulkActionSaving, setBulkActionSaving] = useState(false)
   const [bulkActionError, setBulkActionError] = useState<string | null>(null)
 
+  const [refreshing, setRefreshing] = useState(false)
+  const hasLoadedRef = useRef(false)
+  const loadSeqRef = useRef(0)
+
   async function loadSales() {
-    setLoading(true)
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    if (hasLoadedRef.current) setRefreshing(true)
+    else setLoading(true)
     setError(null)
     try {
       const data = await fetchAllRows<SaleRow>((from, to) =>
@@ -111,11 +119,21 @@ export default function Sales() {
           .order('id', { ascending: false })
           .range(from, to) as unknown as PromiseLike<{ data: SaleRow[] | null; error: { message: string } | null }>
       )
-      setSales(data ?? [])
+      if (!isLatest()) return
+      const nextSales = data ?? []
+      setSales(nextSales)
+      hasLoadedRef.current = true
+      // Preserve checkbox selection: only keep IDs that still exist in the database
+      const idSet = new Set(nextSales.map((s) => s.id))
+      setSelectedSaleIds((current) => current.filter((id) => idSet.has(id)))
     } catch (err) {
+      if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load sales.')
     } finally {
-      setLoading(false)
+      if (isLatest()) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
@@ -123,17 +141,43 @@ export default function Sales() {
     loadSales()
   }, [])
 
+  useDataInvalidation(['sales', 'inventory_items', 'bookings'], () => {
+    void loadSales()
+  })
+
   const filtered = useMemo(() => {
+    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const hasQuery = searchWords.length > 0
+
     return sales
+      .filter((sale) => {
+        if (fulfillmentFilter !== 'all' && sale.fulfillment_status !== fulfillmentFilter) {
+          return false
+        }
+        if (!hasQuery) return true
+
+        const buyerName = (sale.buyer_name || '').toLowerCase()
+        const itemName = (sale.inventory_items?.item_name || '').toLowerCase()
+        const batchName = (sale.inventory_items?.batch_name || '').toLowerCase()
+        const notes = (sale.notes || '').toLowerCase()
+
+        return searchWords.every(
+          (word) =>
+            buyerName.includes(word) ||
+            itemName.includes(word) ||
+            batchName.includes(word) ||
+            notes.includes(word)
+        )
+      })
       .map((sale) => ({
         sale,
         rank: smartSearchRank(search, [
           { value: sale.buyer_name },
           { value: sale.inventory_items?.item_name },
+          { value: sale.inventory_items?.batch_name },
           { value: sale.notes, kind: 'notes' },
         ]),
       }))
-      .filter(({ rank, sale }) => rank !== null && (fulfillmentFilter === 'all' || sale.fulfillment_status === fulfillmentFilter))
       .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.sale.sale_date.localeCompare(a.sale.sale_date))
       .map(({ sale }) => sale)
   }, [sales, search, fulfillmentFilter])
@@ -251,6 +295,12 @@ export default function Sales() {
       .in('id', selectedSaleIds)
     setBulkActionSaving(false)
     if (error) { setBulkActionError(error.message); return }
+    void logActivity({
+      action: 'Bulk Update Fulfillment',
+      description: `Updated fulfillment status to "${bulkShippingStatus}" for ${selectedSaleIds.length} sales`,
+      userId: user?.id,
+      details: { count: selectedSaleIds.length, status: bulkShippingStatus },
+    })
     setShowBulkShippingModal(false)
     setSelectedSaleIds([])
     loadSales()
@@ -268,6 +318,13 @@ export default function Sales() {
         .in('id', selectedSaleIds)
 
       if (error) throw error
+
+      void logActivity({
+        action: 'Bulk Update Sale Date',
+        description: `Updated sale date to ${bulkSaleDate} for ${selectedSaleIds.length} sales`,
+        userId: user?.id,
+        details: { count: selectedSaleIds.length, sale_date: bulkSaleDate },
+      })
 
       showToast('Successfully updated sale dates!')
       setShowBulkDateModal(false)
@@ -325,6 +382,13 @@ export default function Sales() {
 
     await revertSoldItemsAndBookings(itemIds)
 
+    void logActivity({
+      action: 'Bulk Delete Sales',
+      description: `Bulk deleted ${selectedSales.length} sale records`,
+      userId: user?.id,
+      details: { count: selectedSales.length, sale_ids: selectedSaleIds },
+    })
+
     setBulkActionSaving(false)
     setShowBulkDeleteConfirm(false)
     setSelectedSaleIds([])
@@ -346,6 +410,13 @@ export default function Sales() {
     }
 
     await revertSoldItemsAndBookings(itemIds)
+
+    void logActivity({
+      action: 'Bulk Undo Sales',
+      description: `Bulk undone ${selectedSales.length} sale records`,
+      userId: user?.id,
+      details: { count: selectedSales.length, sale_ids: selectedSaleIds },
+    })
 
     setBulkActionSaving(false)
     setShowBulkUndoConfirm(false)
@@ -447,6 +518,7 @@ export default function Sales() {
 
   function openAddModal() {
     setEditingId(null)
+    setSelectedItemName('')
     setForm(emptyForm)
     setFormError(null)
     setShowModal(true)
@@ -470,6 +542,7 @@ export default function Sales() {
   function openEditModal(s: SaleRow) {
     setEditingId(s.id)
     setEditingItemName(s.inventory_items?.item_name ?? '-')
+    setSelectedItemName(s.inventory_items?.item_name ?? '-')
     setForm({
       inventory_item_id: s.inventory_item_id ?? '',
       buyer_name: s.buyer_name,
@@ -565,7 +638,7 @@ export default function Sales() {
 
       void logActivity({
         action: 'Edit Group Sale',
-        entity: 'sales',
+        description: `Updated group sale of ${childSales.length} items for buyer ${buyerName}`,
         userId: user?.id,
         details: {
           count: childSales.length,
@@ -638,6 +711,14 @@ export default function Sales() {
           .eq('inventory_item_id', form.inventory_item_id)
           .neq('status', 'cancelled')
       }
+
+      void logActivity({
+        action: 'Edit Sale',
+        description: `Edited sale for ${editingItemName !== '-' ? editingItemName : 'item'} sold to ${buyerName}`,
+        entityId: editingId,
+        userId: user?.id,
+        details: { buyer_name: buyerName, inventory_item_id: form.inventory_item_id, item_name: editingItemName },
+      })
     } else {
       const { data: activeBookings } = await supabase
         .from('bookings')
@@ -674,9 +755,9 @@ export default function Sales() {
 
       void logActivity({
         action: 'Sale',
-        entity: 'sales',
+        description: `Created sale for ${selectedItemName || 'item'} to buyer ${buyerName}`,
         userId: user?.id,
-        details: { buyer_name: buyerName, inventory_item_id: form.inventory_item_id },
+        details: { buyer_name: buyerName, inventory_item_id: form.inventory_item_id, item_name: selectedItemName },
       })
     }
 
@@ -702,11 +783,11 @@ export default function Sales() {
       await revertSoldItemsAndBookings([s.inventory_item_id])
     }
     void logActivity({
-      action: 'Delete',
-      entity: 'sales',
+      action: 'Delete Sale',
+      description: `Deleted sale for ${s.inventory_items?.item_name || 'item'} sold to ${s.buyer_name || 'unknown'}`,
       entityId: s.id,
       userId: user?.id,
-      details: { buyer_name: s.buyer_name, inventory_item_id: s.inventory_item_id },
+      details: { buyer_name: s.buyer_name, inventory_item_id: s.inventory_item_id, item_name: s.inventory_items?.item_name },
     })
     setDeletingSale(null)
     showToast('Sale record deleted successfully.')
@@ -734,12 +815,13 @@ export default function Sales() {
 
     void logActivity({
       action: 'Undo Sale',
-      entity: 'sales',
+      description: `Undid sale for ${s.inventory_items?.item_name || 'item'} sold to ${s.buyer_name || 'unknown'}`,
       entityId: s.id,
       userId: user?.id,
       details: {
         buyer_name: s.buyer_name,
         inventory_item_id: s.inventory_item_id,
+        item_name: s.inventory_items?.item_name,
       },
     })
 
@@ -830,7 +912,15 @@ export default function Sales() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-gray-900">Sales</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold text-gray-900">Sales</h1>
+          {refreshing && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" />
+              Syncing...
+            </span>
+          )}
+        </div>
         <div className="flex gap-2">
           <button
             onClick={handleExport}
@@ -852,7 +942,7 @@ export default function Sales() {
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="text"
-          placeholder="Search buyer, item, or notes..."
+          placeholder="Search buyer, item, batch, or notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
@@ -1491,6 +1581,7 @@ export default function Sales() {
                   value={form.inventory_item_id || null}
                   allowedStatuses={SELLABLE_ITEM_STATUSES}
                   onChange={(item) => {
+                    setSelectedItemName(item?.item_name ?? '')
                     setForm((current) => ({
                       ...current,
                       inventory_item_id: item?.id ?? '',

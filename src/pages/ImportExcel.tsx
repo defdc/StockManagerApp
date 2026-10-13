@@ -248,7 +248,7 @@ export default function ImportExcel() {
 
       void logActivity({
         action: 'Revert Import',
-        entity: 'legacy_imports',
+        description: `Reverted import "${deleteTargetImport.file_name}" (deleted ${deleteItemIds.length} items)`,
         entityId: impId,
         userId: user?.id,
         details: {
@@ -576,7 +576,7 @@ export default function ImportExcel() {
       })
       void logActivity({
         action: 'Import',
-        entity: 'legacy_imports',
+        description: `Imported ${cleanRows} items from Excel (${fileName})`,
         entityId: importRow.id,
         userId: user.id,
         details: { file_name: fileName, sheet_name: selectedSheet, clean_rows: cleanRows },

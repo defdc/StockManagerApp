@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { trackedFetch } from './dataSync'
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -9,4 +10,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
   )
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// `trackedFetch` turns every successful REST mutation into a global data invalidation
+// (see src/lib/dataSync.ts), so derived views like Batches never show stale numbers.
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  global: { fetch: trackedFetch },
+})

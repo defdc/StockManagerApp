@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import { APP_NAME } from '../lib/constants'
+import { useRealtimeSync } from '../lib/realtimeSync'
 
 export default function Layout() {
+  useRealtimeSync()
   const [mobileOpen, setMobileOpen] = useState(false)
 
   return (

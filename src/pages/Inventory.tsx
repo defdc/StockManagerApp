@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { fetchAllRows } from '../lib/supabasePagination'
+import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus } from '../lib/format'
@@ -126,6 +127,10 @@ export default function Inventory() {
   const [drawerSales, setDrawerSales] = useState<Sale[]>([])
   const [drawerLoading, setDrawerLoading] = useState(false)
 
+  const [refreshing, setRefreshing] = useState(false)
+  const hasLoadedRef = useRef(false)
+  const loadSeqRef = useRef(0)
+
   const drawerResolvedDetails = useMemo(() => {
     if (!drawerItem) return { salePrice: null, buyerName: null, hasSaleOrConvertedBooking: false }
     return resolveItemTransactionDetails(drawerItem, drawerSales, drawerBookings)
@@ -134,7 +139,10 @@ export default function Inventory() {
   // ── Data loading ─────────────────────────────────────────────────────────
 
   async function loadItems() {
-    setLoading(true)
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    if (hasLoadedRef.current) setRefreshing(true)
+    else setLoading(true)
     setError(null)
     try {
       const data = await fetchAllRows<InventoryItem>((from, to) =>
@@ -147,6 +155,7 @@ export default function Inventory() {
           .order('id', { ascending: false })
           .range(from, to)
       )
+      if (!isLatest()) return
       // Defensive de-duplication by UUID so every row (and React key) is unique.
       const uniqueById = new Map<string, InventoryItem>()
       for (const row of data ?? []) {
@@ -154,18 +163,29 @@ export default function Inventory() {
       }
       const uniqueItems = [...uniqueById.values()]
       setItems(uniqueItems)
+      hasLoadedRef.current = true
       // Drop selections that no longer exist (deleted / reloaded rows).
       setSelectedItemIds((current) => current.filter((id) => uniqueById.has(id)))
+      // Preserve detail drawer item without closing it
+      setDrawerItem((current) => (current ? uniqueById.get(current.id) ?? current : null))
     } catch (err) {
+      if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load inventory items.')
     } finally {
-      setLoading(false)
+      if (isLatest()) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
   useEffect(() => {
     loadItems()
   }, [])
+
+  useDataInvalidation(['inventory_items', 'sales', 'bookings'], () => {
+    void loadItems()
+  })
 
   // Load drawer history when an item is selected
   useEffect(() => {
@@ -495,7 +515,7 @@ export default function Inventory() {
 
     void logActivity({
       action: 'Bulk Add Items',
-      entity: 'inventory_items',
+      description: `Bulk added ${itemsPayload.length} items to batch "${batchName || 'Unassigned'}"`,
       userId: user?.id,
       details: { count: itemsPayload.length, batch_name: batchName || 'Unassigned' },
     })
@@ -557,6 +577,24 @@ export default function Inventory() {
       setFormError(error.message)
       return
     }
+
+    if (editingId) {
+      void logActivity({
+        action: 'Edit Item',
+        description: `Edited item: ${form.item_name.trim()} in batch ${batchName || 'Unassigned'}`,
+        entityId: editingId,
+        userId: user?.id,
+        details: { item_name: form.item_name.trim(), batch_name: batchName || 'Unassigned' },
+      })
+    } else {
+      void logActivity({
+        action: 'Add Item',
+        description: `Added item: ${form.item_name.trim()} to batch ${batchName || 'Unassigned'}`,
+        userId: user?.id,
+        details: { item_name: form.item_name.trim(), batch_name: batchName || 'Unassigned' },
+      })
+    }
+
     setShowModal(false)
     loadItems()
   }
@@ -634,7 +672,7 @@ export default function Inventory() {
     setSelectedItemIds([])
     void logActivity({
       action: 'Bulk Booking',
-      entity: 'inventory_items',
+      description: `Created bulk booking for ${selectedItems.length} items for buyer ${bulkBookingForm.buyer_name.trim()}`,
       userId: user?.id,
       details: { count: selectedItems.length, buyer_name: bulkBookingForm.buyer_name.trim(), booking_group_id: groupId },
     })
@@ -688,6 +726,12 @@ export default function Inventory() {
       showToast(deleteError.message, 'error')
       loadItems()
     } else {
+      void logActivity({
+        action: 'Bulk Delete',
+        description: `Bulk deleted ${count} items from Inventory`,
+        userId: user?.id,
+        details: { count, item_ids: targetIds },
+      })
       showToast(`Successfully deleted ${count} item${count === 1 ? '' : 's'}`)
       setSelectedItemIds([])
       loadItems()
@@ -708,10 +752,10 @@ export default function Inventory() {
     } else {
       void logActivity({
         action: 'Delete',
-        entity: 'inventory_items',
+        description: `Deleted item: ${item.item_name} from batch ${item.batch_name?.trim() || 'Unassigned'}`,
         entityId: item.id,
         userId: user?.id,
-        details: { item_name: item.item_name },
+        details: { item_name: item.item_name, batch_name: item.batch_name },
       })
       setDeletingItem(null)
       showToast(`Item "${item.item_name}" deleted.`)
@@ -741,7 +785,15 @@ export default function Inventory() {
     <div className="space-y-4">
       {/* Page header */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-gray-900">Inventory</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold text-gray-900">Inventory</h1>
+          {refreshing && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" />
+              Syncing...
+            </span>
+          )}
+        </div>
         <div className="flex gap-2">
           <button
             onClick={handleExport}

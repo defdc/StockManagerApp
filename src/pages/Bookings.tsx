@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { fetchAllRows } from '../lib/supabasePagination'
+import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
@@ -132,8 +133,15 @@ export default function Bookings() {
   const [singleConvertSaving, setSingleConvertSaving] = useState(false)
   const [singleConvertTarget, setSingleConvertTarget] = useState<BookingRow | null>(null)
 
+  const [refreshing, setRefreshing] = useState(false)
+  const hasLoadedRef = useRef(false)
+  const loadSeqRef = useRef(0)
+
   async function loadBookings() {
-    setLoading(true)
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    if (hasLoadedRef.current) setRefreshing(true)
+    else setLoading(true)
     setError(null)
     try {
       const data = await fetchAllRows<BookingRow>((from, to) =>
@@ -144,11 +152,23 @@ export default function Bookings() {
           .order('id', { ascending: false })
           .range(from, to) as unknown as PromiseLike<{ data: BookingRow[] | null; error: { message: string } | null }>
       )
-      setBookings(data ?? [])
+      if (!isLatest()) return
+      const nextBookings = data ?? []
+      setBookings(nextBookings)
+      hasLoadedRef.current = true
+      // Preserve checkbox selection: only keep IDs that still exist in the database
+      const idSet = new Set(nextBookings.map((b) => b.id))
+      setSelectedBookingIds((current) => current.filter((id) => idSet.has(id)))
+      // Preserve open convert modal target without closing or resetting
+      setSingleConvertTarget((current) => (current ? nextBookings.find((b) => b.id === current.id) ?? current : null))
     } catch (err) {
+      if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load bookings.')
     } finally {
-      setLoading(false)
+      if (isLatest()) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
@@ -156,20 +176,42 @@ export default function Bookings() {
     loadBookings()
   }, [])
 
+  useDataInvalidation(['bookings', 'sales', 'inventory_items'], () => {
+    void loadBookings()
+  })
+
   // Priority order for status when no search query drives ranking
   const filtered = useMemo(() => {
-    const hasQuery = search.trim().length > 0
+    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const hasQuery = searchWords.length > 0
 
     return bookings
+      .filter((b) => {
+        if (statusFilter && b.status !== statusFilter) return false
+        if (!hasQuery) return true
+
+        const buyerName = (b.buyer_name || '').toLowerCase()
+        const itemName = (b.inventory_items?.item_name || '').toLowerCase()
+        const batchName = (b.inventory_items?.batch_name || '').toLowerCase()
+        const notes = (b.notes || '').toLowerCase()
+
+        return searchWords.every(
+          (word) =>
+            buyerName.includes(word) ||
+            itemName.includes(word) ||
+            batchName.includes(word) ||
+            notes.includes(word)
+        )
+      })
       .map((b) => ({
         booking: b,
         rank: smartSearchRank(search, [
           { value: b.buyer_name },
           { value: b.inventory_items?.item_name },
+          { value: b.inventory_items?.batch_name },
           { value: b.notes, kind: 'notes' },
         ]),
       }))
-      .filter(({ booking, rank }) => (statusFilter ? booking.status === statusFilter : true) && rank !== null)
       .sort((a, b) => {
         // 1. If there's an active search query, rank takes first priority
         if (hasQuery) {
@@ -582,6 +624,17 @@ export default function Bookings() {
           .eq('status', 'booked')
       }
 
+      void logActivity({
+        action: form.status === 'cancelled' ? 'Cancel Booking' : 'Edit Booking',
+        description:
+          form.status === 'cancelled'
+            ? `Cancelled booking for ${editingItemName !== '-' ? editingItemName : 'item'} (buyer: ${buyerName})`
+            : `Edited booking for ${editingItemName !== '-' ? editingItemName : 'item'} (buyer: ${buyerName})`,
+        entityId: editingId,
+        userId: user?.id,
+        details: { buyer_name: buyerName, status: form.status, item_name: editingItemName },
+      })
+
       setSaving(false)
       setShowModal(false)
       loadBookings()
@@ -709,14 +762,22 @@ export default function Bookings() {
       return
     }
 
+    const buyer = newBookingBuyer.trim()
+    const singleItem = selectedItems.length === 1 ? itemRows?.find((r) => r.id === selectedItems[0]?.inventory_item_id) : null
+    const desc =
+      selectedItems.length > 1
+        ? `Created bulk booking for ${selectedItems.length} items for buyer ${buyer}`
+        : `Created booking for "${singleItem?.item_name || 'item'}" for buyer ${buyer}`
+
     void logActivity({
-      action: 'Booking',
-      entity: 'bookings',
+      action: selectedItems.length > 1 ? 'Bulk Booking' : 'Booking',
+      description: desc,
       userId: user?.id,
       details: {
-        buyer_name: newBookingBuyer.trim(),
+        buyer_name: buyer,
         booking_group_id: bookingGroupId,
         count: selectedItems.length,
+        item_name: singleItem?.item_name,
       },
     })
 
@@ -754,11 +815,11 @@ export default function Bookings() {
         .eq('status', 'booked')
     }
     void logActivity({
-      action: 'Delete',
-      entity: 'bookings',
+      action: 'Delete Booking',
+      description: `Deleted booking for ${b.inventory_items?.item_name || 'item'} (buyer: ${b.buyer_name || 'unknown'})`,
       entityId: b.id,
       userId: user?.id,
-      details: { buyer_name: b.buyer_name },
+      details: { buyer_name: b.buyer_name, item_name: b.inventory_items?.item_name },
     })
     setDeletingBooking(null)
     showToast('Booking deleted successfully.')
@@ -841,10 +902,10 @@ export default function Bookings() {
       .eq('id', b.id)
 
     void logActivity({
-      action: 'Sale',
-      entity: 'sales',
+      action: 'Convert to Sale',
+      description: `Converted booking for ${b.inventory_items?.item_name || 'item'} to sale for buyer ${buyerName}`,
       userId: user?.id,
-      details: { buyer_name: buyerName, booking_id: b.id, inventory_item_id: b.inventory_item_id },
+      details: { buyer_name: buyerName, booking_id: b.id, inventory_item_id: b.inventory_item_id, item_name: b.inventory_items?.item_name },
     })
 
     setSingleConvertSaving(false)
@@ -976,7 +1037,7 @@ export default function Bookings() {
     setSelectedBookingIds([])
     void logActivity({
       action: 'Bulk Sale',
-      entity: 'sales',
+      description: `Converted ${selectedBookings.length} items to sale for buyer ${bulkSaleForm.buyer_name.trim()}`,
       userId: user?.id,
       details: {
         count: selectedBookings.length,
@@ -1063,7 +1124,7 @@ export default function Bookings() {
 
       void logActivity({
         action: 'Edit Bulk Booking',
-        entity: 'bookings',
+        description: `Updated bulk booking of ${bulkEditTarget.length} items for buyer ${buyerName}`,
         userId: user?.id,
         details: {
           count: bulkEditTarget.length,
@@ -1218,7 +1279,15 @@ export default function Bookings() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-gray-900">Bookings</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold text-gray-900">Bookings</h1>
+          {refreshing && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" />
+              Syncing...
+            </span>
+          )}
+        </div>
         <div className="flex gap-2">
           <button
             onClick={handleExport}
@@ -1240,7 +1309,7 @@ export default function Bookings() {
       <div className="flex flex-wrap gap-2">
         <input
           type="text"
-          placeholder="Search buyer, item, or notes..."
+          placeholder="Search buyer, item, batch, or notes..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"

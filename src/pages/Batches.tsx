@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
+import { useDataInvalidation } from '../lib/dataSync'
 import { fetchAllRows } from '../lib/supabasePagination'
 import { formatDate, formatIDR, splitAmount } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
@@ -14,6 +15,7 @@ import {
 } from '../lib/itemTransactionSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
+import { logActivity } from '../lib/activityLog'
 
 type BatchStatus = 'No Sales' | 'In Progress' | 'Break Even' | 'Profit'
 
@@ -50,15 +52,82 @@ const FILTERS = ['All', 'No Sales', 'In Progress', 'Break Even', 'Profit'] as co
 
 type FilterValue = (typeof FILTERS)[number]
 
+type BatchSortOption =
+  | 'newest'
+  | 'oldest'
+  | 'highest_revenue'
+  | 'lowest_revenue'
+  | 'highest_profit'
+  | 'lowest_profit'
+
+const SORT_OPTIONS: { label: string; value: BatchSortOption }[] = [
+  { label: 'Newest Added', value: 'newest' },
+  { label: 'Oldest Added', value: 'oldest' },
+  { label: 'Highest Revenue', value: 'highest_revenue' },
+  { label: 'Lowest Revenue', value: 'lowest_revenue' },
+  { label: 'Highest Profit', value: 'highest_profit' },
+  { label: 'Lowest Profit', value: 'lowest_profit' },
+]
+
+function getBatchTimestamp(batch: BatchSummary, mode: 'newest' | 'oldest'): number {
+  if (!batch.items || batch.items.length === 0) {
+    return mode === 'newest' ? 0 : Number.MAX_SAFE_INTEGER
+  }
+  let result: number | null = null
+  for (const item of batch.items) {
+    if (!item.created_at) continue
+    const time = new Date(item.created_at).getTime()
+    if (Number.isNaN(time) || time <= 0) continue
+    if (result === null) {
+      result = time
+    } else if (mode === 'newest') {
+      if (time > result) result = time
+    } else {
+      if (time < result) result = time
+    }
+  }
+  if (result === null) {
+    return mode === 'newest' ? 0 : Number.MAX_SAFE_INTEGER
+  }
+  return result
+}
+
+function compareBatches(a: BatchSummary, b: BatchSummary, sortBy: BatchSortOption): number {
+  switch (sortBy) {
+    case 'newest': {
+      const timeA = getBatchTimestamp(a, 'newest')
+      const timeB = getBatchTimestamp(b, 'newest')
+      return timeB - timeA || a.batchName.localeCompare(b.batchName)
+    }
+    case 'oldest': {
+      const timeA = getBatchTimestamp(a, 'oldest')
+      const timeB = getBatchTimestamp(b, 'oldest')
+      return timeA - timeB || a.batchName.localeCompare(b.batchName)
+    }
+    case 'highest_revenue':
+      return b.totalRevenue - a.totalRevenue || a.batchName.localeCompare(b.batchName)
+    case 'lowest_revenue':
+      return a.totalRevenue - b.totalRevenue || a.batchName.localeCompare(b.batchName)
+    case 'highest_profit':
+      return b.profit - a.profit || a.batchName.localeCompare(b.batchName)
+    case 'lowest_profit':
+      return a.profit - b.profit || a.batchName.localeCompare(b.batchName)
+    default:
+      return a.batchName.localeCompare(b.batchName)
+  }
+}
+
 export default function Batches() {
-  const { canWrite } = useAuth()
+  const { user, canWrite } = useAuth()
   const { showToast } = useToast()
 
   const [batches, setBatches] = useState<BatchSummary[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<FilterValue>('All')
+  const [sortBy, setSortBy] = useState<BatchSortOption>('newest')
   const [selectedBatch, setSelectedBatch] = useState<BatchSummary | null>(null)
 
   // ── Edit batch state ──────────────────────────────────────────────────────
@@ -67,8 +136,17 @@ export default function Batches() {
   const [editModalTotal, setEditModalTotal] = useState('')
   const [editSaving, setEditSaving] = useState(false)
 
+  // Monotonic request id: only the most recently *started* load may commit its result,
+  // so a slow, older response can never overwrite fresher numbers ("ghost" revenue).
+  const loadSeqRef = useRef(0)
+  const hasLoadedRef = useRef(false)
+
   async function loadBatches() {
-    setLoading(true)
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    // First load shows the full loader; later refreshes keep current data on screen.
+    if (hasLoadedRef.current) setRefreshing(true)
+    else setLoading(true)
     setError(null)
 
     try {
@@ -101,6 +179,8 @@ export default function Batches() {
             .range(from, to)
         ),
       ])
+
+      if (!isLatest()) return
 
       if (inventoryItems.length > 0) {
         detectFlatInventorySaleFields(inventoryItems[0] as unknown as Record<string, unknown>)
@@ -237,17 +317,29 @@ export default function Batches() {
       setSelectedBatch((current) =>
         current ? sortedBatches.find((b) => b.batchName === current.batchName) ?? null : null
       )
+      hasLoadedRef.current = true
     } catch (loadError) {
+      if (!isLatest()) return
       setError(loadError instanceof Error ? loadError.message : 'Unable to load batches.')
     } finally {
-      setLoading(false)
+      if (isLatest()) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
+  // Fresh fetch on every mount (route entry) …
   useEffect(() => {
     void loadBatches()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // … and whenever inventory / sales / bookings change anywhere (this tab or another),
+  // or the window regains focus.
+  useDataInvalidation(['inventory_items', 'sales', 'bookings', 'batches'], () => {
+    void loadBatches()
+  })
 
   function openEditBatch(batch: BatchSummary) {
     setEditingBatch(batch)
@@ -292,6 +384,13 @@ export default function Batches() {
         showToast(updateError.message, 'error')
         return
       }
+
+      void logActivity({
+        action: 'Edit Batch',
+        description: `Updated batch "${oldName}" (new modal: ${formatIDR(newModalTotal)})`,
+        userId: user?.id,
+        details: { old_name: oldName, new_name: newName, modal_total: newModalTotal },
+      })
 
       showToast('Batch updated successfully.')
       setEditingBatch(null)
@@ -340,6 +439,13 @@ export default function Batches() {
         return;
       }
 
+      void logActivity({
+        action: 'Delete Batch',
+        description: `Deleted batch "${batch.batchName}"`,
+        userId: user?.id,
+        details: { batch_name: batch.batchName },
+      })
+
       showToast('Batch deleted successfully.');
       await loadBatches();
     } catch (err) {
@@ -362,9 +468,9 @@ export default function Batches() {
         const matchesSearch = rank !== null
         return matchesStatus && matchesSearch
       })
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || a.batch.batchName.localeCompare(b.batch.batchName))
+      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || compareBatches(a.batch, b.batch, sortBy))
       .map(({ batch }) => batch)
-  }, [batches, search, statusFilter])
+  }, [batches, search, statusFilter, sortBy])
 
   const batchStatusClasses: Record<BatchStatus, string> = {
     'No Sales': 'bg-gray-100 text-gray-700',
@@ -376,7 +482,15 @@ export default function Batches() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold text-gray-900">Batches</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold text-gray-900">Batches</h1>
+          {refreshing && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" />
+              Syncing...
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -390,11 +504,22 @@ export default function Batches() {
         <select
           value={statusFilter}
           onChange={(event) => setStatusFilter(event.target.value as FilterValue)}
-          className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           {FILTERS.map((filter) => (
             <option key={filter} value={filter}>
               {filter}
+            </option>
+          ))}
+        </select>
+        <select
+          value={sortBy}
+          onChange={(event) => setSortBy(event.target.value as BatchSortOption)}
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        >
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
             </option>
           ))}
         </select>

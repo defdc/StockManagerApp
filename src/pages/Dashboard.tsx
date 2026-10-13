@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { useDataInvalidation } from '../lib/dataSync'
 import { formatIDR, formatDate } from '../lib/format'
 import StatCard from '../components/StatCard'
 import type { FulfillmentStatus, InventoryItem, Sale } from '../types/database'
@@ -61,13 +62,19 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lowStockThreshold, setLowStockThreshold] = useState(2)
 
-  useEffect(() => {
-    async function load() {
-      setLoading(true)
-      setError(null)
+  const hasLoadedRef = useRef(false)
+  const loadSeqRef = useRef(0)
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    if (hasLoadedRef.current) setRefreshing(true)
+    else setLoading(true)
+    setError(null)
 
       try {
         const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, activeBookings] =
@@ -249,14 +256,26 @@ export default function Dashboard() {
           weekSummary,
           monthSummary,
         })
+        if (!isLatest()) return
+        hasLoadedRef.current = true
       } catch (loadError) {
+        if (!isLatest()) return
         setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.')
       } finally {
-        setLoading(false)
+        if (isLatest()) {
+          setLoading(false)
+          setRefreshing(false)
+        }
       }
-    }
-    load()
   }, [lowStockThreshold])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  useDataInvalidation(['inventory_items', 'sales', 'bookings', 'expenses'], () => {
+    void load()
+  })
 
   if (loading) return <p className="text-gray-500">Loading dashboard...</p>
   if (error) return <p className="text-sm text-red-600">{error}</p>
@@ -265,7 +284,15 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-gray-900">Dashboard</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold text-gray-900">Dashboard</h1>
+          {refreshing && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" />
+              Syncing...
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           <button
             type="button"
