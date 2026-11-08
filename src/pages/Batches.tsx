@@ -8,7 +8,6 @@ import Modal from '../components/Modal'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 import type { Booking, InventoryItem, Sale } from '../types/database'
 import {
-  detectFlatInventorySaleFields,
   isConvertedBookingStatus,
   resolveItemTransactionDetails,
   type InventoryItemWithRelations,
@@ -154,7 +153,7 @@ export default function Batches() {
         fetchAllRows<InventoryItemWithRelations>((from, to) =>
           supabase
             .from('inventory_items')
-            .select('*, sales(sale_price, buyer_name, created_at), bookings(deal_price, buyer_name, status)')
+            .select('id, item_name, batch_name, batch_modal_total, modal_price, status, created_at')
             .order('created_at', { ascending: true })
             .order('id', { ascending: true })
             .range(from, to) as unknown as PromiseLike<{
@@ -165,26 +164,28 @@ export default function Batches() {
         fetchAllRows<SaleRow>((from, to) =>
           supabase
             .from('sales')
-            .select('*, inventory_items(batch_name, item_name)')
+            .select('id, inventory_item_id, buyer_name, sale_price, sale_date, created_at, inventory_items(batch_name, item_name)')
             .order('sale_date', { ascending: false })
             .order('id', { ascending: false })
-            .range(from, to)
+            .range(from, to) as unknown as PromiseLike<{
+            data: SaleRow[] | null
+            error: { message: string } | null
+          }>
         ),
         fetchAllRows<BookingRow>((from, to) =>
           supabase
             .from('bookings')
-            .select('*, inventory_items(batch_name, item_name)')
+            .select('id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(batch_name, item_name)')
             .order('created_at', { ascending: false })
             .order('id', { ascending: false })
-            .range(from, to)
+            .range(from, to) as unknown as PromiseLike<{
+            data: BookingRow[] | null
+            error: { message: string } | null
+          }>
         ),
       ])
 
       if (!isLatest()) return
-
-      if (inventoryItems.length > 0) {
-        detectFlatInventorySaleFields(inventoryItems[0] as unknown as Record<string, unknown>)
-      }
 
       // Normalize grouped bookings where child deal_price is 0 but group_total_deal_price > 0
       const bookingsByGroup = new Map<string, BookingRow[]>()

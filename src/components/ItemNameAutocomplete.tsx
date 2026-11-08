@@ -81,7 +81,7 @@ export default function ItemNameAutocomplete({
         .select('item_name, category, notes')
         .not('item_name', 'is', null)
         .order('created_at', { ascending: false })
-        .limit(2000)
+        .limit(250)
 
       if (cancelled) return
 

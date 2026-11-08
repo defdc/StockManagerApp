@@ -5,7 +5,7 @@ interface PageResult<T> {
 
 type PageFetcher<T> = (from: number, to: number) => PromiseLike<PageResult<T>>
 
-export async function fetchAllRows<T>(fetchPage: PageFetcher<T>, pageSize = 1000): Promise<T[]> {
+export async function fetchAllRows<T>(fetchPage: PageFetcher<T>, pageSize = 250): Promise<T[]> {
   const rows: T[] = []
   let from = 0
 

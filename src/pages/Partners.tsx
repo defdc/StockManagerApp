@@ -54,7 +54,11 @@ export default function Partners() {
       const [partnersRes, itemsData, salesData, withdrawalsRes] = await Promise.all([
         supabase.from('partners').select('*').order('name'),
         fetchAllRows<InventoryItem>((from, to) =>
-          supabase.from('inventory_items').select('*').order('id').range(from, to)
+          supabase
+            .from('inventory_items')
+            .select('id, modal_price, batch_name, batch_modal_total')
+            .order('id')
+            .range(from, to) as unknown as PromiseLike<{ data: InventoryItem[] | null; error: { message: string } | null }>
         ),
         fetchAllRows<SaleProfit>((from, to) =>
           supabase.from('sales').select('net_profit').order('id').range(from, to)

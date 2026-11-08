@@ -141,9 +141,13 @@ export default function Sales() {
     loadSales()
   }, [])
 
-  useDataInvalidation(['sales', 'inventory_items', 'bookings'], () => {
-    void loadSales()
-  })
+  useDataInvalidation(
+    ['sales', 'inventory_items', 'bookings'],
+    () => {
+      void loadSales()
+    },
+    { remoteOnly: true }
+  )
 
   const filtered = useMemo(() => {
     const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)

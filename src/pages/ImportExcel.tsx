@@ -101,14 +101,15 @@ export default function ImportExcel() {
   }, [])
 
   async function fetchImportItems(imp: LegacyImport): Promise<InventoryItem[]> {
+    const columns = 'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, legacy_import_id, legacy_row_id, created_at'
     // 1. Try matching by legacy_import_id
     const { data: directItems } = await supabase
       .from('inventory_items')
-      .select('*')
+      .select(columns)
       .eq('legacy_import_id', imp.id)
       .order('created_at', { ascending: true })
 
-    if (directItems && directItems.length > 0) return directItems
+    if (directItems && directItems.length > 0) return directItems as unknown as InventoryItem[]
 
     // 2. Legacy Fallback: Match by timestamp range (within 10 mins of import created_at)
     const importTime = new Date(imp.created_at).getTime()
@@ -117,12 +118,12 @@ export default function ImportExcel() {
 
     const { data: timeItems } = await supabase
       .from('inventory_items')
-      .select('*')
+      .select(columns)
       .gte('created_at', startTime)
       .lte('created_at', endTime)
       .order('created_at', { ascending: true })
 
-    return timeItems ?? []
+    return (timeItems as unknown as InventoryItem[]) ?? []
   }
 
   async function openViewItemsModal(imp: LegacyImport) {

@@ -18,6 +18,7 @@ interface ItemComboboxProps {
 const SEARCH_FIELDS = ['item_name', 'category', 'batch_name', 'notes'] as const
 const SUGGESTION_LIMIT = 20
 const DEFAULT_ALLOWED_STATUSES = ['ready']
+const ITEM_COMBOBOX_COLUMNS = 'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, created_at'
 
 function itemLabel(item: InventoryItem): string {
   return item.item_name
@@ -33,7 +34,7 @@ async function findItems(search: string, statuses: string[], excludeIds: string[
     queryPairs.map(async ({ field, token }) => {
       let query = supabase
         .from('inventory_items')
-        .select('*')
+        .select(ITEM_COMBOBOX_COLUMNS)
         .in('status', statuses)
         .order('item_name')
         .limit(SUGGESTION_LIMIT)
@@ -45,7 +46,7 @@ async function findItems(search: string, statuses: string[], excludeIds: string[
 
       const { data, error } = await query
       if (error) throw new Error(error.message)
-      return data ?? []
+      return (data as unknown as InventoryItem[]) ?? []
     })
   )
 
@@ -105,13 +106,14 @@ export default function ItemCombobox({
     async function loadSelectedItem() {
       const { data, error: itemError } = await supabase
         .from('inventory_items')
-        .select('*')
+        .select(ITEM_COMBOBOX_COLUMNS)
         .eq('id', value)
         .single()
 
       if (!cancelled && !itemError && data) {
-        setSelectedItem(data)
-        setQuery(itemLabel(data))
+        const item = data as unknown as InventoryItem
+        setSelectedItem(item)
+        setQuery(itemLabel(item))
       }
     }
     loadSelectedItem()

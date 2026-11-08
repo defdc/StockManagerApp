@@ -79,6 +79,14 @@ function chunkIds(ids: string[], size = ID_CHUNK_SIZE): string[][] {
   return chunks
 }
 
+/**
+ * Explicit column selection for `inventory_items` to minimize Supabase egress payload.
+ * Excludes unused metadata / legacy columns (`legacy_import_id`, `legacy_row_id`, `created_by`, `updated_at`, etc.).
+ */
+const INVENTORY_SELECT_COLUMNS =
+  'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, created_at'
+const INVENTORY_PAGE_SIZE = 250
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Inventory() {
@@ -145,15 +153,20 @@ export default function Inventory() {
     else setLoading(true)
     setError(null)
     try {
-      const data = await fetchAllRows<InventoryItem>((from, to) =>
-        supabase
-          .from('inventory_items')
-          .select('*')
-          .order('created_at', { ascending: false })
-          // Unique tie-breaker: bulk-inserted rows share an identical created_at, so without
-          // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
-          .order('id', { ascending: false })
-          .range(from, to)
+      const data = await fetchAllRows<InventoryItem>(
+        (from, to) =>
+          supabase
+            .from('inventory_items')
+            .select(INVENTORY_SELECT_COLUMNS)
+            .order('created_at', { ascending: false })
+            // Unique tie-breaker: bulk-inserted rows share an identical created_at, so without
+            // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
+            .order('id', { ascending: false })
+            .range(from, to) as unknown as PromiseLike<{
+            data: InventoryItem[] | null
+            error: { message: string } | null
+          }>,
+        INVENTORY_PAGE_SIZE
       )
       if (!isLatest()) return
       // Defensive de-duplication by UUID so every row (and React key) is unique.
@@ -183,9 +196,13 @@ export default function Inventory() {
     loadItems()
   }, [])
 
-  useDataInvalidation(['inventory_items', 'sales', 'bookings'], () => {
-    void loadItems()
-  })
+  useDataInvalidation(
+    ['inventory_items', 'sales', 'bookings'],
+    () => {
+      void loadItems()
+    },
+    { remoteOnly: true }
+  )
 
   // Load drawer history when an item is selected
   useEffect(() => {
@@ -199,18 +216,18 @@ export default function Inventory() {
       const [bookingsRes, salesRes] = await Promise.all([
         supabase
           .from('bookings')
-          .select('*, inventory_items(item_name)')
+          .select('id, buyer_name, deal_price, group_total_deal_price, status, created_at, inventory_items(item_name)')
           .eq('inventory_item_id', itemId)
           .order('created_at', { ascending: false }),
         supabase
           .from('sales')
-          .select('*')
+          .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, created_at')
           .eq('inventory_item_id', itemId)
           .order('sale_date', { ascending: false }),
       ])
       if (cancelled) return
-      setDrawerBookings((bookingsRes.data as BookingRow[]) ?? [])
-      setDrawerSales((salesRes.data as Sale[]) ?? [])
+      setDrawerBookings((bookingsRes.data as unknown as BookingRow[]) ?? [])
+      setDrawerSales((salesRes.data as unknown as Sale[]) ?? [])
       setDrawerLoading(false)
     }
 

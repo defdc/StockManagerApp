@@ -104,7 +104,7 @@ export default function Dashboard() {
               .limit(5),
             supabase
               .from('inventory_items')
-              .select('*')
+              .select('id, item_name, quantity, status, created_at')
               .eq('status', 'ready')
               .lte('quantity', lowStockThreshold)
               .order('created_at', { ascending: true })
@@ -249,7 +249,7 @@ export default function Dashboard() {
           weekRecoveryProfit,
           monthRecoveryProfit,
           recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
-          lowStockItems: lowStockRes.data ?? [],
+          lowStockItems: (lowStockRes.data as unknown as InventoryItem[]) ?? [],
           topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
           batchSummary,
           fulfillmentSummary,

@@ -176,9 +176,13 @@ export default function Bookings() {
     loadBookings()
   }, [])
 
-  useDataInvalidation(['bookings', 'sales', 'inventory_items'], () => {
-    void loadBookings()
-  })
+  useDataInvalidation(
+    ['bookings', 'sales', 'inventory_items'],
+    () => {
+      void loadBookings()
+    },
+    { remoteOnly: true }
+  )
 
   // Priority order for status when no search query drives ranking
   const filtered = useMemo(() => {

@@ -25,7 +25,8 @@ type Listener = (tables: DataTable[], source: ChangeSource) => void
 
 const ALL_TABLES = '*'
 const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
-const FLUSH_DELAY_MS = 120
+const FLUSH_DELAY_MS = 250
+const INVALIDATION_DEBOUNCE_MS = 850
 const CHANNEL_NAME = 'stock-manager:data-sync'
 
 const listeners = new Set<Listener>()
@@ -172,11 +173,26 @@ export function useDataInvalidation(
 
   useEffect(() => {
     const watched = new Set(tablesKey.split('|').filter(Boolean))
-    return subscribeDataChanges((changed, source) => {
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
+    const unsubscribe = subscribeDataChanges((changed, source) => {
       if (remoteOnly && source === 'local') return
       const relevant = changed.some((table) => table === ALL_TABLES || watched.has(table))
-      if (relevant) callbackRef.current()
+      if (!relevant) return
+
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null
+        if (!hasPendingMutations()) {
+          callbackRef.current()
+        }
+      }, source === 'remote' ? 0 : INVALIDATION_DEBOUNCE_MS)
     })
+
+    return () => {
+      unsubscribe()
+      if (debounceTimer) clearTimeout(debounceTimer)
+    }
   }, [tablesKey, remoteOnly])
 
   useEffect(() => {

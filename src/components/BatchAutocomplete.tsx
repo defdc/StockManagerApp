@@ -88,7 +88,7 @@ export default function BatchAutocomplete({
         .select('batch_name, batch_modal_total, created_at')
         .not('batch_name', 'is', null)
         .order('created_at', { ascending: false })
-        .limit(2000)
+        .limit(250)
 
       if (cancelled) return
 

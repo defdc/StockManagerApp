@@ -69,7 +69,7 @@ export default function CategoryAutocomplete({
         .select('category')
         .not('category', 'is', null)
         .order('category')
-        .limit(2000)
+        .limit(250)
 
       if (cancelled) return
 

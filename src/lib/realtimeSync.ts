@@ -13,9 +13,11 @@ import { hasPendingMutations, notifyRemoteChange } from './dataSync'
 const REALTIME_TABLES = ['sales', 'bookings', 'inventory_items'] as const
 
 /** Quiet period after the *last* event before refetching (a 50-row bulk update => 1 refetch). */
-const REALTIME_DEBOUNCE_MS = 800
+export const REALTIME_DEBOUNCE_MS = 900
 /** If this tab still has writes in flight, wait for them instead of refetching mid-save. */
 const BUSY_RETRY_MS = 400
+
+let activeChannel: ReturnType<typeof supabase.channel> | null = null
 
 /**
  * Starts the Realtime subscription for as long as the calling component is mounted.
@@ -27,6 +29,12 @@ export function useRealtimeSync() {
     const pendingTables = new Set<string>()
     let timer: ReturnType<typeof setTimeout> | null = null
     let disposed = false
+
+    // Defensive cleanup if a previous channel instance lingered (e.g. fast HMR or double mount)
+    if (activeChannel) {
+      void supabase.removeChannel(activeChannel)
+      activeChannel = null
+    }
 
     function flush() {
       timer = null
@@ -41,22 +49,22 @@ export function useRealtimeSync() {
     }
 
     function schedule(table: string) {
+      if (disposed) return
       pendingTables.add(table)
-      if (timer) clearTimeout(timer) // trailing-edge debounce
+      if (timer) clearTimeout(timer) // trailing-edge debounce (800ms - 1000ms)
       timer = setTimeout(flush, REALTIME_DEBOUNCE_MS)
     }
 
     // Unique name per mount so StrictMode's double-mount never reuses a channel mid-teardown.
     const channel = supabase.channel(`data-sync-${crypto.randomUUID()}`)
+    activeChannel = channel
+
     for (const table of REALTIME_TABLES) {
       channel.on('postgres_changes', { event: '*', schema: 'public', table }, () => schedule(table))
     }
     channel.subscribe((status, err) => {
       if (disposed) return
-      if (status === 'SUBSCRIBED') {
-        // (Re)connected: we may have missed events while offline, so catch up once.
-        schedule('*')
-      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         // supabase-js retries automatically; the focus-refetch in pages is the safety net.
         console.warn('[realtime] channel issue:', status, err?.message ?? '')
       }
@@ -64,7 +72,14 @@ export function useRealtimeSync() {
 
     return () => {
       disposed = true
-      if (timer) clearTimeout(timer)
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      pendingTables.clear()
+      if (activeChannel === channel) {
+        activeChannel = null
+      }
       void supabase.removeChannel(channel)
     }
   }, [])
