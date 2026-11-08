@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useDataInvalidation } from '../lib/dataSync'
+import { fetchAllRows } from '../lib/supabasePagination'
 import { formatDate, formatIDR, splitAmount } from '../lib/format'
 import Modal from '../components/Modal'
 import FormattedPriceInput from '../components/FormattedPriceInput'
@@ -22,6 +23,14 @@ const BATCH_SALES_SELECT =
   'id, inventory_item_id, buyer_name, sale_price, sale_date, created_at, inventory_items(batch_name, item_name)'
 const BATCH_BOOKINGS_SELECT =
   'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(batch_name, item_name)'
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = []
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize))
+  }
+  return chunks
+}
 
 type BatchStatus = 'No Sales' | 'In Progress' | 'Break Even' | 'Profit'
 
@@ -168,80 +177,219 @@ export default function Batches() {
     try {
       const from = (page - 1) * PAGE_SIZE
       const to = from + PAGE_SIZE - 1
-
-      let itemsQuery = supabase
-        .from('inventory_items')
-        .select(BATCH_ITEMS_SELECT, { count: 'exact' })
-
       const trimmedSearch = debouncedSearch.trim()
-      if (trimmedSearch) {
-        const words = trimmedSearch.split(/\s+/).filter(Boolean)
-        for (const word of words) {
-          const safeWord = word.replace(/[,()]/g, '')
-          if (!safeWord) continue
-          itemsQuery = itemsQuery.or(
-            `batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`
-          )
+
+      let paginatedBatchNames: string[] = []
+      let totalBatchesCount = 0
+
+      // Step 1: Check if physical `batches` table exists
+      let hasPhysicalTable = false
+      try {
+        let physicalQuery = supabase
+          .from('batches')
+          .select('batch_name', { count: 'exact' })
+
+        if (trimmedSearch) {
+          physicalQuery = physicalQuery.ilike('batch_name', `%${trimmedSearch}%`)
         }
+
+        const physicalRes = await physicalQuery
+          .order('batch_name', { ascending: true })
+          .range(from, to)
+
+        if (!physicalRes.error && physicalRes.data && physicalRes.data.length > 0) {
+          hasPhysicalTable = true
+          totalBatchesCount = physicalRes.count ?? physicalRes.data.length
+          paginatedBatchNames = physicalRes.data
+            .map((b: { batch_name: string | null }) => b.batch_name?.trim())
+            .filter((n): n is string => Boolean(n))
+        }
+      } catch {
+        // Fall back to derived batches
       }
 
-      const itemsRes = await itemsQuery
-        .order('created_at', { ascending: sortBy === 'oldest' })
-        .order('id', { ascending: sortBy === 'oldest' })
-        .range(from, to)
+      // If no physical table, derive distinct batches from inventory_items
+      if (!hasPhysicalTable) {
+        let allBatchItems: {
+          batch_name: string | null
+          batch_modal_total: number | null
+          created_at: string | null
+        }[] = []
 
-      if (itemsRes.error) throw new Error(itemsRes.error.message)
+        if (trimmedSearch) {
+          const words = trimmedSearch.split(/\s+/).filter(Boolean)
+          allBatchItems = await fetchAllRows(async (f, t) => {
+            let q = supabase
+              .from('inventory_items')
+              .select('batch_name, batch_modal_total, created_at')
+            for (const word of words) {
+              const safeWord = word.replace(/[,()]/g, '')
+              if (!safeWord) continue
+              q = q.or(`batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`)
+            }
+            return q
+              .order('created_at', { ascending: false })
+              .range(f, t)
+          }, 1000)
+        } else {
+          allBatchItems = await fetchAllRows(async (f, t) => {
+            return supabase
+              .from('inventory_items')
+              .select('batch_name, batch_modal_total, created_at')
+              .order('created_at', { ascending: false })
+              .range(f, t)
+          }, 1000)
+        }
+
+        if (!isLatest()) return
+
+        const distinctBatchMap = new Map<
+          string,
+          {
+            batchName: string
+            newestTime: number
+            oldestTime: number
+          }
+        >()
+
+        for (const row of allBatchItems) {
+          const name = row.batch_name?.trim() || 'Unassigned'
+          const time = row.created_at ? new Date(row.created_at).getTime() : 0
+          const existing = distinctBatchMap.get(name)
+          if (!existing) {
+            distinctBatchMap.set(name, {
+              batchName: name,
+              newestTime: time,
+              oldestTime: time,
+            })
+          } else {
+            if (time > existing.newestTime) existing.newestTime = time
+            if (time < existing.oldestTime && time > 0) existing.oldestTime = time
+          }
+        }
+
+        const sortedBatchesList = Array.from(distinctBatchMap.values())
+
+        if (sortBy === 'oldest') {
+          sortedBatchesList.sort((a, b) => a.oldestTime - b.oldestTime || a.batchName.localeCompare(b.batchName))
+        } else if (sortBy === 'newest') {
+          sortedBatchesList.sort((a, b) => b.newestTime - a.newestTime || a.batchName.localeCompare(b.batchName))
+        } else {
+          sortedBatchesList.sort((a, b) => a.batchName.localeCompare(b.batchName))
+        }
+
+        totalBatchesCount = sortedBatchesList.length
+        const pagedBatches = sortedBatchesList.slice(from, to + 1)
+        paginatedBatchNames = pagedBatches.map((b) => b.batchName)
+      }
+
       if (!isLatest()) return
 
-      let inventoryItems = (itemsRes.data as unknown as InventoryItemWithRelations[]) ?? []
+      if (paginatedBatchNames.length === 0) {
+        setBatches([])
+        setTotalCount(0)
+        setSelectedBatch(null)
+        hasLoadedRef.current = true
+        return
+      }
 
-      // Fetch all sibling items belonging to the batches present on this page so batch totals/modal/counts are accurate
-      const pageBatchNames = Array.from(
-        new Set(inventoryItems.map((i) => i.batch_name?.trim()).filter((n): n is string => Boolean(n)))
-      )
-      if (pageBatchNames.length > 0) {
-        const { data: batchSiblings } = await supabase
-          .from('inventory_items')
-          .select(BATCH_ITEMS_SELECT)
-          .in('batch_name', pageBatchNames)
-          .order('created_at', { ascending: true })
-          .order('id', { ascending: true })
-        if (!isLatest()) return
-        if (batchSiblings && batchSiblings.length > 0) {
-          const mergedItems = new Map<string, InventoryItemWithRelations>()
-          for (const item of inventoryItems) mergedItems.set(item.id, item)
-          for (const sib of batchSiblings as unknown as InventoryItemWithRelations[]) {
-            if (!mergedItems.has(sib.id)) mergedItems.set(sib.id, sib)
-          }
-          inventoryItems = [...mergedItems.values()]
+      // Step 2: Fetch ALL inventory_items (and their nested sales/bookings) that belong to ONLY those batches
+      const namedBatches = paginatedBatchNames.filter((n) => n !== 'Unassigned')
+      const hasUnassigned = paginatedBatchNames.includes('Unassigned')
+
+      const inventoryItems: InventoryItemWithRelations[] = []
+
+      if (namedBatches.length > 0) {
+        const batchChunks = chunkArray(namedBatches, 50)
+        const chunkResults = await Promise.all(
+          batchChunks.map((chunk) =>
+            fetchAllRows<InventoryItemWithRelations>(
+              (f, t) =>
+                supabase
+                  .from('inventory_items')
+                  .select(BATCH_ITEMS_SELECT)
+                  .in('batch_name', chunk)
+                  .order('created_at', { ascending: true })
+                  .range(f, t) as unknown as PromiseLike<{
+                  data: InventoryItemWithRelations[] | null
+                  error: { message: string } | null
+                }>,
+              1000
+            )
+          )
+        )
+        for (const items of chunkResults) {
+          inventoryItems.push(...items)
         }
       }
 
-      const itemIds = inventoryItems.map((i) => i.id)
-      let sales: SaleRow[] = []
-      let bookings: BookingRow[] = []
-
-      if (itemIds.length > 0) {
-        const [salesRes, bookingsRes] = await Promise.all([
-          supabase
-            .from('sales')
-            .select(BATCH_SALES_SELECT)
-            .in('inventory_item_id', itemIds)
-            .order('sale_date', { ascending: false })
-            .range(0, PAGE_SIZE - 1),
-          supabase
-            .from('bookings')
-            .select(BATCH_BOOKINGS_SELECT)
-            .in('inventory_item_id', itemIds)
-            .order('created_at', { ascending: false })
-            .range(0, PAGE_SIZE - 1),
-        ])
-        if (!isLatest()) return
-        sales = (salesRes.data as unknown as SaleRow[]) ?? []
-        bookings = (bookingsRes.data as unknown as BookingRow[]) ?? []
+      if (hasUnassigned) {
+        const unassignedItems = await fetchAllRows<InventoryItemWithRelations>(
+          (f, t) =>
+            supabase
+              .from('inventory_items')
+              .select(BATCH_ITEMS_SELECT)
+              .or('batch_name.is.null,batch_name.eq.,batch_name.eq.Unassigned')
+              .order('created_at', { ascending: true })
+              .range(f, t) as unknown as PromiseLike<{
+              data: InventoryItemWithRelations[] | null
+              error: { message: string } | null
+            }>,
+          1000
+        )
+        inventoryItems.push(...unassignedItems)
       }
 
-      // Normalize grouped bookings where child deal_price is 0 but group_total_deal_price > 0
+      if (!isLatest()) return
+
+      const itemIds = inventoryItems.map((i) => i.id)
+      const sales: SaleRow[] = []
+      const bookings: BookingRow[] = []
+
+      if (itemIds.length > 0) {
+        const idChunks = chunkArray(itemIds, 150)
+        const [salesChunks, bookingsChunks] = await Promise.all([
+          Promise.all(
+            idChunks.map((chunk) =>
+              fetchAllRows<SaleRow>(
+                (f, t) =>
+                  supabase
+                    .from('sales')
+                    .select(BATCH_SALES_SELECT)
+                    .in('inventory_item_id', chunk)
+                    .order('sale_date', { ascending: false })
+                    .range(f, t) as unknown as PromiseLike<{
+                    data: SaleRow[] | null
+                    error: { message: string } | null
+                  }>,
+                1000
+              )
+            )
+          ),
+          Promise.all(
+            idChunks.map((chunk) =>
+              fetchAllRows<BookingRow>(
+                (f, t) =>
+                  supabase
+                    .from('bookings')
+                    .select(BATCH_BOOKINGS_SELECT)
+                    .in('inventory_item_id', chunk)
+                    .order('created_at', { ascending: false })
+                    .range(f, t) as unknown as PromiseLike<{
+                    data: BookingRow[] | null
+                    error: { message: string } | null
+                  }>,
+                1000
+              )
+            )
+          ),
+        ])
+        if (!isLatest()) return
+        for (const chunk of salesChunks) sales.push(...chunk)
+        for (const chunk of bookingsChunks) bookings.push(...chunk)
+      }
+
+      // Step 3: Group and calculate revenue, modal, and profit using the complete set of items
       const bookingsByGroup = new Map<string, BookingRow[]>()
       for (const b of bookings) {
         if (b.booking_group_id) {
@@ -311,6 +459,10 @@ export default function Batches() {
         return summary
       }
 
+      for (const batchName of paginatedBatchNames) {
+        ensureBatch(batchName)
+      }
+
       for (const item of inventoryItems) {
         const batchName = item.batch_name?.trim() || 'Unassigned'
         const batch = ensureBatch(batchName)
@@ -352,7 +504,8 @@ export default function Batches() {
         if ((linkedItem?.status ?? '').toLowerCase() === 'sold') continue
         const batchName =
           booking.inventory_items?.batch_name?.trim() || linkedItem?.batch_name?.trim() || 'Unassigned'
-        const batch = ensureBatch(batchName)
+        const batch = batchMap.get(batchName)
+        if (!batch) continue
         batch.bookedRevenue += booking.deal_price
       }
 
@@ -369,7 +522,7 @@ export default function Batches() {
 
       const sortedBatches = Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName))
       setBatches(sortedBatches)
-      setTotalCount(itemsRes.count ?? inventoryItems.length)
+      setTotalCount(totalBatchesCount)
       setSelectedBatch((current) =>
         current ? sortedBatches.find((b) => b.batchName === current.batchName) ?? null : null
       )
@@ -488,14 +641,14 @@ export default function Batches() {
         return;
       }
 
-      // Delete the batch itself
-      const { error: batchError } = await supabase
-        .from('batches')
-        .delete()
-        .eq('batch_name', batch.batchName);
-      if (batchError) {
-        showToast(batchError.message, 'error');
-        return;
+      // Delete the batch itself if physical batches table exists
+      try {
+        await supabase
+          .from('batches')
+          .delete()
+          .eq('batch_name', batch.batchName);
+      } catch {
+        // Physical batches table may not exist
       }
 
       void logActivity({
@@ -641,8 +794,8 @@ export default function Batches() {
           </div>
 
           {/* Desktop Table View (≥ 768px) */}
-          <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-200 bg-white">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <div className="hidden md:block w-full overflow-x-auto rounded-lg border border-gray-200 bg-white">
+            <table className="w-full min-w-full divide-y divide-gray-200 text-left text-sm">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch Name</th>
@@ -658,7 +811,7 @@ export default function Batches() {
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Booked</th>
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Sold</th>
                   <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
-                  <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                  <th className="sticky right-0 z-20 whitespace-nowrap bg-gray-50/95 px-3 py-2 text-left font-medium text-gray-600 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] dark:bg-zinc-800/95">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -672,12 +825,13 @@ export default function Batches() {
                   filteredBatches.map((batch) => {
                     const barWidth = `${Math.min(100, Math.round(batch.recoveryPercent))}%`
                     return (
-                      <tr key={batch.batchName} className="hover:bg-gray-50">
-                        <td className="whitespace-nowrap px-3 py-3">
+                      <tr key={batch.batchName} className="group hover:bg-gray-50">
+                        <td className="max-w-[200px] truncate px-3 py-3 sm:max-w-[280px] lg:max-w-[360px]">
                           <button
                             type="button"
                             onClick={() => setSelectedBatch(batch)}
-                            className="font-medium text-blue-700 hover:underline"
+                            className="block truncate font-medium text-blue-700 hover:underline"
+                            title={batch.batchName}
                           >
                             {batch.batchName}
                           </button>
@@ -707,9 +861,9 @@ export default function Batches() {
                             {batch.status}
                           </span>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-3">
+                        <td className="sticky right-0 z-10 whitespace-nowrap bg-white/95 px-3 py-3 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-50/95 dark:bg-zinc-900/95 dark:group-hover:bg-zinc-800/95">
                           {canWrite && (
-                            <>
+                            <div className="flex items-center gap-2 whitespace-nowrap">
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -726,11 +880,11 @@ export default function Batches() {
                                   e.stopPropagation()
                                   handleDeleteBatch(batch)
                                 }}
-                                className="ml-2 font-medium text-red-600 hover:text-red-800 hover:underline"
+                                className="font-medium text-red-600 hover:text-red-800 hover:underline"
                               >
                                 Delete
                               </button>
-                            </>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -744,10 +898,9 @@ export default function Batches() {
           {/* Server-Side Pagination Controls */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
             <div className="text-gray-600">
-              Showing <span className="font-medium text-gray-900">{filteredBatches.length}</span> batches (Items{' '}
-              <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+              Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
               <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
-              <span className="font-medium text-gray-900">{totalCount}</span> · Page{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> batches (Page{' '}
               <span className="font-medium text-gray-900">{page}</span> of{' '}
               <span className="font-medium text-gray-900">{totalPages}</span>)
             </div>
@@ -829,8 +982,8 @@ export default function Batches() {
 
             <section>
               <h2 className="mb-2 font-medium text-gray-900">Items in batch</h2>
-              <div className="overflow-x-auto rounded-lg border border-gray-200">
-                <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <div className="w-full overflow-x-auto rounded-lg border border-gray-200">
+                <table className="w-full min-w-full divide-y divide-gray-200 text-left text-sm">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Item Name</th>
@@ -844,7 +997,9 @@ export default function Batches() {
                   <tbody className="divide-y divide-gray-100 bg-white">
                     {selectedBatch.items.map((item) => (
                       <tr key={item.id} className="hover:bg-gray-50">
-                        <td className="whitespace-nowrap px-3 py-2">{item.item_name}</td>
+                        <td className="max-w-[200px] truncate px-3 py-2 sm:max-w-[300px]" title={item.item_name}>
+                          <span className="block truncate">{item.item_name}</span>
+                        </td>
                         <td className="whitespace-nowrap px-3 py-2">{item.status}</td>
                         <td className="whitespace-nowrap px-3 py-2">
                           {selectedBatch.totalItems > 0
@@ -852,7 +1007,9 @@ export default function Batches() {
                             : '-'}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2">{formatIDR(item.salePrice ?? 0)}</td>
-                        <td className="whitespace-nowrap px-3 py-2">{item.buyerName ?? '-'}</td>
+                        <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={item.buyerName ?? '-'}>
+                          <span className="block truncate">{item.buyerName ?? '-'}</span>
+                        </td>
                         <td className="whitespace-nowrap px-3 py-2">{formatDate(item.created_at)}</td>
                       </tr>
                     ))}

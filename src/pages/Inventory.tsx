@@ -965,8 +965,8 @@ export default function Inventory() {
                     </div>
 
                     {/* Desktop Table View (≥ 768px) */}
-                    <div className="hidden md:block overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-100 text-sm">
+                    <div className="hidden md:block w-full overflow-x-auto">
+                      <table className="w-full min-w-full divide-y divide-gray-100 text-left text-sm">
                         <thead className="bg-gray-50">
                           <tr>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
@@ -974,12 +974,12 @@ export default function Inventory() {
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Batch</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Status</th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Created</th>
-                            {canWrite && <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>}
+                            {canWrite && <th className="sticky right-0 z-20 whitespace-nowrap bg-gray-50/95 px-3 py-2 text-left font-medium text-gray-600 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] dark:bg-zinc-800/95">Actions</th>}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {visibleItems.map((item) => (
-                            <tr key={item.id} className="hover:bg-gray-50">
+                            <tr key={item.id} className="group hover:bg-gray-50">
                               <td className="whitespace-nowrap px-3 py-2">
                                 <input
                                   type="checkbox"
@@ -989,16 +989,17 @@ export default function Inventory() {
                                   className="h-4 w-4 rounded border-gray-300"
                                 />
                               </td>
-                              <td className="px-3 py-2">
+                              <td className="max-w-[200px] truncate px-3 py-2 sm:max-w-[300px] lg:max-w-[400px]">
                                 <button
                                   onClick={() => setDrawerItem(item)}
-                                  className="font-medium text-blue-700 hover:underline"
+                                  className="block truncate font-medium text-blue-700 hover:underline"
+                                  title={item.item_name}
                                 >
                                   {item.item_name}
                                 </button>
                               </td>
-                              <td className="whitespace-nowrap px-3 py-2 text-gray-600">
-                                {item.batch_name ?? '-'}
+                              <td className="max-w-[180px] truncate px-3 py-2 text-gray-600 sm:max-w-[250px] lg:max-w-[350px]" title={item.batch_name ?? '-'}>
+                                <span className="block truncate">{item.batch_name ?? '-'}</span>
                               </td>
                               <td className="whitespace-nowrap px-3 py-2">
                                 <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASSES[item.status]}`}>
@@ -1009,8 +1010,8 @@ export default function Inventory() {
                                 {formatDate(item.created_at)}
                               </td>
                               {canWrite && (
-                                <td className="whitespace-nowrap px-3 py-2">
-                                  <div className="flex gap-2">
+                                <td className="sticky right-0 z-10 whitespace-nowrap bg-white/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-50/95 dark:bg-zinc-900/95 dark:group-hover:bg-zinc-800/95">
+                                  <div className="flex items-center gap-2 whitespace-nowrap">
                                     <button onClick={() => openEditModal(item)} className="text-blue-600 hover:underline">
                                       Edit
                                     </button>

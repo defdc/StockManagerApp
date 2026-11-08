@@ -942,7 +942,7 @@ export default function Sales() {
   function renderSaleActions(sale: SaleRow) {
     if (!canWrite) return null
     return (
-      <div className="flex gap-2">
+      <div className="flex items-center gap-2 whitespace-nowrap">
         <button onClick={() => openEditModal(sale)} className="text-blue-600 hover:underline">
           Edit
         </button>
@@ -1030,118 +1030,136 @@ export default function Sales() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="text"
-          placeholder="Search buyer, item, batch, or notes..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value)
-            setPage(1)
-          }}
-          className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        />
-        <select
-          value={fulfillmentFilter}
-          onChange={(e) => {
-            setFulfillmentFilter(e.target.value as 'all' | FulfillmentStatus)
-            setPage(1)
-          }}
-          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        >
-          <option value="all">All</option>
-          {FULFILLMENT_STATUSES.map((status) => (
-            <option key={status} value={status}>
-              {FULFILLMENT_LABELS[status]}
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={sortBy}
-          onChange={(e) => {
-            setSortBy(e.target.value as SaleSortOption)
-            setPage(1)
-          }}
-          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        >
-          <option value="date_desc">Newest First</option>
-          <option value="batch_az">Batch Name (A-Z)</option>
-          <option value="buyer_az">Buyer Name (A-Z)</option>
-          <option value="item_az">Item Name (A-Z)</option>
-        </select>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5">
-            <label htmlFor="sales-start-date" className="text-xs font-medium text-gray-500 whitespace-nowrap">
-              Start Date
-            </label>
+      {/* Two-Tier Filter & Action Bar */}
+      <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        {/* Top Row: Primary Search, Date Range & Sorting */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="w-full min-w-[200px] sm:w-auto sm:flex-1 sm:max-w-xs md:max-w-sm">
             <input
-              id="sales-start-date"
-              type="date"
-              value={startDate}
+              type="text"
+              placeholder="Search buyer, item, batch, or notes..."
+              value={search}
               onChange={(e) => {
-                setStartDate(e.target.value)
+                setSearch(e.target.value)
                 setPage(1)
               }}
-              className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
+              className="h-10 w-full rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
             />
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <label htmlFor="sales-end-date" className="text-xs font-medium text-gray-500 whitespace-nowrap">
-              End Date
-            </label>
-            <input
-              id="sales-end-date"
-              type="date"
-              value={endDate}
-              onChange={(e) => {
-                setEndDate(e.target.value)
-                setPage(1)
-              }}
-              className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="sales-start-date" className="text-xs font-medium whitespace-nowrap text-gray-500">
+                Start Date
+              </label>
+              <input
+                id="sales-start-date"
+                type="date"
+                value={startDate}
+                onChange={(e) => {
+                  setStartDate(e.target.value)
+                  setPage(1)
+                }}
+                className="h-10 rounded-md border border-gray-300 bg-white px-2.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="sales-end-date" className="text-xs font-medium whitespace-nowrap text-gray-500">
+                End Date
+              </label>
+              <input
+                id="sales-end-date"
+                type="date"
+                value={endDate}
+                onChange={(e) => {
+                  setEndDate(e.target.value)
+                  setPage(1)
+                }}
+                className="h-10 rounded-md border border-gray-300 bg-white px-2.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
+              />
+            </div>
+
+            {(startDate || endDate) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStartDate('')
+                  setEndDate('')
+                  setPage(1)
+                }}
+                className="inline-flex h-10 items-center rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none"
+              >
+                Clear dates
+              </button>
+            )}
           </div>
 
-          {(startDate || endDate) && (
-            <button
-              type="button"
-              onClick={() => {
-                setStartDate('')
-                setEndDate('')
+          <div className="sm:ml-auto">
+            <select
+              value={sortBy}
+              onChange={(e) => {
+                setSortBy(e.target.value as SaleSortOption)
                 setPage(1)
               }}
-              className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none"
+              aria-label="Sort sales"
+              className="h-10 rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
             >
-              Clear dates
-            </button>
-          )}
+              <option value="date_desc">Newest First</option>
+              <option value="batch_az">Batch Name (A-Z)</option>
+              <option value="buyer_az">Buyer Name (A-Z)</option>
+              <option value="item_az">Item Name (A-Z)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Bottom Row: Secondary Toggles & Grouping */}
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={fulfillmentFilter}
+            onChange={(e) => {
+              setFulfillmentFilter(e.target.value as 'all' | FulfillmentStatus)
+              setPage(1)
+            }}
+            aria-label="Filter by status"
+            className="h-10 rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
+          >
+            <option value="all">All Statuses</option>
+            {FULFILLMENT_STATUSES.map((status) => (
+              <option key={status} value={status}>
+                {FULFILLMENT_LABELS[status]}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
       {/* Bulk action toolbar — appears when rows are selected */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
-        <label className="flex items-center gap-2 text-gray-700">
-          <input
-            type="checkbox"
-            checked={allVisibleSaleIds.length > 0 && allVisibleSaleIds.every((id) => selectedSaleIds.includes(id))}
-            onChange={toggleSelectAll}
-            disabled={allVisibleSaleIds.length === 0}
-            className="h-4 w-4 rounded border-gray-300"
-          />
-          Select all visible
-        </label>
-        {selectedSaleIds.length > 0 && (
-          <>
-            <span className="font-medium text-gray-900">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm shadow-sm">
+        <div className="flex items-center gap-3">
+          <label className="flex cursor-pointer select-none items-center gap-2 font-medium text-gray-700">
+            <input
+              type="checkbox"
+              checked={allVisibleSaleIds.length > 0 && allVisibleSaleIds.every((id) => selectedSaleIds.includes(id))}
+              onChange={toggleSelectAll}
+              disabled={allVisibleSaleIds.length === 0}
+              className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
+            />
+            Select all visible
+          </label>
+          {selectedSaleIds.length > 0 && (
+            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold whitespace-nowrap text-gray-900 sm:text-sm">
               {selectedSaleIds.length} selected · Total {formatIDR(selectedSalesTotal)}
             </span>
+          )}
+        </div>
+        {selectedSaleIds.length > 0 && (
+          <div className="flex max-w-full items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
             {canWrite && (
               <>
                 <button
                   onClick={() => { setBulkShippingStatus('parking'); setBulkActionError(null); setShowBulkShippingModal(true) }}
-                  className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                  className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-blue-700 sm:text-sm"
                 >
                   Change Shipping Status
                 </button>
@@ -1152,19 +1170,19 @@ export default function Sales() {
                     setBulkActionError(null)
                     setShowBulkDateModal(true)
                   }}
-                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+                  className="shrink-0 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-indigo-700 sm:text-sm"
                 >
                   Change Sale Date
                 </button>
                 <button
                   onClick={() => { setBulkActionError(null); setShowBulkUndoConfirm(true) }}
-                  className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
+                  className="shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-amber-700 sm:text-sm"
                 >
                   Undo Sale
                 </button>
                 <button
                   onClick={() => { setBulkActionError(null); setShowBulkDeleteConfirm(true) }}
-                  className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+                  className="shrink-0 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-red-700 sm:text-sm"
                 >
                   Delete
                 </button>
@@ -1172,11 +1190,11 @@ export default function Sales() {
             )}
             <button
               onClick={() => setSelectedSaleIds([])}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium whitespace-nowrap text-gray-700 hover:bg-gray-50 sm:text-sm"
             >
               Clear
             </button>
-          </>
+          </div>
         )}
       </div>
 
@@ -1401,8 +1419,8 @@ export default function Sales() {
                       </div>
 
                       {/* Desktop Table View (≥ 768px) */}
-                      <div className="hidden md:block overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-100 text-sm">
+                      <div className="hidden md:block w-full overflow-x-auto">
+                        <table className="w-full min-w-full divide-y divide-gray-100 text-left text-sm">
                           <thead className="bg-gray-50">
                             <tr>
                               <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
@@ -1415,16 +1433,18 @@ export default function Sales() {
                               <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Modal</th>
                               <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Gross Profit</th>
                               <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Net Profit</th>
-                              <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                              <th className="sticky right-0 z-20 whitespace-nowrap bg-gray-50/95 px-3 py-2 text-left font-medium text-gray-600 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] dark:bg-zinc-800/95">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-100">
                             {dayGroup.transactionGroups.map((group) => {
                               const firstSale = group.sales[0]
                               const isExpanded = expandedGroupKeys.includes(group.key)
+                              const batchSummary = getBatchSummary(group.sales)
+                              const friendlyGroupLabel = bookingGroupFriendlyLabel(group.bookingGroupId, sales, knownGroupIds)
                               return (
                                 <Fragment key={group.key}>
-                                  <tr className="hover:bg-gray-50">
+                                  <tr className="group hover:bg-gray-50">
                                     <td className="whitespace-nowrap px-3 py-2">
                                       <input
                                         type="checkbox"
@@ -1441,7 +1461,7 @@ export default function Sales() {
                                       />
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatDate(group.saleDate)}</td>
-                                    <td className="whitespace-nowrap px-3 py-2">
+                                    <td className="max-w-[200px] truncate px-3 py-2 sm:max-w-[300px] lg:max-w-[400px]">
                                       {group.isGrouped ? (
                                         <div className="space-y-1">
                                           <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
@@ -1449,23 +1469,30 @@ export default function Sales() {
                                           </span>
                                           <button
                                             onClick={() => toggleGroupExpanded(group.key)}
-                                            className="block font-medium text-blue-700 hover:underline"
+                                            className="block truncate font-medium text-blue-700 hover:underline"
+                                            title={friendlyGroupLabel ?? undefined}
                                           >
-                                            {bookingGroupFriendlyLabel(group.bookingGroupId, sales, knownGroupIds)} ·{' '}
+                                            {friendlyGroupLabel} ·{' '}
                                             {isExpanded ? 'Hide' : 'Show'} {group.itemCount} items
                                           </button>
                                         </div>
                                       ) : (
-                                        firstSale.inventory_items?.item_name ?? '-'
+                                        <span className="block truncate" title={firstSale.inventory_items?.item_name ?? '-'}>
+                                          {firstSale.inventory_items?.item_name ?? '-'}
+                                        </span>
                                       )}
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2">{getBatchSummary(group.sales)}</td>
+                                    <td className="max-w-[180px] truncate px-3 py-2 text-gray-600 sm:max-w-[250px] lg:max-w-[350px]" title={batchSummary}>
+                                      <span className="block truncate">{batchSummary}</span>
+                                    </td>
                                     <td className="whitespace-nowrap px-3 py-2">
                                       <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[group.sales[0].fulfillment_status ?? 'parking']}`}>
                                         {FULFILLMENT_LABELS[group.sales[0].fulfillment_status ?? 'parking']}
                                       </span>
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2">{group.buyerName}</td>
+                                    <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={group.buyerName}>
+                                      <span className="block truncate">{group.buyerName}</span>
+                                    </td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalRevenue)}</td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.totalModal)}</td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(group.grossProfit)}</td>
@@ -1474,7 +1501,7 @@ export default function Sales() {
                                         {formatIDR(group.netProfit)}
                                       </span>
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2">
+                                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-50/95 dark:bg-zinc-900/95 dark:group-hover:bg-zinc-800/95">
                                       {group.isGrouped ? (
                                         <button
                                           onClick={() => openGroupEditModal(group)}
@@ -1490,7 +1517,7 @@ export default function Sales() {
                                   {group.isGrouped &&
                                     isExpanded &&
                                     group.sales.map((sale) => (
-                                      <tr key={sale.id} className="bg-gray-50 text-xs">
+                                      <tr key={sale.id} className="group bg-gray-50 text-xs hover:bg-gray-100/70">
                                         <td className="whitespace-nowrap px-3 py-2">
                                           <input
                                             type="checkbox"
@@ -1500,16 +1527,20 @@ export default function Sales() {
                                           />
                                         </td>
                                         <td className="whitespace-nowrap px-3 py-2"></td>
-                                        <td className="whitespace-nowrap px-3 py-2 pl-8">
-                                          {sale.inventory_items?.item_name ?? '-'}
+                                        <td className="max-w-[200px] truncate px-3 py-2 pl-8 sm:max-w-[300px] lg:max-w-[400px]" title={sale.inventory_items?.item_name ?? '-'}>
+                                          <span className="block truncate">{sale.inventory_items?.item_name ?? '-'}</span>
                                         </td>
-                                        <td className="whitespace-nowrap px-3 py-2">{getBatchLabel(sale)}</td>
+                                        <td className="max-w-[180px] truncate px-3 py-2 text-gray-500 sm:max-w-[250px] lg:max-w-[350px]" title={getBatchLabel(sale)}>
+                                          <span className="block truncate">{getBatchLabel(sale)}</span>
+                                        </td>
                                         <td className="whitespace-nowrap px-3 py-2">
                                           <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[sale.fulfillment_status ?? 'parking']}`}>
                                             {FULFILLMENT_LABELS[sale.fulfillment_status ?? 'parking']}
                                           </span>
                                         </td>
-                                        <td className="whitespace-nowrap px-3 py-2">{sale.buyer_name}</td>
+                                        <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={sale.buyer_name}>
+                                          <span className="block truncate">{sale.buyer_name}</span>
+                                        </td>
                                         <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
                                         <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.modal_price)}</td>
                                         <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.gross_profit)}</td>
@@ -1518,7 +1549,9 @@ export default function Sales() {
                                             {formatIDR(sale.net_profit)}
                                           </span>
                                         </td>
-                                        <td className="whitespace-nowrap px-3 py-2">{renderSaleActions(sale)}</td>
+                                        <td className="sticky right-0 z-10 whitespace-nowrap bg-gray-50/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-100/95 dark:bg-zinc-800/95 dark:group-hover:bg-zinc-700/95">
+                                          {renderSaleActions(sale)}
+                                        </td>
                                       </tr>
                                     ))}
                                 </Fragment>

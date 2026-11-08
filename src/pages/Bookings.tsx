@@ -1259,7 +1259,7 @@ export default function Bookings() {
   function renderBookingActions(b: BookingRow) {
     if (!canWrite) return null
     return (
-      <div className="flex flex-wrap gap-2">
+      <div className="flex items-center gap-2 whitespace-nowrap">
         {b.status === 'active' && (
           <button onClick={() => openSingleConvertModal(b)} className="text-green-700 hover:underline">
             Convert to sale
@@ -1394,129 +1394,148 @@ export default function Bookings() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <input
-          type="text"
-          placeholder="Search buyer, item, batch, or notes..."
-          value={search}
-          onChange={(e) => {
-            setSearch(e.target.value)
-            setPage(1)
-          }}
-          className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        />
-        <select
-          value={statusFilter}
-          onChange={(e) => {
-            const val = e.target.value
-            setStatusFilter(val)
-            if (val === 'converted_to_sale') {
-              setShowConverted(true)
-            }
-            setPage(1)
-          }}
-          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        >
-          <option value="">All Statuses</option>
-          <option value="active">Active</option>
-          <option value="converted_to_sale">Converted to Sale</option>
-          <option value="cancelled">Cancelled</option>
-        </select>
+      {/* Two-Tier Filter & Action Bar */}
+      <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+        {/* Top Row: Primary Search & Sorting */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="w-full min-w-[200px] sm:w-auto sm:flex-1">
+            <input
+              type="text"
+              placeholder="Search buyer, item, batch, or notes..."
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value)
+                setPage(1)
+              }}
+              className="h-10 w-full rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
+            />
+          </div>
 
-        <select
-          value={sortBy}
-          onChange={(e) => {
-            setSortBy(e.target.value as BookingSortOption)
-            setPage(1)
-          }}
-          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
-        >
-          <option value="date_desc">Newest First</option>
-          <option value="batch_az">Batch Name (A-Z)</option>
-          <option value="buyer_az">Buyer Name (A-Z)</option>
-          <option value="item_az">Item Name (A-Z)</option>
-        </select>
-
-        <div className="inline-flex rounded-md shadow-sm">
-          <button
-            type="button"
-            onClick={() => {
-              setGroupBy('status')
-              setPage(1)
-            }}
-            className={`rounded-l-md border px-3 py-2 text-xs font-medium ${
-              groupBy === 'status'
-                ? 'border-pink-600 bg-pink-600 text-white'
-                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            Group by Status
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setGroupBy('date')
-              setPage(1)
-            }}
-            className={`rounded-r-md border border-l-0 px-3 py-2 text-xs font-medium ${
-              groupBy === 'date'
-                ? 'border-pink-600 bg-pink-600 text-white'
-                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
-            }`}
-          >
-            Group by Date
-          </button>
+          <div className="sm:ml-auto">
+            <select
+              value={sortBy}
+              onChange={(e) => {
+                setSortBy(e.target.value as BookingSortOption)
+                setPage(1)
+              }}
+              aria-label="Sort bookings"
+              className="h-10 rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
+            >
+              <option value="date_desc">Newest First</option>
+              <option value="batch_az">Batch Name (A-Z)</option>
+              <option value="buyer_az">Buyer Name (A-Z)</option>
+              <option value="item_az">Item Name (A-Z)</option>
+            </select>
+          </div>
         </div>
 
-        <label className="inline-flex cursor-pointer select-none items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
-          <input
-            type="checkbox"
-            checked={showConverted || statusFilter === 'converted_to_sale'}
+        {/* Bottom Row: Secondary Toggles & Grouping */}
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={statusFilter}
             onChange={(e) => {
-              const checked = e.target.checked
-              setShowConverted(checked)
-              if (!checked && statusFilter === 'converted_to_sale') {
-                setStatusFilter('')
+              const val = e.target.value
+              setStatusFilter(val)
+              if (val === 'converted_to_sale') {
+                setShowConverted(true)
               }
               setPage(1)
             }}
-            className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
-          />
-          Show Converted to Sale
-        </label>
+            aria-label="Filter by status"
+            className="h-10 rounded-md border border-gray-300 bg-white px-3 text-sm focus:border-gray-500 focus:outline-none"
+          >
+            <option value="">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="converted_to_sale">Converted to Sale</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+
+          <label className="inline-flex h-10 cursor-pointer select-none items-center gap-2 rounded-md border border-gray-300 bg-white px-3 text-sm text-gray-700 hover:bg-gray-50">
+            <input
+              type="checkbox"
+              checked={showConverted || statusFilter === 'converted_to_sale'}
+              onChange={(e) => {
+                const checked = e.target.checked
+                setShowConverted(checked)
+                if (!checked && statusFilter === 'converted_to_sale') {
+                  setStatusFilter('')
+                }
+                setPage(1)
+              }}
+              className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
+            />
+            <span>Show Converted to Sale</span>
+          </label>
+
+          <div className="inline-flex rounded-md shadow-sm sm:ml-auto">
+            <button
+              type="button"
+              onClick={() => {
+                setGroupBy('status')
+                setPage(1)
+              }}
+              className={`inline-flex h-10 items-center rounded-l-md border px-3 text-xs font-medium ${
+                groupBy === 'status'
+                  ? 'border-pink-600 bg-pink-600 text-white'
+                  : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              Group by Status
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setGroupBy('date')
+                setPage(1)
+              }}
+              className={`inline-flex h-10 items-center rounded-r-md border border-l-0 px-3 text-xs font-medium ${
+                groupBy === 'date'
+                  ? 'border-pink-600 bg-pink-600 text-white'
+                  : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              Group by Date
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
-        <label className="flex items-center gap-2 text-gray-700">
-          <input
-            type="checkbox"
-            checked={allFilteredSelected}
-            onChange={toggleSelectAll}
-            disabled={filtered.length === 0}
-            className="h-4 w-4 rounded border-gray-300"
-          />
-          Select all visible
-        </label>
-        {selectedBookingIds.length > 0 && (
-          <>
-            <span className="font-medium text-gray-900">
+      {/* Bulk action toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm shadow-sm">
+        <div className="flex items-center gap-3">
+          <label className="flex cursor-pointer select-none items-center gap-2 font-medium text-gray-700">
+            <input
+              type="checkbox"
+              checked={allFilteredSelected}
+              onChange={toggleSelectAll}
+              disabled={filtered.length === 0}
+              className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
+            />
+            Select all visible
+          </label>
+          {selectedBookingIds.length > 0 && (
+            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold whitespace-nowrap text-gray-900 sm:text-sm">
               {selectedBookingIds.length} selected · Total {formatIDR(selectedBookingsTotal)}
             </span>
+          )}
+        </div>
+        {selectedBookingIds.length > 0 && (
+          <div className="flex max-w-full items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
             {canWrite && (
               <button
                 onClick={openBulkSaleModal}
-                className="rounded-md bg-green-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-800"
+                className="shrink-0 rounded-md bg-green-700 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-green-800 sm:text-sm"
               >
                 Convert Selected to Sale
               </button>
             )}
             <button
               onClick={() => setSelectedBookingIds([])}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium whitespace-nowrap text-gray-700 hover:bg-gray-50 sm:text-sm"
             >
               Clear
             </button>
-          </>
+          </div>
         )}
       </div>
 
@@ -1744,8 +1763,8 @@ export default function Bookings() {
                     </div>
 
                     {/* Desktop Table View (≥ 768px) */}
-                    <div className="hidden md:block overflow-x-auto">
-                      <table className="min-w-full divide-y divide-gray-100 text-sm">
+                    <div className="hidden md:block w-full overflow-x-auto">
+                      <table className="w-full min-w-full divide-y divide-gray-100 text-left text-sm">
                         <thead className="bg-gray-50">
                           <tr>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Select</th>
@@ -1757,7 +1776,7 @@ export default function Bookings() {
                               {groupBy === 'date' ? 'Status' : 'Date'}
                             </th>
                             <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Deadline</th>
-                            <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-gray-600">Actions</th>
+                            <th className="sticky right-0 z-20 whitespace-nowrap bg-gray-50/95 px-3 py-2 text-left font-medium text-gray-600 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] dark:bg-zinc-800/95">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -1766,14 +1785,17 @@ export default function Bookings() {
                             const isGrouped = groupKey.startsWith('group:') && groupBookings.length > 1
                             const isExpanded = expandedGroupKeys.includes(groupKey)
                             const friendlyLabel = firstBooking.booking_group_id
-                              ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
+                            ? bookingGroupFriendlyLabel(firstBooking.booking_group_id, bookings, knownGroupIds)
                               : null
                             const totalDealPrice = groupBookings.reduce((sum, b) => sum + b.deal_price, 0)
+                            const batchNames = isGrouped
+                              ? Array.from(new Set(groupBookings.map((b) => b.inventory_items?.batch_name ?? '-').filter((n) => n !== '-'))).join(', ') || '-'
+                              : (firstBooking.inventory_items?.batch_name ?? '-')
 
                             return (
                               <Fragment key={groupKey}>
                                 {/* Summary row */}
-                                <tr className="hover:bg-gray-50">
+                                <tr className="group hover:bg-gray-50">
                                   <td className="whitespace-nowrap px-3 py-2">
                                     <input
                                       type="checkbox"
@@ -1790,7 +1812,7 @@ export default function Bookings() {
                                       className="h-4 w-4 rounded border-gray-300"
                                     />
                                   </td>
-                                  <td className="px-3 py-2">
+                                  <td className="max-w-[200px] truncate px-3 py-2 sm:max-w-[300px] lg:max-w-[400px]">
                                     {isGrouped ? (
                                       <div className="space-y-1">
                                         <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
@@ -1799,21 +1821,24 @@ export default function Bookings() {
                                         <button
                                           type="button"
                                           onClick={() => toggleGroupExpand(groupKey)}
-                                          className="block font-medium text-blue-700 hover:underline"
+                                          className="block truncate font-medium text-blue-700 hover:underline"
+                                          title={friendlyLabel ?? undefined}
                                         >
                                           {friendlyLabel} · {isExpanded ? 'Hide' : 'Show'} {groupBookings.length} items
                                         </button>
                                       </div>
                                     ) : (
-                                      firstBooking.inventory_items?.item_name ?? '-'
+                                      <span className="block truncate" title={firstBooking.inventory_items?.item_name ?? '-'}>
+                                        {firstBooking.inventory_items?.item_name ?? '-'}
+                                      </span>
                                     )}
                                   </td>
-                                  <td className="whitespace-nowrap px-3 py-2 text-gray-600">
-                                    {isGrouped
-                                      ? Array.from(new Set(groupBookings.map((b) => b.inventory_items?.batch_name ?? '-').filter((n) => n !== '-'))).join(', ') || '-'
-                                      : (firstBooking.inventory_items?.batch_name ?? '-')}
+                                  <td className="max-w-[180px] truncate px-3 py-2 text-gray-600 sm:max-w-[250px] lg:max-w-[350px]" title={batchNames}>
+                                    <span className="block truncate">{batchNames}</span>
                                   </td>
-                                  <td className="whitespace-nowrap px-3 py-2">{firstBooking.buyer_name}</td>
+                                  <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={firstBooking.buyer_name}>
+                                    <span className="block truncate">{firstBooking.buyer_name}</span>
+                                  </td>
                                   <td className="whitespace-nowrap px-3 py-2">
                                     {isGrouped ? (
                                       <span className="text-gray-600">{formatIDR(totalDealPrice)} total</span>
@@ -1841,7 +1866,7 @@ export default function Bookings() {
                                     )}
                                   </td>
                                   <td className="whitespace-nowrap px-3 py-2">{formatDate(firstBooking.deadline)}</td>
-                                  <td className="whitespace-nowrap px-3 py-2">
+                                  <td className="sticky right-0 z-10 whitespace-nowrap bg-white/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-50/95 dark:bg-zinc-900/95 dark:group-hover:bg-zinc-800/95">
                                     {!isGrouped ? (
                                       renderBookingActions(firstBooking)
                                     ) : (
@@ -1859,7 +1884,7 @@ export default function Bookings() {
                                 </tr>
                                 {/* Expanded item rows for grouped bookings */}
                                 {isGrouped && isExpanded && groupBookings.map((b) => (
-                                  <tr key={b.id} className="bg-gray-50 text-xs">
+                                  <tr key={b.id} className="group bg-gray-50 text-xs hover:bg-gray-100/70">
                                     <td className="whitespace-nowrap px-3 py-2">
                                       <input
                                         type="checkbox"
@@ -1868,13 +1893,15 @@ export default function Bookings() {
                                         className="h-4 w-4 rounded border-gray-300"
                                       />
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2 pl-8">
-                                      {b.inventory_items?.item_name ?? '-'}
+                                    <td className="max-w-[200px] truncate px-3 py-2 pl-8 sm:max-w-[300px] lg:max-w-[400px]" title={b.inventory_items?.item_name ?? '-'}>
+                                      <span className="block truncate">{b.inventory_items?.item_name ?? '-'}</span>
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2 text-gray-500">
-                                      {b.inventory_items?.batch_name ?? '-'}
+                                    <td className="max-w-[180px] truncate px-3 py-2 text-gray-500 sm:max-w-[250px] lg:max-w-[350px]" title={b.inventory_items?.batch_name ?? '-'}>
+                                      <span className="block truncate">{b.inventory_items?.batch_name ?? '-'}</span>
                                     </td>
-                                    <td className="whitespace-nowrap px-3 py-2">{b.buyer_name}</td>
+                                    <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={b.buyer_name}>
+                                      <span className="block truncate">{b.buyer_name}</span>
+                                    </td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatIDR(b.deal_price)}</td>
                                     <td className="whitespace-nowrap px-3 py-2">
                                       {groupBy === 'date' ? (
@@ -1896,7 +1923,9 @@ export default function Bookings() {
                                       )}
                                     </td>
                                     <td className="whitespace-nowrap px-3 py-2">{formatDate(b.deadline)}</td>
-                                    <td className="whitespace-nowrap px-3 py-2">{renderBookingActions(b)}</td>
+                                    <td className="sticky right-0 z-10 whitespace-nowrap bg-gray-50/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-100/95 dark:bg-zinc-800/95 dark:group-hover:bg-zinc-700/95">
+                                      {renderBookingActions(b)}
+                                    </td>
                                   </tr>
                                 ))}
                               </Fragment>
