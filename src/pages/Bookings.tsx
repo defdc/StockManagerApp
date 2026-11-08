@@ -1,6 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
 import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
@@ -8,7 +7,6 @@ import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../l
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
-import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
 import { updateInventoryItemSoldState } from '../lib/itemTransactionSync'
 import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
@@ -19,6 +17,7 @@ import FormattedPriceInput from '../components/FormattedPriceInput'
 
 type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number; batch_name: string | null } | null }
 type BookingItemSelection = { inventory_item_id: string; deal_price: string }
+export type BookingSortOption = 'date_desc' | 'batch_az' | 'buyer_az' | 'item_az'
 
 const emptyForm = {
   inventory_item_id: '',
@@ -46,6 +45,10 @@ const emptyBulkEditForm = {
 /** Priority order for default status sort: active first, then converted, then cancelled. */
 const STATUS_ORDER: Record<string, number> = { active: 0, converted_to_sale: 1, cancelled: 2 }
 const BOOKING_STATUSES: BookingStatus[] = ['active', 'converted_to_sale', 'cancelled']
+const PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
+const BOOKINGS_SELECT_COLUMNS =
+  'id, inventory_item_id, customer_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, modal_price, dp_amount, remaining_amount, deadline, status, notes, created_at, inventory_items(item_name, modal_price, batch_name)'
 
 const BundlePriceInput = FormattedPriceInput
 
@@ -91,12 +94,24 @@ export default function Bookings() {
   const { user, canWrite } = useAuth()
   const { showToast } = useToast()
   const [bookings, setBookings] = useState<BookingRow[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [showConverted, setShowConverted] = useState(false)
+  const [sortBy, setSortBy] = useState<BookingSortOption>('date_desc')
   // Status sort is fixed at 'asc' (active first); the sort toggle was removed with the old DataTable.
   const statusSort = 'asc' as const
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -137,26 +152,92 @@ export default function Bookings() {
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
 
-  async function loadBookings() {
+  const loadBookings = useCallback(async () => {
     const seq = ++loadSeqRef.current
     const isLatest = () => seq === loadSeqRef.current
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
     try {
-      const data = await fetchAllRows<BookingRow>((from, to) =>
-        supabase
+      const from = (page - 1) * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
+
+      let query = supabase
+        .from('bookings')
+        .select(BOOKINGS_SELECT_COLUMNS, { count: 'exact' })
+
+      if (statusFilter && statusFilter !== 'all') {
+        query = query.eq('status', statusFilter)
+      } else if (!showConverted) {
+        query = query.neq('status', 'converted_to_sale')
+      }
+
+      const trimmedSearch = debouncedSearch.trim()
+      if (trimmedSearch) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        for (const word of words) {
+          const safeWord = word.replace(/[,()]/g, '')
+          if (!safeWord) continue
+          const { data: matchedItems } = await supabase
+            .from('inventory_items')
+            .select('id')
+            .or(`item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%`)
+            .limit(200)
+          const matchedIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
+          if (matchedIds.length > 0) {
+            query = query.or(
+              `buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%,inventory_item_id.in.(${matchedIds.join(',')})`
+            )
+          } else {
+            query = query.or(`buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%`)
+          }
+        }
+      }
+
+      if (!statusFilter || statusFilter === 'all') {
+        query = query.order('status', { ascending: true })
+      }
+
+      const { data, count, error: fetchError } = await query
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(from, to)
+
+      if (fetchError) throw new Error(fetchError.message)
+      if (!isLatest()) return
+
+      let nextBookings = ((data as unknown as BookingRow[]) ?? []).slice()
+
+      // Ensure bulk-transaction parent rows are never broken across page boundaries
+      const groupIds = Array.from(
+        new Set(nextBookings.map((b) => b.booking_group_id).filter((id): id is string => Boolean(id)))
+      )
+      if (groupIds.length > 0) {
+        let siblingQuery = supabase
           .from('bookings')
-          .select('*, inventory_items(item_name, modal_price, batch_name)')
+          .select(BOOKINGS_SELECT_COLUMNS)
+          .in('booking_group_id', groupIds)
+        if (!showConverted && statusFilter !== 'converted_to_sale') {
+          siblingQuery = siblingQuery.neq('status', 'converted_to_sale')
+        }
+        const { data: siblingData } = await siblingQuery
           .order('created_at', { ascending: false })
           .order('id', { ascending: false })
-          .range(from, to) as unknown as PromiseLike<{ data: BookingRow[] | null; error: { message: string } | null }>
-      )
-      if (!isLatest()) return
-      const nextBookings = data ?? []
+        if (!isLatest()) return
+        if (siblingData && siblingData.length > 0) {
+          const mergedMap = new Map<string, BookingRow>()
+          for (const b of nextBookings) mergedMap.set(b.id, b)
+          for (const s of siblingData as unknown as BookingRow[]) {
+            if (!mergedMap.has(s.id)) mergedMap.set(s.id, s)
+          }
+          nextBookings = [...mergedMap.values()]
+        }
+      }
+
       setBookings(nextBookings)
+      setTotalCount(count ?? nextBookings.length)
       hasLoadedRef.current = true
-      // Preserve checkbox selection: only keep IDs that still exist in the database
+      // Preserve checkbox selection: only keep IDs that still exist in the current page
       const idSet = new Set(nextBookings.map((b) => b.id))
       setSelectedBookingIds((current) => current.filter((id) => idSet.has(id)))
       // Preserve open convert modal target without closing or resetting
@@ -170,11 +251,11 @@ export default function Bookings() {
         setRefreshing(false)
       }
     }
-  }
+  }, [page, statusFilter, showConverted, debouncedSearch])
 
   useEffect(() => {
-    loadBookings()
-  }, [])
+    void loadBookings()
+  }, [loadBookings])
 
   useDataInvalidation(
     ['bookings', 'sales', 'inventory_items'],
@@ -184,56 +265,54 @@ export default function Bookings() {
     { remoteOnly: true }
   )
 
-  // Priority order for status when no search query drives ranking
+  // Priority order and sorting for bookings on the current server-filtered page
   const filtered = useMemo(() => {
-    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
-    const hasQuery = searchWords.length > 0
+    const visibleBookings =
+      !showConverted && statusFilter !== 'converted_to_sale'
+        ? bookings.filter((b) => b.status !== 'converted_to_sale')
+        : bookings
 
-    return bookings
-      .filter((b) => {
-        if (statusFilter && b.status !== statusFilter) return false
-        if (!hasQuery) return true
-
-        const buyerName = (b.buyer_name || '').toLowerCase()
-        const itemName = (b.inventory_items?.item_name || '').toLowerCase()
-        const batchName = (b.inventory_items?.batch_name || '').toLowerCase()
-        const notes = (b.notes || '').toLowerCase()
-
-        return searchWords.every(
-          (word) =>
-            buyerName.includes(word) ||
-            itemName.includes(word) ||
-            batchName.includes(word) ||
-            notes.includes(word)
-        )
-      })
-      .map((b) => ({
-        booking: b,
-        rank: smartSearchRank(search, [
-          { value: b.buyer_name },
-          { value: b.inventory_items?.item_name },
-          { value: b.inventory_items?.batch_name },
-          { value: b.notes, kind: 'notes' },
-        ]),
-      }))
-      .sort((a, b) => {
-        // 1. If there's an active search query, rank takes first priority
-        if (hasQuery) {
-          const rankDiff = (a.rank ?? 0) - (b.rank ?? 0)
-          if (rankDiff !== 0) return rankDiff
+    return [...visibleBookings].sort((a, b) => {
+      switch (sortBy) {
+        case 'batch_az': {
+          const aBatch = a.inventory_items?.batch_name || ''
+          const bBatch = b.inventory_items?.batch_name || ''
+          const cmp = aBatch.localeCompare(bBatch)
+          if (cmp !== 0) return cmp
+          break
         }
+        case 'buyer_az': {
+          const aBuyer = a.buyer_name || ''
+          const bBuyer = b.buyer_name || ''
+          const cmp = aBuyer.localeCompare(bBuyer)
+          if (cmp !== 0) return cmp
+          break
+        }
+        case 'item_az': {
+          const aItem = a.inventory_items?.item_name || ''
+          const bItem = b.inventory_items?.item_name || ''
+          const cmp = aItem.localeCompare(bItem)
+          if (cmp !== 0) return cmp
+          break
+        }
+        case 'date_desc':
+        default:
+          break
+      }
 
-        // 2. Status ordering (respects sort direction toggle)
-        const aOrder = STATUS_ORDER[a.booking.status] ?? 99
-        const bOrder = STATUS_ORDER[b.booking.status] ?? 99
-        const statusDiff = statusSort === 'asc' ? aOrder - bOrder : bOrder - aOrder
-        if (statusDiff !== 0) return statusDiff
+      const aOrder = STATUS_ORDER[a.status] ?? 99
+      const bOrder = STATUS_ORDER[b.status] ?? 99
+      const statusDiff = statusSort === 'asc' ? aOrder - bOrder : bOrder - aOrder
+      if (statusDiff !== 0) return statusDiff
+      return (b.created_at || '').localeCompare(a.created_at || '')
+    })
+  }, [bookings, statusSort, sortBy, showConverted, statusFilter])
 
-        // 3. Within the same status: newest first
-        return b.booking.created_at.localeCompare(a.booking.created_at)
-      })
-      .map(({ booking }) => booking)
-  }, [bookings, search, statusFilter, statusSort])
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages
+  const pageFrom = totalCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageTo = totalCount === 0 ? 0 : Math.min(totalCount, page * PAGE_SIZE)
 
   // Group filtered bookings by status for collapsible sections
   const groupedByStatus = useMemo(() => {
@@ -245,9 +324,14 @@ export default function Bookings() {
     }
     // Return in fixed order, omitting empty sections
     return BOOKING_STATUSES
-      .filter((s) => (statusFilter ? s === statusFilter : true) && (map.get(s)?.length ?? 0) > 0)
+      .filter((s) => {
+        if (statusFilter && statusFilter !== 'all') return s === statusFilter
+        if (!showConverted && s === 'converted_to_sale') return false
+        return true
+      })
+      .filter((s) => (map.get(s)?.length ?? 0) > 0)
       .map((s) => [s, map.get(s) ?? []] as [string, BookingRow[]])
-  }, [filtered, statusFilter])
+  }, [filtered, statusFilter, showConverted])
 
   const [groupBy, setGroupBy] = useState<'status' | 'date'>('status')
   const [collapsedDates, setCollapsedDates] = useState<Set<string>>(loadCollapsedDates)
@@ -1315,12 +1399,22 @@ export default function Bookings() {
           type="text"
           placeholder="Search buyer, item, batch, or notes..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value)
+            setPage(1)
+          }}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         />
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => {
+            const val = e.target.value
+            setStatusFilter(val)
+            if (val === 'converted_to_sale') {
+              setShowConverted(true)
+            }
+            setPage(1)
+          }}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           <option value="">All Statuses</option>
@@ -1329,10 +1423,27 @@ export default function Bookings() {
           <option value="cancelled">Cancelled</option>
         </select>
 
+        <select
+          value={sortBy}
+          onChange={(e) => {
+            setSortBy(e.target.value as BookingSortOption)
+            setPage(1)
+          }}
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        >
+          <option value="date_desc">Newest First</option>
+          <option value="batch_az">Batch Name (A-Z)</option>
+          <option value="buyer_az">Buyer Name (A-Z)</option>
+          <option value="item_az">Item Name (A-Z)</option>
+        </select>
+
         <div className="inline-flex rounded-md shadow-sm">
           <button
             type="button"
-            onClick={() => setGroupBy('status')}
+            onClick={() => {
+              setGroupBy('status')
+              setPage(1)
+            }}
             className={`rounded-l-md border px-3 py-2 text-xs font-medium ${
               groupBy === 'status'
                 ? 'border-pink-600 bg-pink-600 text-white'
@@ -1343,7 +1454,10 @@ export default function Bookings() {
           </button>
           <button
             type="button"
-            onClick={() => setGroupBy('date')}
+            onClick={() => {
+              setGroupBy('date')
+              setPage(1)
+            }}
             className={`rounded-r-md border border-l-0 px-3 py-2 text-xs font-medium ${
               groupBy === 'date'
                 ? 'border-pink-600 bg-pink-600 text-white'
@@ -1353,6 +1467,23 @@ export default function Bookings() {
             Group by Date
           </button>
         </div>
+
+        <label className="inline-flex cursor-pointer select-none items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          <input
+            type="checkbox"
+            checked={showConverted || statusFilter === 'converted_to_sale'}
+            onChange={(e) => {
+              const checked = e.target.checked
+              setShowConverted(checked)
+              if (!checked && statusFilter === 'converted_to_sale') {
+                setStatusFilter('')
+              }
+              setPage(1)
+            }}
+            className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
+          />
+          Show Converted to Sale
+        </label>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm">
@@ -1779,6 +1910,35 @@ export default function Bookings() {
               </div>
             )
           })}
+
+          {/* Server-Side Pagination Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+            <div className="text-gray-600">
+              Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+              <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> bookings (Page{' '}
+              <span className="font-medium text-gray-900">{page}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalPages}</span>)
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!hasPrevPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous Page
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!hasNextPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next Page
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useDataInvalidation } from '../lib/dataSync'
-import { fetchAllRows } from '../lib/supabasePagination'
 import { formatDate, formatIDR, splitAmount } from '../lib/format'
-import { smartSearchRank } from '../lib/search'
 import Modal from '../components/Modal'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 import type { Booking, InventoryItem, Sale } from '../types/database'
@@ -15,6 +13,15 @@ import {
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { logActivity } from '../lib/activityLog'
+
+const PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
+const BATCH_ITEMS_SELECT =
+  'id, item_name, batch_name, batch_modal_total, modal_price, status, created_at'
+const BATCH_SALES_SELECT =
+  'id, inventory_item_id, buyer_name, sale_price, sale_date, created_at, inventory_items(batch_name, item_name)'
+const BATCH_BOOKINGS_SELECT =
+  'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(batch_name, item_name)'
 
 type BatchStatus = 'No Sales' | 'In Progress' | 'Break Even' | 'Profit'
 
@@ -121,13 +128,23 @@ export default function Batches() {
   const { showToast } = useToast()
 
   const [batches, setBatches] = useState<BatchSummary[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<FilterValue>('All')
   const [sortBy, setSortBy] = useState<BatchSortOption>('newest')
   const [selectedBatch, setSelectedBatch] = useState<BatchSummary | null>(null)
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
 
   // ── Edit batch state ──────────────────────────────────────────────────────
   const [editingBatch, setEditingBatch] = useState<BatchSummary | null>(null)
@@ -140,7 +157,7 @@ export default function Batches() {
   const loadSeqRef = useRef(0)
   const hasLoadedRef = useRef(false)
 
-  async function loadBatches() {
+  const loadBatches = useCallback(async () => {
     const seq = ++loadSeqRef.current
     const isLatest = () => seq === loadSeqRef.current
     // First load shows the full loader; later refreshes keep current data on screen.
@@ -149,43 +166,80 @@ export default function Batches() {
     setError(null)
 
     try {
-      const [inventoryItems, sales, bookings] = await Promise.all([
-        fetchAllRows<InventoryItemWithRelations>((from, to) =>
-          supabase
-            .from('inventory_items')
-            .select('id, item_name, batch_name, batch_modal_total, modal_price, status, created_at')
-            .order('created_at', { ascending: true })
-            .order('id', { ascending: true })
-            .range(from, to) as unknown as PromiseLike<{
-            data: InventoryItemWithRelations[] | null
-            error: { message: string } | null
-          }>
-        ),
-        fetchAllRows<SaleRow>((from, to) =>
+      const from = (page - 1) * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
+
+      let itemsQuery = supabase
+        .from('inventory_items')
+        .select(BATCH_ITEMS_SELECT, { count: 'exact' })
+
+      const trimmedSearch = debouncedSearch.trim()
+      if (trimmedSearch) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        for (const word of words) {
+          const safeWord = word.replace(/[,()]/g, '')
+          if (!safeWord) continue
+          itemsQuery = itemsQuery.or(
+            `batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`
+          )
+        }
+      }
+
+      const itemsRes = await itemsQuery
+        .order('created_at', { ascending: sortBy === 'oldest' })
+        .order('id', { ascending: sortBy === 'oldest' })
+        .range(from, to)
+
+      if (itemsRes.error) throw new Error(itemsRes.error.message)
+      if (!isLatest()) return
+
+      let inventoryItems = (itemsRes.data as unknown as InventoryItemWithRelations[]) ?? []
+
+      // Fetch all sibling items belonging to the batches present on this page so batch totals/modal/counts are accurate
+      const pageBatchNames = Array.from(
+        new Set(inventoryItems.map((i) => i.batch_name?.trim()).filter((n): n is string => Boolean(n)))
+      )
+      if (pageBatchNames.length > 0) {
+        const { data: batchSiblings } = await supabase
+          .from('inventory_items')
+          .select(BATCH_ITEMS_SELECT)
+          .in('batch_name', pageBatchNames)
+          .order('created_at', { ascending: true })
+          .order('id', { ascending: true })
+        if (!isLatest()) return
+        if (batchSiblings && batchSiblings.length > 0) {
+          const mergedItems = new Map<string, InventoryItemWithRelations>()
+          for (const item of inventoryItems) mergedItems.set(item.id, item)
+          for (const sib of batchSiblings as unknown as InventoryItemWithRelations[]) {
+            if (!mergedItems.has(sib.id)) mergedItems.set(sib.id, sib)
+          }
+          inventoryItems = [...mergedItems.values()]
+        }
+      }
+
+      const itemIds = inventoryItems.map((i) => i.id)
+      let sales: SaleRow[] = []
+      let bookings: BookingRow[] = []
+
+      if (itemIds.length > 0) {
+        const [salesRes, bookingsRes] = await Promise.all([
           supabase
             .from('sales')
-            .select('id, inventory_item_id, buyer_name, sale_price, sale_date, created_at, inventory_items(batch_name, item_name)')
+            .select(BATCH_SALES_SELECT)
+            .in('inventory_item_id', itemIds)
             .order('sale_date', { ascending: false })
-            .order('id', { ascending: false })
-            .range(from, to) as unknown as PromiseLike<{
-            data: SaleRow[] | null
-            error: { message: string } | null
-          }>
-        ),
-        fetchAllRows<BookingRow>((from, to) =>
+            .range(0, PAGE_SIZE - 1),
           supabase
             .from('bookings')
-            .select('id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(batch_name, item_name)')
+            .select(BATCH_BOOKINGS_SELECT)
+            .in('inventory_item_id', itemIds)
             .order('created_at', { ascending: false })
-            .order('id', { ascending: false })
-            .range(from, to) as unknown as PromiseLike<{
-            data: BookingRow[] | null
-            error: { message: string } | null
-          }>
-        ),
-      ])
-
-      if (!isLatest()) return
+            .range(0, PAGE_SIZE - 1),
+        ])
+        if (!isLatest()) return
+        sales = (salesRes.data as unknown as SaleRow[]) ?? []
+        bookings = (bookingsRes.data as unknown as BookingRow[]) ?? []
+      }
 
       // Normalize grouped bookings where child deal_price is 0 but group_total_deal_price > 0
       const bookingsByGroup = new Map<string, BookingRow[]>()
@@ -315,6 +369,7 @@ export default function Batches() {
 
       const sortedBatches = Array.from(batchMap.values()).sort((a, b) => a.batchName.localeCompare(b.batchName))
       setBatches(sortedBatches)
+      setTotalCount(itemsRes.count ?? inventoryItems.length)
       setSelectedBatch((current) =>
         current ? sortedBatches.find((b) => b.batchName === current.batchName) ?? null : null
       )
@@ -328,19 +383,22 @@ export default function Batches() {
         setRefreshing(false)
       }
     }
-  }
+  }, [page, debouncedSearch, sortBy])
 
-  // Fresh fetch on every mount (route entry) …
+  // Fresh fetch on mount and when page / search / sort changes
   useEffect(() => {
     void loadBatches()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [loadBatches])
 
   // … and whenever inventory / sales / bookings change anywhere (this tab or another),
   // or the window regains focus.
-  useDataInvalidation(['inventory_items', 'sales', 'bookings', 'batches'], () => {
-    void loadBatches()
-  })
+  useDataInvalidation(
+    ['inventory_items', 'sales', 'bookings', 'batches'],
+    () => {
+      void loadBatches()
+    },
+    { remoteOnly: true }
+  )
 
   function openEditBatch(batch: BatchSummary) {
     setEditingBatch(batch)
@@ -456,22 +514,15 @@ export default function Batches() {
 
   const filteredBatches = useMemo(() => {
     return batches
-      .map((batch) => ({
-        batch,
-        rank: smartSearchRank(search, [
-          { value: batch.batchName },
-          { value: batch.items.map((item) => item.item_name).join(' ') },
-          { value: String(batch.batchModal) },
-        ]),
-      }))
-      .filter(({ batch, rank }) => {
-        const matchesStatus = statusFilter === 'All' || batch.status === statusFilter
-        const matchesSearch = rank !== null
-        return matchesStatus && matchesSearch
-      })
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || compareBatches(a.batch, b.batch, sortBy))
-      .map(({ batch }) => batch)
-  }, [batches, search, statusFilter, sortBy])
+      .filter((batch) => statusFilter === 'All' || batch.status === statusFilter)
+      .sort((a, b) => compareBatches(a, b, sortBy))
+  }, [batches, statusFilter, sortBy])
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages
+  const pageFrom = totalCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageTo = totalCount === 0 ? 0 : Math.min(totalCount, page * PAGE_SIZE)
 
   const batchStatusClasses: Record<BatchStatus, string> = {
     'No Sales': 'bg-gray-100 text-gray-700',
@@ -498,13 +549,19 @@ export default function Batches() {
         <input
           type="text"
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => {
+            setSearch(event.target.value)
+            setPage(1)
+          }}
           placeholder="Search batch, item, or batch modal..."
           className="w-full max-w-sm rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         />
         <select
           value={statusFilter}
-          onChange={(event) => setStatusFilter(event.target.value as FilterValue)}
+          onChange={(event) => {
+            setStatusFilter(event.target.value as FilterValue)
+            setPage(1)
+          }}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           {FILTERS.map((filter) => (
@@ -515,7 +572,10 @@ export default function Batches() {
         </select>
         <select
           value={sortBy}
-          onChange={(event) => setSortBy(event.target.value as BatchSortOption)}
+          onChange={(event) => {
+            setSortBy(event.target.value as BatchSortOption)
+            setPage(1)
+          }}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           {SORT_OPTIONS.map((opt) => (
@@ -679,6 +739,36 @@ export default function Batches() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          {/* Server-Side Pagination Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+            <div className="text-gray-600">
+              Showing <span className="font-medium text-gray-900">{filteredBatches.length}</span> batches (Items{' '}
+              <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+              <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> · Page{' '}
+              <span className="font-medium text-gray-900">{page}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalPages}</span>)
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!hasPrevPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous Page
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!hasNextPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next Page
+              </button>
+            </div>
           </div>
         </>
       )}

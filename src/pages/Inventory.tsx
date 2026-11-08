@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
 import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
@@ -11,7 +10,7 @@ import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { Booking, InventoryItem, Sale } from '../types/database'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
-import BatchAutocomplete, { type BatchSuggestion } from '../components/BatchAutocomplete'
+import BatchAutocomplete from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
 import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
@@ -85,7 +84,8 @@ function chunkIds(ids: string[], size = ID_CHUNK_SIZE): string[][] {
  */
 const INVENTORY_SELECT_COLUMNS =
   'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, created_at'
-const INVENTORY_PAGE_SIZE = 250
+const INVENTORY_PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -93,12 +93,22 @@ export default function Inventory() {
   const { user, canWrite } = useAuth()
   const { showToast } = useToast()
   const [items, setItems] = useState<InventoryItem[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [deletingItem, setDeletingItem] = useState<InventoryItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
 
   // Category collapse state — persisted in localStorage
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(loadCollapsed)
@@ -146,38 +156,57 @@ export default function Inventory() {
 
   // ── Data loading ─────────────────────────────────────────────────────────
 
-  async function loadItems() {
+  const loadItems = useCallback(async () => {
     const seq = ++loadSeqRef.current
     const isLatest = () => seq === loadSeqRef.current
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
     try {
-      const data = await fetchAllRows<InventoryItem>(
-        (from, to) =>
-          supabase
-            .from('inventory_items')
-            .select(INVENTORY_SELECT_COLUMNS)
-            .order('created_at', { ascending: false })
-            // Unique tie-breaker: bulk-inserted rows share an identical created_at, so without
-            // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
-            .order('id', { ascending: false })
-            .range(from, to) as unknown as PromiseLike<{
-            data: InventoryItem[] | null
-            error: { message: string } | null
-          }>,
-        INVENTORY_PAGE_SIZE
-      )
+      const from = (page - 1) * INVENTORY_PAGE_SIZE
+      const to = from + INVENTORY_PAGE_SIZE - 1
+
+      let query = supabase
+        .from('inventory_items')
+        .select(INVENTORY_SELECT_COLUMNS, { count: 'exact' })
+
+      const normalizedStatus = statusFilter.trim().toLowerCase()
+      if (normalizedStatus && normalizedStatus !== 'all') {
+        query = query.eq('status', normalizedStatus)
+      }
+
+      const trimmedSearch = debouncedSearch.trim()
+      if (trimmedSearch) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        for (const word of words) {
+          const safeWord = word.replace(/[,()]/g, '')
+          if (!safeWord) continue
+          query = query.or(
+            `item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%,category.ilike.%${safeWord}%`
+          )
+        }
+      }
+
+      const { data, count, error: fetchError } = await query
+        .order('created_at', { ascending: false })
+        // Unique tie-breaker: bulk-inserted rows share an identical created_at, so without
+        // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
+        .order('id', { ascending: false })
+        .range(from, to)
+
+      if (fetchError) throw new Error(fetchError.message)
       if (!isLatest()) return
+
       // Defensive de-duplication by UUID so every row (and React key) is unique.
       const uniqueById = new Map<string, InventoryItem>()
-      for (const row of data ?? []) {
+      for (const row of (data as unknown as InventoryItem[]) ?? []) {
         if (row?.id && !uniqueById.has(row.id)) uniqueById.set(row.id, row)
       }
       const uniqueItems = [...uniqueById.values()]
       setItems(uniqueItems)
+      setTotalCount(count ?? uniqueItems.length)
       hasLoadedRef.current = true
-      // Drop selections that no longer exist (deleted / reloaded rows).
+      // Drop selections that no longer exist on the current page.
       setSelectedItemIds((current) => current.filter((id) => uniqueById.has(id)))
       // Preserve detail drawer item without closing it
       setDrawerItem((current) => (current ? uniqueById.get(current.id) ?? current : null))
@@ -190,11 +219,11 @@ export default function Inventory() {
         setRefreshing(false)
       }
     }
-  }
+  }, [page, statusFilter, debouncedSearch])
 
   useEffect(() => {
-    loadItems()
-  }, [])
+    void loadItems()
+  }, [loadItems])
 
   useDataInvalidation(
     ['inventory_items', 'sales', 'bookings'],
@@ -237,37 +266,11 @@ export default function Inventory() {
     }
   }, [drawerItem])
 
-  // ── Filtering & grouping ─────────────────────────────────────────────────
+  // ── Filtering & grouping (Server-side filtered; sorted & grouped for display) ──
 
   const filtered = useMemo(() => {
-    const normalizedStatusFilter = statusFilter.trim().toLowerCase()
-    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
-
-    return items
-      .filter((item) => {
-        // 1. Strict Status Check
-        const matchesStatus =
-          !normalizedStatusFilter || normalizedStatusFilter === 'all'
-            ? true
-            : (item.status || '').toLowerCase() === normalizedStatusFilter
-
-        // 2. Multi-Keyword Search Check
-        const normalizedItemName = (item.item_name || '').toLowerCase()
-        const normalizedBatchName = (item.batch_name || '').toLowerCase()
-        const normalizedCategory = (item.category || '').toLowerCase()
-
-        const matchesSearch = searchWords.every(
-          (word) =>
-            normalizedItemName.includes(word) ||
-            normalizedBatchName.includes(word) ||
-            normalizedCategory.includes(word)
-        )
-
-        // Both must be true
-        return matchesStatus && matchesSearch
-      })
-      .sort((a, b) => a.item_name.localeCompare(b.item_name))
-  }, [items, search, statusFilter])
+    return [...items].sort((a, b) => a.item_name.localeCompare(b.item_name))
+  }, [items])
 
   // Group items by category for the collapsible view
   const grouped = useMemo(() => {
@@ -286,58 +289,11 @@ export default function Inventory() {
     })
   }, [filtered])
 
-  // ── Autocomplete suggestions derived from loaded items (0 network requests) ──
-
-  const existingItemRecords = useMemo<ItemSuggestionRecord[]>(() => {
-    const seen = new Map<string, ItemSuggestionRecord>()
-    for (const item of items) {
-      const raw = (item.item_name || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) {
-        seen.set(key, {
-          item_name: raw,
-          category: item.category ? item.category.trim() : null,
-          notes: item.notes ? item.notes.trim() : null,
-        })
-      }
-    }
-    return [...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name))
-  }, [items])
-
-  const existingCategories = useMemo<string[]>(() => {
-    const seen = new Map<string, string>()
-    for (const item of items) {
-      const raw = (item.category || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) seen.set(key, raw)
-    }
-    return [...seen.values()].sort((a, b) => a.localeCompare(b))
-  }, [items])
-
-  const existingBatches = useMemo<BatchSuggestion[]>(() => {
-    const batchMap = new Map<string, BatchSuggestion>()
-    for (const item of items) {
-      const name = (item.batch_name || '').trim()
-      if (!name) continue
-      const modalTotal = item.batch_modal_total ?? null
-      const existing = batchMap.get(name)
-      if (existing) {
-        existing.itemCount += 1
-        if (item.created_at > existing.latestAt) existing.latestAt = item.created_at
-        if (modalTotal && !existing.modalTotal) existing.modalTotal = modalTotal
-      } else {
-        batchMap.set(name, {
-          name,
-          modalTotal,
-          itemCount: 1,
-          latestAt: item.created_at,
-        })
-      }
-    }
-    return [...batchMap.values()].sort((a, b) => b.latestAt.localeCompare(a.latestAt))
-  }, [items])
+  const totalPages = Math.max(1, Math.ceil(totalCount / INVENTORY_PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages || items.length === INVENTORY_PAGE_SIZE
+  const pageFrom = totalCount === 0 ? 0 : (page - 1) * INVENTORY_PAGE_SIZE + 1
+  const pageTo = totalCount === 0 ? 0 : (page - 1) * INVENTORY_PAGE_SIZE + items.length
 
   // ── Selection helpers (keyed exclusively by database UUID) ───────────────
 
@@ -835,12 +791,18 @@ export default function Inventory() {
           type="text"
           placeholder="Search item, category, or batch..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value)
+            setPage(1)
+          }}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         />
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => {
+            setStatusFilter(e.target.value)
+            setPage(1)
+          }}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           <option value="">All statuses</option>
@@ -1086,6 +1048,35 @@ export default function Inventory() {
               </div>
             )
           })}
+
+          {/* Server-Side Pagination Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+            <div className="text-gray-600">
+              Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+              <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> items (Page{' '}
+              <span className="font-medium text-gray-900">{page}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalPages}</span>)
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!hasPrevPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous Page
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!hasNextPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next Page
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1143,14 +1134,12 @@ export default function Inventory() {
                     }))
                   }}
                   placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
-                  existingRecords={existingItemRecords}
                 />
 
                 <CategoryAutocomplete
                   required
                   value={form.category}
                   onChange={(cat) => setForm({ ...form, category: cat })}
-                  existingCategories={existingCategories}
                 />
 
                 <BatchAutocomplete
@@ -1163,7 +1152,6 @@ export default function Inventory() {
                       batch_modal_total: modalTotal ?? form.batch_modal_total,
                     })
                   }
-                  existingBatches={existingBatches}
                 />
 
                 <div>
@@ -1191,7 +1179,6 @@ export default function Inventory() {
                     }}
                     label="Batch for all items below"
                     placeholder="Select or create a batch for these items..."
-                    existingBatches={existingBatches}
                   />
                   <p className="mt-1 text-xs text-gray-500">
                     This batch and its modal total will be shared across all items added in this session.
@@ -1252,7 +1239,6 @@ export default function Inventory() {
                               }}
                               extraSuggestions={sessionItemNames}
                               extraRecords={sessionRecords}
-                              existingRecords={existingItemRecords}
                             />
                           </div>
 
@@ -1267,7 +1253,6 @@ export default function Inventory() {
                               value={itemRow.category}
                               onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
                               extraSuggestions={sessionCategories}
-                              existingCategories={existingCategories}
                             />
                           </div>
 

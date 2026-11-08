@@ -1,6 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
 import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
@@ -8,7 +7,6 @@ import { formatIDR, formatDate, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
-import { smartSearchRank } from '../lib/search'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
 import { revertInventoryItemsSaleState, updateInventoryItemSoldState } from '../lib/itemTransactionSync'
 import type { FulfillmentStatus, Sale } from '../types/database'
@@ -18,6 +16,7 @@ import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 
 type SaleRow = Sale & { inventory_items: { item_name: string; batch_name: string | null } | null }
+export type SaleSortOption = 'date_desc' | 'batch_az' | 'buyer_az' | 'item_az'
 
 interface SaleGroup {
   key: string
@@ -64,16 +63,32 @@ const emptyGroupEditForm = {
 }
 
 const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
+const PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
+const SALES_SELECT_COLUMNS =
+  'id, inventory_item_id, customer_id, booking_group_id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, fulfillment_status, notes, created_at, inventory_items(item_name, batch_name)'
 
 export default function Sales() {
   const { user, canWrite } = useAuth()
   const { showToast } = useToast()
   const [sales, setSales] = useState<SaleRow[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [deletingSale, setDeletingSale] = useState<SaleRow | null>(null)
   const [undoingSale, setUndoingSale] = useState<SaleRow | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
 
   const [showModal, setShowModal] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -89,6 +104,7 @@ export default function Sales() {
   const [groupEditForm, setGroupEditForm] = useState(emptyGroupEditForm)
   const [groupEditError, setGroupEditError] = useState<string | null>(null)
   const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | FulfillmentStatus>('all')
+  const [sortBy, setSortBy] = useState<SaleSortOption>('date_desc')
 
   const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
   const [showBulkShippingModal, setShowBulkShippingModal] = useState(false)
@@ -104,26 +120,92 @@ export default function Sales() {
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
 
-  async function loadSales() {
+  const loadSales = useCallback(async () => {
     const seq = ++loadSeqRef.current
     const isLatest = () => seq === loadSeqRef.current
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
     try {
-      const data = await fetchAllRows<SaleRow>((from, to) =>
-        supabase
+      const from = (page - 1) * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
+
+      let query = supabase
+        .from('sales')
+        .select(SALES_SELECT_COLUMNS, { count: 'exact' })
+
+      if (fulfillmentFilter !== 'all') {
+        query = query.eq('fulfillment_status', fulfillmentFilter)
+      }
+
+      if (startDate) {
+        query = query.gte('sale_date', startDate)
+      }
+
+      if (endDate) {
+        query = query.lte('sale_date', endDate)
+      }
+
+      const trimmedSearch = debouncedSearch.trim()
+      if (trimmedSearch) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        for (const word of words) {
+          const safeWord = word.replace(/[,()]/g, '')
+          if (!safeWord) continue
+          const { data: matchedItems } = await supabase
+            .from('inventory_items')
+            .select('id')
+            .or(`item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%`)
+            .limit(200)
+          const matchedIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
+          if (matchedIds.length > 0) {
+            query = query.or(
+              `buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%,inventory_item_id.in.(${matchedIds.join(',')})`
+            )
+          } else {
+            query = query.or(`buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%`)
+          }
+        }
+      }
+
+      const { data, count, error: fetchError } = await query
+        .order('sale_date', { ascending: false })
+        .order('id', { ascending: false })
+        .range(from, to)
+
+      if (fetchError) throw new Error(fetchError.message)
+      if (!isLatest()) return
+
+      let nextSales = ((data as unknown as SaleRow[]) ?? []).slice()
+
+      // Ensure bulk-transaction parent rows are never broken across page boundaries
+      const groupIds = Array.from(
+        new Set(nextSales.map((s) => s.booking_group_id).filter((id): id is string => Boolean(id)))
+      )
+      if (groupIds.length > 0) {
+        const { data: siblingData } = await supabase
           .from('sales')
-          .select('*, inventory_items(item_name, batch_name)')
+          .select(SALES_SELECT_COLUMNS)
+          .in('booking_group_id', groupIds)
           .order('sale_date', { ascending: false })
           .order('id', { ascending: false })
-          .range(from, to) as unknown as PromiseLike<{ data: SaleRow[] | null; error: { message: string } | null }>
-      )
-      if (!isLatest()) return
-      const nextSales = data ?? []
+        if (!isLatest()) return
+        if (siblingData && siblingData.length > 0) {
+          const mergedMap = new Map<string, SaleRow>()
+          for (const s of nextSales) mergedMap.set(s.id, s)
+          for (const sib of siblingData as unknown as SaleRow[]) {
+            if (!mergedMap.has(sib.id)) mergedMap.set(sib.id, sib)
+          }
+          nextSales = [...mergedMap.values()].sort(
+            (a, b) => b.sale_date.localeCompare(a.sale_date) || b.id.localeCompare(a.id)
+          )
+        }
+      }
+
       setSales(nextSales)
+      setTotalCount(count ?? nextSales.length)
       hasLoadedRef.current = true
-      // Preserve checkbox selection: only keep IDs that still exist in the database
+      // Preserve checkbox selection: only keep IDs that still exist in the current page
       const idSet = new Set(nextSales.map((s) => s.id))
       setSelectedSaleIds((current) => current.filter((id) => idSet.has(id)))
     } catch (err) {
@@ -135,11 +217,11 @@ export default function Sales() {
         setRefreshing(false)
       }
     }
-  }
+  }, [page, fulfillmentFilter, debouncedSearch, startDate, endDate])
 
   useEffect(() => {
-    loadSales()
-  }, [])
+    void loadSales()
+  }, [loadSales])
 
   useDataInvalidation(
     ['sales', 'inventory_items', 'bookings'],
@@ -150,41 +232,44 @@ export default function Sales() {
   )
 
   const filtered = useMemo(() => {
-    const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
-    const hasQuery = searchWords.length > 0
-
-    return sales
-      .filter((sale) => {
-        if (fulfillmentFilter !== 'all' && sale.fulfillment_status !== fulfillmentFilter) {
-          return false
+    return [...sales].sort((a, b) => {
+      switch (sortBy) {
+        case 'batch_az': {
+          const aBatch = a.inventory_items?.batch_name || ''
+          const bBatch = b.inventory_items?.batch_name || ''
+          const cmp = aBatch.localeCompare(bBatch)
+          if (cmp !== 0) return cmp
+          break
         }
-        if (!hasQuery) return true
+        case 'buyer_az': {
+          const aBuyer = a.buyer_name || ''
+          const bBuyer = b.buyer_name || ''
+          const cmp = aBuyer.localeCompare(bBuyer)
+          if (cmp !== 0) return cmp
+          break
+        }
+        case 'item_az': {
+          const aItem = a.inventory_items?.item_name || ''
+          const bItem = b.inventory_items?.item_name || ''
+          const cmp = aItem.localeCompare(bItem)
+          if (cmp !== 0) return cmp
+          break
+        }
+        case 'date_desc':
+        default:
+          break
+      }
+      const dateCmp = (b.sale_date || '').localeCompare(a.sale_date || '')
+      if (dateCmp !== 0) return dateCmp
+      return (b.created_at || '').localeCompare(a.created_at || '')
+    })
+  }, [sales, sortBy])
 
-        const buyerName = (sale.buyer_name || '').toLowerCase()
-        const itemName = (sale.inventory_items?.item_name || '').toLowerCase()
-        const batchName = (sale.inventory_items?.batch_name || '').toLowerCase()
-        const notes = (sale.notes || '').toLowerCase()
-
-        return searchWords.every(
-          (word) =>
-            buyerName.includes(word) ||
-            itemName.includes(word) ||
-            batchName.includes(word) ||
-            notes.includes(word)
-        )
-      })
-      .map((sale) => ({
-        sale,
-        rank: smartSearchRank(search, [
-          { value: sale.buyer_name },
-          { value: sale.inventory_items?.item_name },
-          { value: sale.inventory_items?.batch_name },
-          { value: sale.notes, kind: 'notes' },
-        ]),
-      }))
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.sale.sale_date.localeCompare(a.sale.sale_date))
-      .map(({ sale }) => sale)
-  }, [sales, search, fulfillmentFilter])
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages
+  const pageFrom = totalCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageTo = totalCount === 0 ? 0 : Math.min(totalCount, page * PAGE_SIZE)
 
   const knownGroupIds = useMemo(
     () => sales.map((sale) => sale.booking_group_id).filter((id): id is string => Boolean(id)),
@@ -197,7 +282,9 @@ export default function Sales() {
       groupedByDate.set(sale.sale_date, [...(groupedByDate.get(sale.sale_date) ?? []), sale])
     })
 
-    return Array.from(groupedByDate.entries()).map(([saleDate, daySales]) => {
+    const sortedDateEntries = Array.from(groupedByDate.entries()).sort((a, b) => b[0].localeCompare(a[0]))
+
+    return sortedDateEntries.map(([saleDate, daySales]) => {
       const transactionGroups = new Map<string, SaleRow[]>()
       daySales.forEach((sale) => {
         const key = sale.booking_group_id ? `group:${sale.booking_group_id}` : `sale:${sale.id}`
@@ -948,12 +1035,18 @@ export default function Sales() {
           type="text"
           placeholder="Search buyer, item, batch, or notes..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => {
+            setSearch(e.target.value)
+            setPage(1)
+          }}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         />
         <select
           value={fulfillmentFilter}
-          onChange={(e) => setFulfillmentFilter(e.target.value as 'all' | FulfillmentStatus)}
+          onChange={(e) => {
+            setFulfillmentFilter(e.target.value as 'all' | FulfillmentStatus)
+            setPage(1)
+          }}
           className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         >
           <option value="all">All</option>
@@ -963,6 +1056,68 @@ export default function Sales() {
             </option>
           ))}
         </select>
+
+        <select
+          value={sortBy}
+          onChange={(e) => {
+            setSortBy(e.target.value as SaleSortOption)
+            setPage(1)
+          }}
+          className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+        >
+          <option value="date_desc">Newest First</option>
+          <option value="batch_az">Batch Name (A-Z)</option>
+          <option value="buyer_az">Buyer Name (A-Z)</option>
+          <option value="item_az">Item Name (A-Z)</option>
+        </select>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            <label htmlFor="sales-start-date" className="text-xs font-medium text-gray-500 whitespace-nowrap">
+              Start Date
+            </label>
+            <input
+              id="sales-start-date"
+              type="date"
+              value={startDate}
+              onChange={(e) => {
+                setStartDate(e.target.value)
+                setPage(1)
+              }}
+              className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <label htmlFor="sales-end-date" className="text-xs font-medium text-gray-500 whitespace-nowrap">
+              End Date
+            </label>
+            <input
+              id="sales-end-date"
+              type="date"
+              value={endDate}
+              onChange={(e) => {
+                setEndDate(e.target.value)
+                setPage(1)
+              }}
+              className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
+            />
+          </div>
+
+          {(startDate || endDate) && (
+            <button
+              type="button"
+              onClick={() => {
+                setStartDate('')
+                setEndDate('')
+                setPage(1)
+              }}
+              className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none"
+            >
+              Clear dates
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Bulk action toolbar — appears when rows are selected */}
@@ -1378,6 +1533,35 @@ export default function Sales() {
               )
             })
           )}
+
+          {/* Server-Side Pagination Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+            <div className="text-gray-600">
+              Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+              <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> sales (Page{' '}
+              <span className="font-medium text-gray-900">{page}</span> of{' '}
+              <span className="font-medium text-gray-900">{totalPages}</span>)
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={!hasPrevPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous Page
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!hasNextPage || loading}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next Page
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {showBulkShippingModal && (

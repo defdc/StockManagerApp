@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { useDataInvalidation } from '../lib/dataSync'
 import { formatDate, formatIDR } from '../lib/format'
-import { smartSearchRank } from '../lib/search'
 import type { Booking, FulfillmentStatus, Sale } from '../types/database'
 import Modal from '../components/Modal'
 import { useToast } from '../lib/toast'
+
+const PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
+const BUYER_BOOKINGS_SELECT =
+  'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(item_name, batch_name)'
+const BUYER_SALES_SELECT =
+  'id, inventory_item_id, buyer_name, sale_price, net_profit, sale_date, fulfillment_status, inventory_items(item_name)'
 
 type BuyerBooking = Booking & { inventory_items: { item_name: string; batch_name: string | null } | null }
 type BuyerSale = Sale & { inventory_items: { item_name: string } | null }
@@ -66,7 +72,10 @@ export default function Buyers() {
   const { showToast } = useToast()
   const [bookings, setBookings] = useState<BuyerBooking[]>([])
   const [sales, setSales] = useState<BuyerSale[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [showOnlyActiveBookings, setShowOnlyActiveBookings] = useState(false)
   const [invoicedBuyers, setInvoicedBuyers] = useState<Set<string>>(new Set())
   const [selectedBuyer, setSelectedBuyer] = useState<BuyerSummary | null>(null)
@@ -74,40 +83,103 @@ export default function Buyers() {
   const [includeItemList, setIncludeItemList] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const loadSeqRef = useRef(0)
 
   useEffect(() => {
-    async function loadBuyers() {
-      setLoading(true)
-      setError(null)
-      try {
-        const [bookingsData, salesData] = await Promise.all([
-          fetchAllRows<BuyerBooking>((from, to) =>
-            supabase
-              .from('bookings')
-              .select('*, inventory_items(item_name, batch_name)')
-              .order('created_at', { ascending: false })
-              .range(from, to) as unknown as PromiseLike<{ data: BuyerBooking[] | null; error: { message: string } | null }>
-          ),
-          fetchAllRows<BuyerSale>((from, to) =>
-            supabase
-              .from('sales')
-              .select('*, inventory_items(item_name)')
-              .order('sale_date', { ascending: false })
-              .range(from, to) as unknown as PromiseLike<{ data: BuyerSale[] | null; error: { message: string } | null }>
-          ),
-        ])
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
 
-        setBookings(bookingsData ?? [])
-        setSales(salesData ?? [])
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load buyers.')
-      } finally {
-        setLoading(false)
+  const loadBuyers = useCallback(async () => {
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+    setLoading(true)
+    setError(null)
+    try {
+      const from = (page - 1) * PAGE_SIZE
+      const to = from + PAGE_SIZE - 1
+
+      let bookingsQuery = supabase
+        .from('bookings')
+        .select(BUYER_BOOKINGS_SELECT, { count: 'exact' })
+
+      let salesQuery = supabase
+        .from('sales')
+        .select(BUYER_SALES_SELECT, { count: 'exact' })
+
+      if (showOnlyActiveBookings) {
+        bookingsQuery = bookingsQuery.eq('status', 'active')
       }
-    }
 
-    loadBuyers()
-  }, [])
+      const trimmedSearch = debouncedSearch.trim()
+      if (trimmedSearch) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        for (const word of words) {
+          const safeWord = word.replace(/[,()]/g, '')
+          if (!safeWord) continue
+          bookingsQuery = bookingsQuery.or(`buyer_name.ilike.%${safeWord}%`)
+          salesQuery = salesQuery.or(`buyer_name.ilike.%${safeWord}%`)
+        }
+      }
+
+      const [bookingsRes, salesRes] = await Promise.all([
+        bookingsQuery.order('created_at', { ascending: false }).range(from, to),
+        salesQuery.order('sale_date', { ascending: false }).range(from, to),
+      ])
+
+      if (!isLatest()) return
+      const firstErr = bookingsRes.error || salesRes.error
+      if (firstErr) throw new Error(firstErr.message)
+
+      const loadedBookings = (bookingsRes.data as unknown as BuyerBooking[]) ?? []
+      let loadedSales = (salesRes.data as unknown as BuyerSale[]) ?? []
+
+      if (showOnlyActiveBookings) {
+        const activeBuyerNames = Array.from(
+          new Set(loadedBookings.map((b) => b.buyer_name?.trim()).filter((n): n is string => Boolean(n)))
+        )
+        if (activeBuyerNames.length > 0) {
+          const { data: relatedSales } = await supabase
+            .from('sales')
+            .select(BUYER_SALES_SELECT)
+            .in('buyer_name', activeBuyerNames)
+            .order('sale_date', { ascending: false })
+            .range(0, PAGE_SIZE - 1)
+          if (!isLatest()) return
+          loadedSales = (relatedSales as unknown as BuyerSale[]) ?? []
+        } else {
+          loadedSales = []
+        }
+      }
+
+      setBookings(loadedBookings)
+      setSales(loadedSales)
+      setTotalCount(
+        showOnlyActiveBookings
+          ? (bookingsRes.count ?? loadedBookings.length)
+          : Math.max(bookingsRes.count ?? 0, salesRes.count ?? 0)
+      )
+    } catch (err) {
+      if (!isLatest()) return
+      setError(err instanceof Error ? err.message : 'Failed to load buyers.')
+    } finally {
+      if (isLatest()) setLoading(false)
+    }
+  }, [page, debouncedSearch, showOnlyActiveBookings])
+
+  useEffect(() => {
+    void loadBuyers()
+  }, [loadBuyers])
+
+  useDataInvalidation(
+    ['bookings', 'sales', 'inventory_items'],
+    () => {
+      void loadBuyers()
+    },
+    { remoteOnly: true }
+  )
 
   const buyerSummaries = useMemo(() => {
     const summaries = new Map<string, BuyerSummary>()
@@ -155,14 +227,14 @@ export default function Buyers() {
 
     return [...summaries.values()]
       .filter((summary) => !showOnlyActiveBookings || summary.booked > 0)
-      .map((summary) => ({
-        summary,
-        rank: smartSearchRank(search, [{ value: summary.buyer }]),
-      }))
-      .filter((entry) => entry.rank !== null)
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.summary.revenue - a.summary.revenue)
-      .map((entry) => entry.summary)
-  }, [bookings, sales, search, showOnlyActiveBookings])
+      .sort((a, b) => b.revenue - a.revenue || b.bookedRevenue - a.bookedRevenue || a.buyer.localeCompare(b.buyer))
+  }, [bookings, sales, showOnlyActiveBookings])
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages
+  const pageFrom = buyerSummaries.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageTo = buyerSummaries.length === 0 ? 0 : Math.min(totalCount, (page - 1) * PAGE_SIZE + buyerSummaries.length)
 
   function toggleInvoiced(buyerId: string) {
     setInvoicedBuyers((prev) => {
@@ -204,14 +276,20 @@ export default function Buyers() {
           type="text"
           placeholder="Search buyer..."
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => {
+            setSearch(event.target.value)
+            setPage(1)
+          }}
           className="w-full max-w-xs rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
         />
         <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={showOnlyActiveBookings}
-            onChange={(e) => setShowOnlyActiveBookings(e.target.checked)}
+            onChange={(e) => {
+              setShowOnlyActiveBookings(e.target.checked)
+              setPage(1)
+            }}
             className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
           />
           Show only with active bookings
@@ -295,6 +373,37 @@ export default function Buyers() {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Server-Side Pagination Controls */}
+      {!loading && buyerSummaries.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+          <div className="text-gray-600">
+            Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+            <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+            <span className="font-medium text-gray-900">{totalCount}</span> records (Page{' '}
+            <span className="font-medium text-gray-900">{page}</span> of{' '}
+            <span className="font-medium text-gray-900">{totalPages}</span>)
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={!hasPrevPage || loading}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Previous Page
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={!hasNextPage || loading}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next Page
+            </button>
+          </div>
         </div>
       )}
 

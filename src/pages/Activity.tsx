@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
 import { formatDateTime } from '../lib/format'
-import { smartSearchRank } from '../lib/search'
 import type { ActivityLog, Profile } from '../types/database'
+
+const PAGE_SIZE = 200
+const SEARCH_DEBOUNCE_MS = 300
 
 function getUserDisplay(
   userId: string | null,
@@ -125,27 +127,81 @@ export default function Activity() {
   const { user } = useAuth()
   const [logs, setLogs] = useState<ActivityLog[]>([])
   const [profiles, setProfiles] = useState<Profile[]>([])
+  const [totalCount, setTotalCount] = useState<number>(0)
+  const [page, setPage] = useState<number>(1)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [startDate, setStartDate] = useState<string>('')
   const [endDate, setEndDate] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search])
+
   const loadActivity = useCallback(async () => {
     setLoading(true)
     setError(null)
-    const [logsRes, profilesRes] = await Promise.all([
-      supabase.from('activity_logs').select('*').order('created_at', { ascending: false }).limit(500),
-      supabase.from('profiles').select('*'),
-    ])
+    const from = (page - 1) * PAGE_SIZE
+    const to = from + PAGE_SIZE - 1
 
-    if (logsRes.error) setError(logsRes.error.message)
-    else {
-      setLogs((logsRes.data as ActivityLog[]) ?? [])
-      setProfiles((profilesRes.data as Profile[]) ?? [])
+    const profilesRes = await supabase.from('profiles').select('id, full_name, email, role, created_at')
+    const loadedProfiles = (profilesRes.data as Profile[]) ?? []
+    setProfiles(loadedProfiles)
+
+    let logsQuery = supabase
+      .from('activity_logs')
+      .select('id, action, entity, description, entity_id, details, created_by, created_at', { count: 'exact' })
+
+    if (startDate) {
+      logsQuery = logsQuery.gte('created_at', `${startDate}T00:00:00`)
+    }
+    if (endDate) {
+      logsQuery = logsQuery.lte('created_at', `${endDate}T23:59:59.999`)
+    }
+
+    const trimmedSearch = debouncedSearch.trim()
+    if (trimmedSearch) {
+      const words = trimmedSearch.split(/\s+/).filter(Boolean)
+      for (const word of words) {
+        const safeWord = word.replace(/[,()]/g, '')
+        if (!safeWord) continue
+        const lowerWord = safeWord.toLowerCase()
+        const matchingProfileIds = loadedProfiles
+          .filter(
+            (p) =>
+              p.email?.toLowerCase().includes(lowerWord) ||
+              p.full_name?.toLowerCase().includes(lowerWord)
+          )
+          .map((p) => p.id)
+
+        if (matchingProfileIds.length > 0) {
+          logsQuery = logsQuery.or(
+            `action.ilike.%${safeWord}%,description.ilike.%${safeWord}%,entity.ilike.%${safeWord}%,created_by.in.(${matchingProfileIds.join(',')})`
+          )
+        } else {
+          logsQuery = logsQuery.or(
+            `action.ilike.%${safeWord}%,description.ilike.%${safeWord}%,entity.ilike.%${safeWord}%`
+          )
+        }
+      }
+    }
+
+    const logsRes = await logsQuery.order('created_at', { ascending: false }).range(from, to)
+
+    if (logsRes.error) {
+      setError(logsRes.error.message)
+    } else {
+      const nextLogs = (logsRes.data as ActivityLog[]) ?? []
+      setLogs(nextLogs)
+      setTotalCount(logsRes.count ?? nextLogs.length)
     }
     setLoading(false)
-  }, [])
+  }, [page, startDate, endDate, debouncedSearch])
 
   useEffect(() => {
     void loadActivity()
@@ -153,52 +209,25 @@ export default function Activity() {
 
   const profileById = useMemo(() => new Map(profiles.map((profile) => [profile.id, profile])), [profiles])
 
-  const startTimestamp = useMemo(() => {
-    if (!startDate) return null
-    const date = new Date(`${startDate}T00:00:00`)
-    return Number.isNaN(date.getTime()) ? null : date.getTime()
-  }, [startDate])
-
-  const endTimestamp = useMemo(() => {
-    if (!endDate) return null
-    const date = new Date(`${endDate}T23:59:59.999`)
-    return Number.isNaN(date.getTime()) ? null : date.getTime()
-  }, [endDate])
-
   const filteredLogs = useMemo(() => {
-    return logs
-      .filter((log) => {
-        if (!startTimestamp && !endTimestamp) return true
-        const logTime = new Date(log.created_at).getTime()
-        if (Number.isNaN(logTime)) return true
-        if (startTimestamp !== null && logTime < startTimestamp) return false
-        if (endTimestamp !== null && logTime > endTimestamp) return false
-        return true
-      })
-      .map((log) => {
-        const profile = profileById.get(log.created_by ?? '')
-        const userDisplay = getUserDisplay(log.created_by, profile, user?.email, user?.id)
-        const description = getActivityDescription(log)
+    return logs.map((log) => {
+      const profile = profileById.get(log.created_by ?? '')
+      const userDisplay = getUserDisplay(log.created_by, profile, user?.email, user?.id)
+      const description = getActivityDescription(log)
 
-        return {
-          log,
-          userDisplay,
-          description,
-          rank: smartSearchRank(search, [
-            { value: log.action },
-            { value: description },
-            { value: log.entity },
-            { value: userDisplay },
-            { value: profile?.email },
-            { value: profile?.full_name },
-            { value: log.created_by },
-            { value: JSON.stringify(log.details), kind: 'notes' },
-          ]),
-        }
-      })
-      .filter((entry) => entry.rank !== null)
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || b.log.created_at.localeCompare(a.log.created_at))
-  }, [logs, profileById, search, user?.email, user?.id, startTimestamp, endTimestamp])
+      return {
+        log,
+        userDisplay,
+        description,
+      }
+    })
+  }, [logs, profileById, user?.email, user?.id])
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const hasPrevPage = page > 1
+  const hasNextPage = page < totalPages
+  const pageFrom = totalCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageTo = totalCount === 0 ? 0 : Math.min(totalCount, page * PAGE_SIZE)
 
   return (
     <div className="space-y-4">
@@ -210,7 +239,10 @@ export default function Activity() {
             type="text"
             placeholder="Search action, description, user, or details..."
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              setSearch(event.target.value)
+              setPage(1)
+            }}
             className="w-full sm:w-72 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
           />
 
@@ -223,7 +255,10 @@ export default function Activity() {
                 id="activity-start-date"
                 type="date"
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => {
+                  setStartDate(e.target.value)
+                  setPage(1)
+                }}
                 className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
               />
             </div>
@@ -236,7 +271,10 @@ export default function Activity() {
                 id="activity-end-date"
                 type="date"
                 value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
+                onChange={(e) => {
+                  setEndDate(e.target.value)
+                  setPage(1)
+                }}
                 className="rounded-md border border-gray-300 px-2.5 py-1.5 text-sm text-gray-700 focus:border-gray-500 focus:outline-none"
               />
             </div>
@@ -247,6 +285,7 @@ export default function Activity() {
                 onClick={() => {
                   setStartDate('')
                   setEndDate('')
+                  setPage(1)
                 }}
                 className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-gray-900 focus:outline-none"
               >
@@ -290,6 +329,37 @@ export default function Activity() {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Server-Side Pagination Controls */}
+      {!loading && totalCount > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
+          <div className="text-gray-600">
+            Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
+            <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
+            <span className="font-medium text-gray-900">{totalCount}</span> activity logs (Page{' '}
+            <span className="font-medium text-gray-900">{page}</span> of{' '}
+            <span className="font-medium text-gray-900">{totalPages}</span>)
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={!hasPrevPage || loading}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Previous Page
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={!hasNextPage || loading}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next Page
+            </button>
+          </div>
         </div>
       )}
     </div>
