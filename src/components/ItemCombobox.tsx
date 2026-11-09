@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { formatIDR, formatStatus } from '../lib/format'
-import { searchTokens, smartSearchRank } from '../lib/search'
+import { smartSearchRank } from '../lib/search'
 import { supabase } from '../lib/supabase'
 import type { InventoryItem } from '../types/database'
 import { getLiveModalPrice } from '../lib/inventoryModal'
@@ -15,8 +15,7 @@ interface ItemComboboxProps {
   excludeIds?: string[]
 }
 
-const SEARCH_FIELDS = ['item_name', 'category', 'batch_name', 'notes'] as const
-const SUGGESTION_LIMIT = 20
+const SUGGESTION_LIMIT = 50
 const DEFAULT_ALLOWED_STATUSES = ['ready']
 const ITEM_COMBOBOX_COLUMNS = 'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, created_at'
 
@@ -25,35 +24,57 @@ function itemLabel(item: InventoryItem): string {
 }
 
 async function findItems(search: string, statuses: string[], excludeIds: string[] = []): Promise<InventoryItem[]> {
-  const fields = search ? SEARCH_FIELDS : SEARCH_FIELDS.slice(0, 1)
-  const tokens = searchTokens(search)
-  const queryPairs = fields.flatMap((field) =>
-    tokens.length > 0 ? tokens.map((token) => ({ field, token })) : [{ field, token: '' }]
-  )
-  const results = await Promise.all(
-    queryPairs.map(async ({ field, token }) => {
-      let query = supabase
-        .from('inventory_items')
-        .select(ITEM_COMBOBOX_COLUMNS)
-        .in('status', statuses)
-        .order('item_name')
-        .limit(SUGGESTION_LIMIT)
+  const searchWords = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
 
-      if (token) query = query.ilike(field, `%${token}%`)
-      if (excludeIds.length > 0) {
-        query = query.not('id', 'in', `(${excludeIds.join(',')})`)
-      }
+  let nameQuery = supabase
+    .from('inventory_items')
+    .select(ITEM_COMBOBOX_COLUMNS)
+    .in('status', statuses)
 
-      const { data, error } = await query
-      if (error) throw new Error(error.message)
-      return (data as unknown as InventoryItem[]) ?? []
-    })
-  )
+  searchWords.forEach((word) => {
+    nameQuery = nameQuery.ilike('item_name', `%${word}%`)
+  })
+
+  if (excludeIds.length > 0) {
+    nameQuery = nameQuery.not('id', 'in', `(${excludeIds.join(',')})`)
+  }
+
+  const queries = [
+    nameQuery.order('item_name', { ascending: true }).limit(SUGGESTION_LIMIT),
+  ]
+
+  if (searchWords.length > 0) {
+    let extraQuery = supabase
+      .from('inventory_items')
+      .select(ITEM_COMBOBOX_COLUMNS)
+      .in('status', statuses)
+
+    for (const word of searchWords) {
+      const safeWord = word.replace(/[,()]/g, '')
+      if (!safeWord) continue
+      extraQuery = extraQuery.or(
+        `item_name.ilike.%${safeWord}%,category.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%`
+      )
+    }
+
+    if (excludeIds.length > 0) {
+      extraQuery = extraQuery.not('id', 'in', `(${excludeIds.join(',')})`)
+    }
+
+    queries.push(extraQuery.order('item_name', { ascending: true }).limit(SUGGESTION_LIMIT))
+  }
+
+  const responses = await Promise.all(queries)
+  for (const res of responses) {
+    if (res.error) throw new Error(res.error.message)
+  }
 
   const uniqueItems = new Map<string, InventoryItem>()
-  for (const item of results.flat()) {
-    if (!excludeIds.includes(item.id)) {
-      uniqueItems.set(item.id, item)
+  for (const res of responses) {
+    for (const item of ((res.data as unknown as InventoryItem[]) ?? [])) {
+      if (!excludeIds.includes(item.id)) {
+        uniqueItems.set(item.id, item)
+      }
     }
   }
 
@@ -63,6 +84,7 @@ async function findItems(search: string, statuses: string[], excludeIds: string[
       rank: smartSearchRank(search, [
         { value: item.item_name },
         { value: item.category },
+        { value: item.batch_name },
         { value: item.notes, kind: 'notes' },
       ]),
     }))
@@ -151,7 +173,7 @@ export default function ItemCombobox({
       } finally {
         if (!cancelled) setLoading(false)
       }
-    }, 250)
+    }, 300)
 
     return () => {
       cancelled = true

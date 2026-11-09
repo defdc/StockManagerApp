@@ -58,37 +58,51 @@ export default function CategoryAutocomplete({
 
   useEffect(() => {
     // If existingCategories is passed by parent, skip fetching from Supabase
-    if (existingCategories || !open || categories.length > 0) return
+    if (existingCategories || !open) return
 
     let cancelled = false
     setLoading(true)
 
-    async function loadCategories() {
-      const { data } = await supabase
-        .from('inventory_items')
-        .select('category')
-        .not('category', 'is', null)
-        .order('category')
-        .limit(250)
+    const timer = window.setTimeout(async () => {
+      try {
+        let query = supabase
+          .from('inventory_items')
+          .select('category')
+          .not('category', 'is', null)
 
-      if (cancelled) return
+        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        searchWords.forEach((word) => {
+          query = query.ilike('category', `%${word}%`)
+        })
 
-      // Deduplicate: trim + case-insensitive comparison, preserve first-seen casing
-      const seen = new Map<string, string>() // normalized key → original display value
-      for (const row of data ?? []) {
-        const raw = (row.category as string).trim()
-        if (!raw) continue
-        const key = raw.toLowerCase()
-        if (!seen.has(key)) seen.set(key, raw)
+        const { data } = await query
+          .order('category')
+          .limit(50)
+
+        if (cancelled) return
+
+        // Deduplicate: trim + case-insensitive comparison, preserve first-seen casing
+        const seen = new Map<string, string>() // normalized key → original display value
+        for (const row of data ?? []) {
+          const raw = (row.category as string).trim()
+          if (!raw) continue
+          const key = raw.toLowerCase()
+          if (!seen.has(key)) seen.set(key, raw)
+        }
+
+        setCategories([...seen.values()].sort((a, b) => a.localeCompare(b)))
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
       }
+    }, 300)
 
-      setCategories([...seen.values()].sort((a, b) => a.localeCompare(b)))
-      setLoading(false)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
     }
-
-    loadCategories()
-    return () => { cancelled = true }
-  }, [existingCategories, open, categories.length])
+  }, [existingCategories, open, value])
 
   const combinedCategories = useMemo(() => {
     const seen = new Map<string, string>()

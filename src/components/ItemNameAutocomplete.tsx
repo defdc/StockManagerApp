@@ -70,44 +70,56 @@ export default function ItemNameAutocomplete({
 
   useEffect(() => {
     // If existingRecords is passed by parent, skip fetching from Supabase
-    if (existingRecords || !open || records.length > 0) return
+    if (existingRecords || !open) return
 
     let cancelled = false
     setLoading(true)
 
-    async function loadItemNames() {
-      const { data } = await supabase
-        .from('inventory_items')
-        .select('item_name, category, notes')
-        .not('item_name', 'is', null)
-        .order('created_at', { ascending: false })
-        .limit(250)
+    const timer = window.setTimeout(async () => {
+      try {
+        let query = supabase
+          .from('inventory_items')
+          .select('item_name, category, notes')
+          .not('item_name', 'is', null)
 
-      if (cancelled) return
+        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        searchWords.forEach((word) => {
+          query = query.ilike('item_name', `%${word}%`)
+        })
 
-      const seen = new Map<string, ItemSuggestionRecord>()
-      for (const row of data ?? []) {
-        const raw = (row.item_name as string || '').trim()
-        if (!raw) continue
-        const key = raw.toLowerCase()
-        if (!seen.has(key)) {
-          seen.set(key, {
-            item_name: raw,
-            category: row.category ? String(row.category).trim() : null,
-            notes: row.notes ? String(row.notes).trim() : null,
-          })
+        const { data } = await query
+          .order('item_name', { ascending: true })
+          .limit(50)
+
+        if (cancelled) return
+
+        const seen = new Map<string, ItemSuggestionRecord>()
+        for (const row of data ?? []) {
+          const raw = ((row.item_name as string) || '').trim()
+          if (!raw) continue
+          const key = raw.toLowerCase()
+          if (!seen.has(key)) {
+            seen.set(key, {
+              item_name: raw,
+              category: row.category ? String(row.category).trim() : null,
+              notes: row.notes ? String(row.notes).trim() : null,
+            })
+          }
+        }
+
+        setRecords([...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name)))
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
         }
       }
+    }, 300)
 
-      setRecords([...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name)))
-      setLoading(false)
-    }
-
-    loadItemNames()
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [existingRecords, open, records.length])
+  }, [existingRecords, open, value])
 
   const combinedRecords = useMemo(() => {
     const seen = new Map<string, ItemSuggestionRecord>()
@@ -152,7 +164,7 @@ export default function ItemNameAutocomplete({
 
   const filteredRecords = useMemo(() => {
     const trimmed = value.trim()
-    if (!trimmed) return combinedRecords.slice(0, 10)
+    if (!trimmed) return combinedRecords.slice(0, 50)
 
     const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
     return combinedRecords
@@ -160,7 +172,7 @@ export default function ItemNameAutocomplete({
         const normalizedItemName = r.item_name.toLowerCase()
         return searchWords.every((word) => normalizedItemName.includes(word))
       })
-      .slice(0, 10)
+      .slice(0, 50)
   }, [combinedRecords, value])
 
   const isExisting = combinedRecords.some((r) => r.item_name.toLowerCase() === value.trim().toLowerCase())

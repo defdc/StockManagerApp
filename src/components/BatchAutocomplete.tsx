@@ -77,52 +77,64 @@ export default function BatchAutocomplete({
 
   useEffect(() => {
     // If existingBatches is passed by parent, skip fetching from Supabase
-    if (existingBatches || !open || suggestions.length > 0) return
+    if (existingBatches || !open) return
 
     let cancelled = false
     setLoading(true)
 
-    async function loadBatches() {
-      const { data } = await supabase
-        .from('inventory_items')
-        .select('batch_name, batch_modal_total, created_at')
-        .not('batch_name', 'is', null)
-        .order('created_at', { ascending: false })
-        .limit(250)
+    const timer = window.setTimeout(async () => {
+      try {
+        let query = supabase
+          .from('inventory_items')
+          .select('batch_name, batch_modal_total, created_at')
+          .not('batch_name', 'is', null)
 
-      if (cancelled) return
+        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        searchWords.forEach((word) => {
+          query = query.ilike('batch_name', `%${word}%`)
+        })
 
-      const batchMap = new Map<string, BatchSuggestion>()
-      for (const row of data ?? []) {
-        const name = (row.batch_name as string).trim()
-        if (!name) continue
-        const modalTotal = row.batch_modal_total as number | null
-        const existing = batchMap.get(name)
-        if (existing) {
-          existing.itemCount += 1
-          if (row.created_at > existing.latestAt) existing.latestAt = row.created_at as string
-          if (modalTotal && !existing.modalTotal) existing.modalTotal = modalTotal
-        } else {
-          batchMap.set(name, {
-            name,
-            modalTotal,
-            itemCount: 1,
-            latestAt: row.created_at as string,
-          })
+        const { data } = await query
+          .order('created_at', { ascending: false })
+          .limit(250)
+
+        if (cancelled) return
+
+        const batchMap = new Map<string, BatchSuggestion>()
+        for (const row of data ?? []) {
+          const name = (row.batch_name as string).trim()
+          if (!name) continue
+          const modalTotal = row.batch_modal_total as number | null
+          const existing = batchMap.get(name)
+          if (existing) {
+            existing.itemCount += 1
+            if (row.created_at > existing.latestAt) existing.latestAt = row.created_at as string
+            if (modalTotal && !existing.modalTotal) existing.modalTotal = modalTotal
+          } else {
+            batchMap.set(name, {
+              name,
+              modalTotal,
+              itemCount: 1,
+              latestAt: row.created_at as string,
+            })
+          }
+        }
+
+        // Sort by most recently used first
+        const sorted = [...batchMap.values()].sort((a, b) => b.latestAt.localeCompare(a.latestAt))
+        setSuggestions(sorted)
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
         }
       }
+    }, 300)
 
-      // Sort by most recently used first
-      const sorted = [...batchMap.values()].sort((a, b) => b.latestAt.localeCompare(a.latestAt))
-      setSuggestions(sorted)
-      setLoading(false)
-    }
-
-    loadBatches()
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [existingBatches, open, suggestions.length])
+  }, [existingBatches, open, value])
 
   const activeSuggestions = existingBatches ?? suggestions
 
