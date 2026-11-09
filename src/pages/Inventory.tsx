@@ -133,6 +133,9 @@ export default function Inventory() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([])
+  const [knownItemsById, setKnownItemsById] = useState<Map<string, InventoryItem>>(() => new Map())
+  const selectedItemIdsRef = useRef(selectedItemIds)
+  selectedItemIdsRef.current = selectedItemIds
   const [showBulkBookingModal, setShowBulkBookingModal] = useState(false)
   const [bulkBookingForm, setBulkBookingForm] = useState(emptyBulkBookingForm)
   const [bulkBookingSaving, setBulkBookingSaving] = useState(false)
@@ -206,8 +209,18 @@ export default function Inventory() {
       setItems(uniqueItems)
       setTotalCount(count ?? uniqueItems.length)
       hasLoadedRef.current = true
-      // Drop selections that no longer exist on the current page.
-      setSelectedItemIds((current) => current.filter((id) => uniqueById.has(id)))
+      // Keep previously loaded metadata for persistent selections across searches/pages.
+      setKnownItemsById((prev) => {
+        const next = new Map<string, InventoryItem>()
+        for (const id of selectedItemIdsRef.current) {
+          const existing = prev.get(id)
+          if (existing) next.set(id, existing)
+        }
+        for (const item of uniqueItems) {
+          next.set(item.id, item)
+        }
+        return next
+      })
       // Preserve detail drawer item without closing it
       setDrawerItem((current) => (current ? uniqueById.get(current.id) ?? current : null))
     } catch (err) {
@@ -300,9 +313,22 @@ export default function Inventory() {
   // O(1) membership checks — item names are NOT unique (e.g. 77 rows named "Loose").
   const selectedIdSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds])
 
+  const mergedItemsById = useMemo(() => {
+    const map = new Map(knownItemsById)
+    for (const item of items) {
+      map.set(item.id, item)
+    }
+    return map
+  }, [knownItemsById, items])
+
+  const allKnownItems = useMemo(() => [...mergedItemsById.values()], [mergedItemsById])
+
   const selectedItems = useMemo(
-    () => items.filter((item) => selectedIdSet.has(item.id)),
-    [items, selectedIdSet]
+    () =>
+      selectedItemIds
+        .map((id) => mergedItemsById.get(id))
+        .filter((item): item is InventoryItem => Boolean(item)),
+    [selectedItemIds, mergedItemsById]
   )
 
   const filteredIds = useMemo(() => filtered.map((item) => item.id), [filtered])
@@ -605,7 +631,7 @@ export default function Inventory() {
       buyer_name: bulkBookingForm.buyer_name.trim(),
       deal_price: index === itemCount - 1 ? base + remainder : base,
       // Snapshot modal_price at booking-creation time (Step 1)
-      modal_price: getLiveModalPrice(item, items),
+      modal_price: getLiveModalPrice(item, allKnownItems),
       dp_amount: 0,
       remaining_amount: 0,
       deadline: bulkBookingForm.deadline || null,
@@ -730,6 +756,7 @@ export default function Inventory() {
         userId: user?.id,
         details: { item_name: item.item_name, batch_name: item.batch_name },
       })
+      setSelectedItemIds((current) => current.filter((id) => id !== item.id))
       setDeletingItem(null)
       showToast(`Item "${item.item_name}" deleted.`)
       loadItems()
