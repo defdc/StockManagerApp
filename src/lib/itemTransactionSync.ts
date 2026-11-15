@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { runChunked } from './chunk'
 import type { InventoryItem } from '../types/database'
 
 export interface RelatedSaleRecord {
@@ -193,15 +194,17 @@ export async function revertInventoryItemsSaleState(
   const now = new Date().toISOString()
 
   if (supportsFlatInventorySaleFields === true) {
-    const { error } = await supabase
-      .from('inventory_items')
-      .update({
-        status: targetStatus,
-        sold_price: null,
-        buyer_name: null,
-        updated_at: now,
-      } as Record<string, unknown>)
-      .in('id', itemIds)
+    const { error } = await runChunked(itemIds, (chunk) =>
+      supabase
+        .from('inventory_items')
+        .update({
+          status: targetStatus,
+          sold_price: null,
+          buyer_name: null,
+          updated_at: now,
+        } as Record<string, unknown>)
+        .in('id', chunk)
+    )
 
     if (!error) return { error: null }
     if (isMissingColumnError(error.message)) {
@@ -211,13 +214,15 @@ export async function revertInventoryItemsSaleState(
     }
   }
 
-  const { error } = await supabase
-    .from('inventory_items')
-    .update({
-      status: targetStatus,
-      updated_at: now,
-    })
-    .in('id', itemIds)
+  const { error } = await runChunked(itemIds, (chunk) =>
+    supabase
+      .from('inventory_items')
+      .update({
+        status: targetStatus,
+        updated_at: now,
+      })
+      .in('id', chunk)
+  )
 
   return { error }
 }

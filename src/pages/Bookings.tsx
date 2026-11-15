@@ -5,17 +5,30 @@ import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
+import { chunkArray, runChunked } from '../lib/chunk'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { FULFILLMENT_STATUSES, FULFILLMENT_LABELS } from '../lib/constants'
 import { updateInventoryItemSoldState } from '../lib/itemTransactionSync'
+import {
+  fetchExactBatchItemCounts,
+  resolveIndividualItemModal,
+  shouldFetchBatchCountForItem,
+} from '../lib/inventoryModal'
 import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 
-type BookingRow = Booking & { inventory_items: { item_name: string; modal_price: number; batch_name: string | null } | null }
+type BookingRow = Booking & {
+  inventory_items: {
+    item_name: string
+    modal_price: number
+    batch_name: string | null
+    batch_modal_total: number | null
+  } | null
+}
 type BookingItemSelection = { inventory_item_id: string; deal_price: string }
 export type BookingSortOption = 'date_desc' | 'batch_az' | 'buyer_az' | 'item_az'
 
@@ -48,7 +61,7 @@ const BOOKING_STATUSES: BookingStatus[] = ['active', 'converted_to_sale', 'cance
 const PAGE_SIZE = 200
 const SEARCH_DEBOUNCE_MS = 300
 const BOOKINGS_SELECT_COLUMNS =
-  'id, inventory_item_id, customer_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, modal_price, dp_amount, remaining_amount, deadline, status, notes, created_at, inventory_items(item_name, modal_price, batch_name)'
+  'id, inventory_item_id, customer_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, modal_price, dp_amount, remaining_amount, deadline, status, notes, created_at, inventory_items(item_name, modal_price, batch_name, batch_modal_total)'
 
 const BundlePriceInput = FormattedPriceInput
 
@@ -94,6 +107,7 @@ export default function Bookings() {
   const { user, canWrite } = useAuth()
   const { showToast } = useToast()
   const [bookings, setBookings] = useState<BookingRow[]>([])
+  const [batchItemCounts, setBatchItemCounts] = useState<Map<string, number>>(() => new Map())
   const [totalCount, setTotalCount] = useState<number>(0)
   const [page, setPage] = useState<number>(1)
   const [loading, setLoading] = useState(true)
@@ -127,6 +141,9 @@ export default function Bookings() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [selectedBookingIds, setSelectedBookingIds] = useState<string[]>([])
+  const [knownBookingsById, setKnownBookingsById] = useState<Map<string, BookingRow>>(() => new Map())
+  const selectedBookingIdsRef = useRef(selectedBookingIds)
+  selectedBookingIdsRef.current = selectedBookingIds
   const [showBulkSaleModal, setShowBulkSaleModal] = useState(false)
   const [bulkSaleForm, setBulkSaleForm] = useState(emptyBulkSaleForm)
   const [bulkSaleSaving, setBulkSaleSaving] = useState(false)
@@ -213,16 +230,21 @@ export default function Bookings() {
         new Set(nextBookings.map((b) => b.booking_group_id).filter((id): id is string => Boolean(id)))
       )
       if (groupIds.length > 0) {
-        let siblingQuery = supabase
-          .from('bookings')
-          .select(BOOKINGS_SELECT_COLUMNS)
-          .in('booking_group_id', groupIds)
-        if (!showConverted && statusFilter !== 'converted_to_sale') {
-          siblingQuery = siblingQuery.neq('status', 'converted_to_sale')
-        }
-        const { data: siblingData } = await siblingQuery
-          .order('created_at', { ascending: false })
-          .order('id', { ascending: false })
+        const siblingResults = await Promise.all(
+          chunkArray(groupIds).map((chunk) => {
+            let siblingQuery = supabase
+              .from('bookings')
+              .select(BOOKINGS_SELECT_COLUMNS)
+              .in('booking_group_id', chunk)
+            if (!showConverted && statusFilter !== 'converted_to_sale') {
+              siblingQuery = siblingQuery.neq('status', 'converted_to_sale')
+            }
+            return siblingQuery
+              .order('created_at', { ascending: false })
+              .order('id', { ascending: false })
+          })
+        )
+        const siblingData = siblingResults.flatMap((r) => r.data ?? [])
         if (!isLatest()) return
         if (siblingData && siblingData.length > 0) {
           const mergedMap = new Map<string, BookingRow>()
@@ -234,12 +256,40 @@ export default function Bookings() {
         }
       }
 
+      const batchNamesNeedingCount = Array.from(
+        new Set(
+          nextBookings
+            .map((b) => b.inventory_items)
+            .filter((item): item is NonNullable<BookingRow['inventory_items']> =>
+              Boolean(item && shouldFetchBatchCountForItem(item))
+            )
+            .map((item) => item.batch_name)
+            .filter((name): name is string => Boolean(name && name.trim()))
+        )
+      )
+
+      const countsMap =
+        batchNamesNeedingCount.length > 0
+          ? await fetchExactBatchItemCounts(batchNamesNeedingCount)
+          : new Map<string, number>()
+
+      if (!isLatest()) return
+
+      setBatchItemCounts(countsMap)
       setBookings(nextBookings)
       setTotalCount(count ?? nextBookings.length)
       hasLoadedRef.current = true
-      // Preserve checkbox selection: only keep IDs that still exist in the current page
-      const idSet = new Set(nextBookings.map((b) => b.id))
-      setSelectedBookingIds((current) => current.filter((id) => idSet.has(id)))
+      // Selections persist across searches/pages: never filter selectedBookingIds here.
+      // Instead, merge fetched rows into the metadata cache (keeping rows that are still selected).
+      setKnownBookingsById((prev) => {
+        const next = new Map<string, BookingRow>()
+        for (const id of selectedBookingIdsRef.current) {
+          const existing = prev.get(id)
+          if (existing) next.set(id, existing)
+        }
+        for (const b of nextBookings) next.set(b.id, b)
+        return next
+      })
       // Preserve open convert modal target without closing or resetting
       setSingleConvertTarget((current) => (current ? nextBookings.find((b) => b.id === current.id) ?? current : null))
     } catch (err) {
@@ -263,6 +313,22 @@ export default function Bookings() {
       void loadBookings()
     },
     { remoteOnly: true }
+  )
+
+  const resolveBookingModalPrice = useCallback(
+    (b: BookingRow, countsOverride?: Map<string, number>) => {
+      const item = b.inventory_items
+      const batchName = item?.batch_name?.trim()
+      const countsMap = countsOverride ?? batchItemCounts
+      const batchItemCount = batchName ? countsMap.get(batchName) : undefined
+      return resolveIndividualItemModal({
+        itemModal: item?.modal_price,
+        batchModalTotal: item?.batch_modal_total,
+        batchItemCount,
+        fallbackModal: b.modal_price,
+      })
+    },
+    [batchItemCounts]
   )
 
   // Priority order and sorting for bookings on the current server-filtered page
@@ -348,12 +414,6 @@ export default function Bookings() {
     return sortedDates.map((dateKey) => [dateKey, map.get(dateKey) ?? []] as [string, BookingRow[]])
   }, [filtered])
 
-  const selectedBookingsTotal = useMemo(() => {
-    return bookings
-      .filter((b) => selectedBookingIds.includes(b.id))
-      .reduce((sum, b) => sum + b.deal_price, 0)
-  }, [bookings, selectedBookingIds])
-
   // Group bookings within a section by booking_group_id
   function groupBookingRows(rows: BookingRow[]) {
     const groups = new Map<string, BookingRow[]>()
@@ -399,9 +459,24 @@ export default function Bookings() {
     [bookings]
   )
 
+  // Cache-backed lookup: current page rows override cached rows from other pages/searches.
+  const mergedBookingsById = useMemo(() => {
+    const map = new Map(knownBookingsById)
+    for (const b of bookings) map.set(b.id, b)
+    return map
+  }, [knownBookingsById, bookings])
+
   const selectedBookings = useMemo(
-    () => bookings.filter((booking) => selectedBookingIds.includes(booking.id)),
-    [bookings, selectedBookingIds]
+    () =>
+      selectedBookingIds
+        .map((id) => mergedBookingsById.get(id))
+        .filter((b): b is BookingRow => Boolean(b)),
+    [mergedBookingsById, selectedBookingIds]
+  )
+
+  const selectedBookingsTotal = useMemo(
+    () => selectedBookings.reduce((sum, b) => sum + b.deal_price, 0),
+    [selectedBookings]
   )
 
   const allFilteredSelected =
@@ -674,19 +749,31 @@ export default function Bookings() {
       }
       // After successful booking update, sync to sales and inventory_items if a related sale exists
       if (editingItemId) {
+        const editedBooking = bookings.find((b) => b.id === editingId)
         const { data: saleRows, error: saleFetchError } = await supabase
           .from('sales')
           .select('id, modal_price, marketplace_fee, packing_cost')
           .eq('inventory_item_id', editingItemId)
         if (!saleFetchError && saleRows && saleRows.length > 0) {
           for (const saleRow of saleRows) {
-            const grossProfit = dealPrice - (saleRow.modal_price || 0)
+            const itemModalPrice = editedBooking
+              ? resolveIndividualItemModal({
+                  itemModal: editedBooking.inventory_items?.modal_price,
+                  batchModalTotal: editedBooking.inventory_items?.batch_modal_total,
+                  batchItemCount: editedBooking.inventory_items?.batch_name
+                    ? batchItemCounts.get(editedBooking.inventory_items.batch_name.trim())
+                    : undefined,
+                  fallbackModal: saleRow.modal_price,
+                })
+              : (saleRow.modal_price || 0)
+            const grossProfit = dealPrice - itemModalPrice
             const netProfit = grossProfit - (saleRow.marketplace_fee || 0) - (saleRow.packing_cost || 0)
             const { error: saleUpdateError } = await supabase
               .from('sales')
               .update({
                 buyer_name: buyerName,
                 sale_price: dealPrice,
+                modal_price: itemModalPrice,
                 gross_profit: grossProfit,
                 net_profit: netProfit,
                 notes: form.notes.trim() || null,
@@ -759,10 +846,13 @@ export default function Bookings() {
     const selectedItemIds = selectedItems.map((item) => item.inventory_item_id)
 
     // Fetch inventory item details (including batch info) to compute live modal_price snapshot
-    const { data: itemRows, error: fetchError } = await supabase
-      .from('inventory_items')
-      .select('id, item_name, batch_name, batch_modal_total, modal_price')
-      .in('id', selectedItemIds)
+    const { results: itemFetchResults, error: fetchError } = await runChunked(selectedItemIds, (chunk) =>
+      supabase
+        .from('inventory_items')
+        .select('id, item_name, batch_name, batch_modal_total, modal_price')
+        .in('id', chunk)
+    )
+    const itemRows = itemFetchResults.flatMap((r) => r.data ?? [])
     if (fetchError) {
       setSaving(false)
       setFormError(fetchError.message)
@@ -781,40 +871,75 @@ export default function Bookings() {
       seenIds.add(itemId)
     }
 
-    const batchNames = Array.from(
+    const fallbackBatchTotals = new Map<string, number>()
+    const batchesMissingTotal = Array.from(
       new Set(
         (itemRows ?? [])
-          .map((r) => r.batch_name?.trim())
-          .filter((name): name is string => Boolean(name))
+          .filter((r) => r.batch_name?.trim() && (r.modal_price ?? 0) <= 0 && (r.batch_modal_total ?? 0) <= 0)
+          .map((r) => r.batch_name!.trim())
+      )
+    )
+    if (batchesMissingTotal.length > 0) {
+      await Promise.all(
+        batchesMissingTotal.map(async (batchName) => {
+          const { data } = await supabase
+            .from('inventory_items')
+            .select('batch_modal_total')
+            .eq('batch_name', batchName)
+            .gt('batch_modal_total', 0)
+            .limit(1)
+          const total = data?.[0]?.batch_modal_total
+          if (typeof total === 'number' && total > 0) {
+            fallbackBatchTotals.set(batchName, total)
+          }
+        })
+      )
+    }
+
+    const batchNamesNeedingCount = Array.from(
+      new Set(
+        (itemRows ?? [])
+          .filter((r) => {
+            const batchName = r.batch_name?.trim()
+            const resolvedTotal = (r.batch_modal_total ?? 0) > 0
+              ? r.batch_modal_total
+              : batchName
+                ? fallbackBatchTotals.get(batchName)
+                : null
+            return shouldFetchBatchCountForItem({
+              batch_name: r.batch_name,
+              batch_modal_total: resolvedTotal,
+              modal_price: r.modal_price,
+            })
+          })
+          .map((r) => r.batch_name)
+          .filter((name): name is string => Boolean(name && name.trim()))
       )
     )
 
-    let allBatchItems: { batch_name: string | null; batch_modal_total: number | null }[] = []
-    if (batchNames.length > 0) {
-      const { data: bItems } = await supabase
-        .from('inventory_items')
-        .select('batch_name, batch_modal_total')
-        .in('batch_name', batchNames)
-      allBatchItems = bItems ?? []
-    }
+    const batchCounts =
+      batchNamesNeedingCount.length > 0
+        ? await fetchExactBatchItemCounts(batchNamesNeedingCount)
+        : new Map<string, number>()
 
     const modalByItemId = new Map<string, number>()
     for (const item of itemRows ?? []) {
       const batchName = item.batch_name?.trim()
-      if (batchName) {
-        const siblings = allBatchItems.filter((i) => i.batch_name?.trim() === batchName)
-        const batchTotal =
-          siblings.find((i) => (i.batch_modal_total ?? 0) > 0)?.batch_modal_total ??
-          item.batch_modal_total ??
-          0
-        const liveModal =
-          batchTotal > 0 && siblings.length > 0
-            ? Math.floor(batchTotal / siblings.length)
-            : item.modal_price ?? 0
-        modalByItemId.set(item.id, liveModal)
-      } else {
-        modalByItemId.set(item.id, item.modal_price ?? 0)
-      }
+      const batchModalTotal =
+        (item.batch_modal_total ?? 0) > 0
+          ? item.batch_modal_total
+          : batchName
+            ? fallbackBatchTotals.get(batchName)
+            : null
+      const batchItemCount = batchName ? batchCounts.get(batchName) : undefined
+      modalByItemId.set(
+        item.id,
+        resolveIndividualItemModal({
+          itemModal: item.modal_price,
+          batchModalTotal,
+          batchItemCount,
+        })
+      )
     }
 
     const bookingPayloads = selectedItems.map((item, index) => ({
@@ -840,10 +965,12 @@ export default function Bookings() {
     }
 
     const inventoryItemIds = selectedItems.map((item) => item.inventory_item_id)
-    const { error: itemError } = await supabase
-      .from('inventory_items')
-      .update({ status: 'booked', updated_at: new Date().toISOString() })
-      .in('id', inventoryItemIds)
+    const { error: itemError } = await runChunked(inventoryItemIds, (chunk) =>
+      supabase
+        .from('inventory_items')
+        .update({ status: 'booked', updated_at: new Date().toISOString() })
+        .in('id', chunk)
+    )
     if (itemError) {
       setSaving(false)
       setFormError(itemError.message)
@@ -939,9 +1066,15 @@ export default function Bookings() {
 
     setSingleConvertSaving(true)
 
-    // Use the modal_price that was snapshotted at booking-creation time.
-    // Fallback to item's modal_price only if snapshot is 0/missing.
-    const modalPrice = b.modal_price > 0 ? b.modal_price : (b.inventory_items?.modal_price ?? 0)
+    let effectiveCounts = batchItemCounts
+    const batchName = b.inventory_items?.batch_name?.trim()
+    if (batchName && shouldFetchBatchCountForItem(b.inventory_items) && !batchItemCounts.get(batchName)) {
+      const fetched = await fetchExactBatchItemCounts([b.inventory_items?.batch_name])
+      effectiveCounts = new Map([...batchItemCounts, ...fetched])
+    }
+
+    // Resolve the individual item modal cost, preventing corrupted batch totals from carrying into sales.
+    const modalPrice = resolveBookingModalPrice(b, effectiveCounts)
     const salePrice = resolveBookingEffectiveDealPrice(b)
     const buyerName = b.buyer_name.trim()
     const grossProfit = salePrice - modalPrice
@@ -984,6 +1117,7 @@ export default function Bookings() {
       .update({
         status: 'converted_to_sale',
         deal_price: salePrice,
+        modal_price: modalPrice,
         buyer_name: buyerName,
         updated_at: now,
       })
@@ -1039,11 +1173,29 @@ export default function Bookings() {
     setBulkSaleSaving(true)
     setBulkSaleError(null)
 
+    const missingBatchNames = Array.from(
+      new Set(
+        selectedBookings
+          .map((booking) => booking.inventory_items)
+          .filter((item): item is NonNullable<BookingRow['inventory_items']> => {
+            if (!item || !shouldFetchBatchCountForItem(item)) return false
+            const trimmed = item.batch_name?.trim()
+            return Boolean(trimmed && !batchItemCounts.get(trimmed))
+          })
+          .map((item) => item.batch_name)
+          .filter((name): name is string => Boolean(name && name.trim()))
+      )
+    )
+    const effectiveCounts =
+      missingBatchNames.length > 0
+        ? new Map([...batchItemCounts, ...(await fetchExactBatchItemCounts(missingBatchNames))])
+        : batchItemCounts
+
     const splitSalePrices = splitAmount(totalSalePrice, selectedBookings.length)
     const now = new Date().toISOString()
 
     const resolvedItems = selectedBookings.map((booking, index) => {
-      const modalPrice = booking.modal_price > 0 ? booking.modal_price : (booking.inventory_items?.modal_price ?? 0)
+      const modalPrice = resolveBookingModalPrice(booking, effectiveCounts)
       const salePrice = bulkPurchase
         ? (splitSalePrices[index] ?? 0)
         : resolveBookingEffectiveDealPrice(booking)
@@ -1100,13 +1252,14 @@ export default function Bookings() {
 
     // Atomically update each booking with converted_to_sale status and individual deal_price / buyer_name
     const bookingResults = await Promise.all(
-      resolvedItems.map(({ booking, salePrice, buyerName }) =>
+      resolvedItems.map(({ booking, salePrice, modalPrice, buyerName }) =>
         supabase
           .from('bookings')
           .update({
             status: 'converted_to_sale',
             buyer_name: buyerName,
             deal_price: salePrice,
+            modal_price: modalPrice,
             ...(bulkPurchase ? { group_total_deal_price: totalSalePrice } : {}),
             updated_at: now,
           })
@@ -1181,21 +1334,36 @@ export default function Bookings() {
         .map((b) => b.inventory_item_id)
         .filter((id): id is string => Boolean(id))
       if (itemIds.length > 0) {
-        const { data: existingSales } = await supabase
-          .from('sales')
-          .select('id, inventory_item_id, modal_price, marketplace_fee, packing_cost')
-          .in('inventory_item_id', itemIds)
-        if (existingSales && existingSales.length > 0) {
+        const { results: existingSalesResults } = await runChunked(itemIds, (chunk) =>
+          supabase
+            .from('sales')
+            .select('id, inventory_item_id, modal_price, marketplace_fee, packing_cost')
+            .in('inventory_item_id', chunk)
+        )
+        const existingSales = existingSalesResults.flatMap((r) => r.data ?? [])
+        if (existingSales.length > 0) {
           const saleUpdatePromises = existingSales.map(async (sale) => {
             const index = bulkEditTarget.findIndex((b) => b.inventory_item_id === sale.inventory_item_id)
+            const matchedBooking = index >= 0 ? bulkEditTarget[index] : undefined
             const price = index >= 0 ? (splitPrices[index] ?? 0) : 0
-            const grossProfit = price - (sale.modal_price || 0)
+            const itemModalPrice = matchedBooking
+              ? resolveIndividualItemModal({
+                  itemModal: matchedBooking.inventory_items?.modal_price,
+                  batchModalTotal: matchedBooking.inventory_items?.batch_modal_total,
+                  batchItemCount: matchedBooking.inventory_items?.batch_name
+                    ? batchItemCounts.get(matchedBooking.inventory_items.batch_name.trim())
+                    : undefined,
+                  fallbackModal: sale.modal_price,
+                })
+              : (sale.modal_price || 0)
+            const grossProfit = price - itemModalPrice
             const netProfit = grossProfit - (sale.marketplace_fee || 0) - (sale.packing_cost || 0)
             await supabase
               .from('sales')
               .update({
                 buyer_name: buyerName,
                 sale_price: price,
+                modal_price: itemModalPrice,
                 gross_profit: grossProfit,
                 net_profit: netProfit,
                 notes: bulkEditForm.notes.trim() || null,
@@ -1310,7 +1478,7 @@ export default function Bookings() {
   // Render section aggregate metrics in header (Desktop & Mobile)
   function renderSectionMetrics(groupTitle: string, sectionBookings: BookingRow[]) {
     const totalDeal = sectionBookings.reduce((sum, b) => sum + b.deal_price, 0)
-    const totalProfit = sectionBookings.reduce((sum, b) => sum + (b.deal_price - b.modal_price), 0)
+    const totalProfit = sectionBookings.reduce((sum, b) => sum + (b.deal_price - resolveBookingModalPrice(b)), 0)
 
     if (groupBy === 'date') {
       const activeCount = sectionBookings.filter((b) => b.status === 'active').length

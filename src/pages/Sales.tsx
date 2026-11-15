@@ -5,17 +5,30 @@ import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, todayISO, splitAmount } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
+import { chunkArray, runChunked } from '../lib/chunk'
 import { logActivity } from '../lib/activityLog'
 import { bookingGroupDisplayId, bookingGroupFriendlyLabel } from '../lib/bookingGroups'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS, FULFILLMENT_STATUSES } from '../lib/constants'
 import { revertInventoryItemsSaleState, updateInventoryItemSoldState } from '../lib/itemTransactionSync'
+import {
+  fetchExactBatchItemCounts,
+  resolveIndividualItemModal,
+  shouldFetchBatchCountForItem,
+} from '../lib/inventoryModal'
 import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
 
-type SaleRow = Sale & { inventory_items: { item_name: string; batch_name: string | null } | null }
+type SaleRow = Sale & {
+  inventory_items: {
+    item_name: string
+    batch_name: string | null
+    modal_price: number
+    batch_modal_total: number | null
+  } | null
+}
 export type SaleSortOption = 'date_desc' | 'batch_az' | 'buyer_az' | 'item_az'
 
 interface SaleGroup {
@@ -66,12 +79,13 @@ const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
 const PAGE_SIZE = 200
 const SEARCH_DEBOUNCE_MS = 300
 const SALES_SELECT_COLUMNS =
-  'id, inventory_item_id, customer_id, booking_group_id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, fulfillment_status, notes, created_at, inventory_items(item_name, batch_name)'
+  'id, inventory_item_id, customer_id, booking_group_id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, fulfillment_status, notes, created_at, inventory_items(item_name, batch_name, modal_price, batch_modal_total)'
 
 export default function Sales() {
   const { user, canWrite } = useAuth()
   const { showToast } = useToast()
   const [sales, setSales] = useState<SaleRow[]>([])
+  const [batchItemCounts, setBatchItemCounts] = useState<Map<string, number>>(() => new Map())
   const [totalCount, setTotalCount] = useState<number>(0)
   const [page, setPage] = useState<number>(1)
   const [deletingSale, setDeletingSale] = useState<SaleRow | null>(null)
@@ -107,6 +121,9 @@ export default function Sales() {
   const [sortBy, setSortBy] = useState<SaleSortOption>('date_desc')
 
   const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
+  const [knownSalesById, setKnownSalesById] = useState<Map<string, SaleRow>>(() => new Map())
+  const selectedSaleIdsRef = useRef(selectedSaleIds)
+  selectedSaleIdsRef.current = selectedSaleIds
   const [showBulkShippingModal, setShowBulkShippingModal] = useState(false)
   const [bulkShippingStatus, setBulkShippingStatus] = useState<FulfillmentStatus>('parking')
   const [showBulkDateModal, setShowBulkDateModal] = useState(false)
@@ -183,12 +200,17 @@ export default function Sales() {
         new Set(nextSales.map((s) => s.booking_group_id).filter((id): id is string => Boolean(id)))
       )
       if (groupIds.length > 0) {
-        const { data: siblingData } = await supabase
-          .from('sales')
-          .select(SALES_SELECT_COLUMNS)
-          .in('booking_group_id', groupIds)
-          .order('sale_date', { ascending: false })
-          .order('id', { ascending: false })
+        const siblingResults = await Promise.all(
+          chunkArray(groupIds).map((chunk) =>
+            supabase
+              .from('sales')
+              .select(SALES_SELECT_COLUMNS)
+              .in('booking_group_id', chunk)
+              .order('sale_date', { ascending: false })
+              .order('id', { ascending: false })
+          )
+        )
+        const siblingData = siblingResults.flatMap((r) => r.data ?? [])
         if (!isLatest()) return
         if (siblingData && siblingData.length > 0) {
           const mergedMap = new Map<string, SaleRow>()
@@ -202,12 +224,40 @@ export default function Sales() {
         }
       }
 
+      const batchNamesNeedingCount = Array.from(
+        new Set(
+          nextSales
+            .map((s) => s.inventory_items)
+            .filter((item): item is NonNullable<SaleRow['inventory_items']> =>
+              Boolean(item && shouldFetchBatchCountForItem(item))
+            )
+            .map((item) => item.batch_name)
+            .filter((name): name is string => Boolean(name && name.trim()))
+        )
+      )
+
+      const countsMap =
+        batchNamesNeedingCount.length > 0
+          ? await fetchExactBatchItemCounts(batchNamesNeedingCount)
+          : new Map<string, number>()
+
+      if (!isLatest()) return
+
+      setBatchItemCounts(countsMap)
       setSales(nextSales)
       setTotalCount(count ?? nextSales.length)
       hasLoadedRef.current = true
-      // Preserve checkbox selection: only keep IDs that still exist in the current page
-      const idSet = new Set(nextSales.map((s) => s.id))
-      setSelectedSaleIds((current) => current.filter((id) => idSet.has(id)))
+      // Selections persist across searches/pages: never filter selectedSaleIds here.
+      // Instead, merge fetched rows into the metadata cache (keeping rows that are still selected).
+      setKnownSalesById((prev) => {
+        const next = new Map<string, SaleRow>()
+        for (const id of selectedSaleIdsRef.current) {
+          const existing = prev.get(id)
+          if (existing) next.set(id, existing)
+        }
+        for (const s of nextSales) next.set(s.id, s)
+        return next
+      })
     } catch (err) {
       if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load sales.')
@@ -276,6 +326,28 @@ export default function Sales() {
     [sales]
   )
 
+  const getSaleFinancials = useCallback(
+    (sale: SaleRow) => {
+      const item = sale.inventory_items
+      const batchName = item?.batch_name?.trim()
+      const batchItemCount = batchName ? batchItemCounts.get(batchName) : undefined
+      const modalPrice = resolveIndividualItemModal({
+        itemModal: item?.modal_price,
+        batchModalTotal: item?.batch_modal_total,
+        batchItemCount,
+        fallbackModal: sale.modal_price,
+      })
+      const salePrice = Number(sale.sale_price) || 0
+      const marketplaceFee = Number(sale.marketplace_fee) || 0
+      const packingCost = Number(sale.packing_cost) || 0
+      const grossProfit = salePrice - modalPrice
+      const netProfit = grossProfit - marketplaceFee - packingCost
+
+      return { modalPrice, grossProfit, netProfit }
+    },
+    [batchItemCounts]
+  )
+
   const dailySalesGroups = useMemo(() => {
     const groupedByDate = new Map<string, SaleRow[]>()
     filtered.forEach((sale) => {
@@ -293,6 +365,10 @@ export default function Sales() {
 
       const transactionGroupList = Array.from(transactionGroups.entries()).map(([key, groupSales]) => {
         const firstSale = groupSales[0]
+        const financials = groupSales.map((sale) => ({
+          sale,
+          ...getSaleFinancials(sale),
+        }))
         return {
           key,
           bookingGroupId: firstSale.booking_group_id,
@@ -301,30 +377,35 @@ export default function Sales() {
           itemCount: groupSales.length,
           buyerName: firstSale.buyer_name,
           saleDate: firstSale.sale_date,
-          totalRevenue: groupSales.reduce((sum, sale) => sum + sale.sale_price, 0),
-          totalModal: groupSales.reduce((sum, sale) => sum + sale.modal_price, 0),
-          grossProfit: groupSales.reduce((sum, sale) => sum + sale.gross_profit, 0),
-          netProfit: groupSales.reduce((sum, sale) => sum + sale.net_profit, 0),
+          totalRevenue: financials.reduce((sum, entry) => sum + (Number(entry.sale.sale_price) || 0), 0),
+          totalModal: financials.reduce((sum, entry) => sum + entry.modalPrice, 0),
+          grossProfit: financials.reduce((sum, entry) => sum + entry.grossProfit, 0),
+          netProfit: financials.reduce((sum, entry) => sum + entry.netProfit, 0),
         } satisfies SaleGroup
       })
 
       return {
         key: saleDate,
         saleDate,
-        revenue: daySales.reduce((sum, sale) => sum + sale.sale_price, 0),
-        profit: daySales.reduce((sum, sale) => sum + sale.net_profit, 0),
+        revenue: transactionGroupList.reduce((sum, group) => sum + group.totalRevenue, 0),
+        profit: transactionGroupList.reduce((sum, group) => sum + group.netProfit, 0),
         transactions: transactionGroupList.length,
         itemsSold: daySales.length,
         transactionGroups: transactionGroupList,
       } satisfies DailySalesGroup
     })
-  }, [filtered])
+  }, [filtered, getSaleFinancials])
+
+  // Cache-backed lookup: current page rows override cached rows from other pages/searches.
+  const mergedSalesById = useMemo(() => {
+    const map = new Map(knownSalesById)
+    for (const s of sales) map.set(s.id, s)
+    return map
+  }, [knownSalesById, sales])
 
   const selectedSalesTotal = useMemo(() => {
-    return sales
-      .filter((s) => selectedSaleIds.includes(s.id))
-      .reduce((sum, s) => sum + s.sale_price, 0)
-  }, [sales, selectedSaleIds])
+    return selectedSaleIds.reduce((sum, id) => sum + (mergedSalesById.get(id)?.sale_price ?? 0), 0)
+  }, [mergedSalesById, selectedSaleIds])
 
   useEffect(() => {
     if (dailySalesGroups.length > 0 && expandedDateKeys.length === 0) {
@@ -359,8 +440,11 @@ export default function Sales() {
     [filtered]
   )
   const selectedSales = useMemo(
-    () => sales.filter((s) => selectedSaleIds.includes(s.id)),
-    [sales, selectedSaleIds]
+    () =>
+      selectedSaleIds
+        .map((id) => mergedSalesById.get(id))
+        .filter((s): s is SaleRow => Boolean(s)),
+    [mergedSalesById, selectedSaleIds]
   )
 
   function toggleSaleSelection(saleId: string) {
@@ -380,10 +464,12 @@ export default function Sales() {
     e.preventDefault()
     setBulkActionSaving(true)
     setBulkActionError(null)
-    const { error } = await supabase
-      .from('sales')
-      .update({ fulfillment_status: bulkShippingStatus, updated_at: new Date().toISOString() })
-      .in('id', selectedSaleIds)
+    const { error } = await runChunked(selectedSaleIds, (chunk) =>
+      supabase
+        .from('sales')
+        .update({ fulfillment_status: bulkShippingStatus, updated_at: new Date().toISOString() })
+        .in('id', chunk)
+    )
     setBulkActionSaving(false)
     if (error) { setBulkActionError(error.message); return }
     void logActivity({
@@ -403,10 +489,12 @@ export default function Sales() {
     setBulkActionSaving(true)
     setBulkActionError(null)
     try {
-      const { error } = await supabase
-        .from('sales')
-        .update({ sale_date: bulkSaleDate, updated_at: new Date().toISOString() })
-        .in('id', selectedSaleIds)
+      const { error } = await runChunked(selectedSaleIds, (chunk) =>
+        supabase
+          .from('sales')
+          .update({ sale_date: bulkSaleDate, updated_at: new Date().toISOString() })
+          .in('id', chunk)
+      )
 
       if (error) throw error
 
@@ -434,12 +522,15 @@ export default function Sales() {
     if (itemIds.length === 0) return
     const now = new Date().toISOString()
 
-    const { data: restoredBookings } = await supabase
-      .from('bookings')
-      .update({ status: 'active', updated_at: now })
-      .in('inventory_item_id', itemIds)
-      .eq('status', 'converted_to_sale')
-      .select('inventory_item_id')
+    const { results: restoreResults } = await runChunked(itemIds, (chunk) =>
+      supabase
+        .from('bookings')
+        .update({ status: 'active', updated_at: now })
+        .in('inventory_item_id', chunk)
+        .eq('status', 'converted_to_sale')
+        .select('inventory_item_id')
+    )
+    const restoredBookings = restoreResults.flatMap((r) => r.data ?? [])
 
     const bookedItemIds = Array.from(
       new Set(
@@ -466,10 +557,11 @@ export default function Sales() {
       .map((s) => s.inventory_item_id)
       .filter((id): id is string => Boolean(id))
 
-    for (const sale of selectedSales) {
-      const { error } = await supabase.from('sales').delete().eq('id', sale.id)
-      if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
-    }
+    const { error: deleteError } = await runChunked(
+      selectedSales.map((s) => s.id),
+      (chunk) => supabase.from('sales').delete().in('id', chunk)
+    )
+    if (deleteError) { setBulkActionError(deleteError.message); setBulkActionSaving(false); return }
 
     await revertSoldItemsAndBookings(itemIds)
 
@@ -495,10 +587,11 @@ export default function Sales() {
       .map((s) => s.inventory_item_id)
       .filter((id): id is string => Boolean(id))
 
-    for (const sale of selectedSales) {
-      const { error } = await supabase.from('sales').delete().eq('id', sale.id)
-      if (error) { setBulkActionError(error.message); setBulkActionSaving(false); return }
-    }
+    const { error: undoDeleteError } = await runChunked(
+      selectedSales.map((s) => s.id),
+      (chunk) => supabase.from('sales').delete().in('id', chunk)
+    )
+    if (undoDeleteError) { setBulkActionError(undoDeleteError.message); setBulkActionSaving(false); return }
 
     await revertSoldItemsAndBookings(itemIds)
 
@@ -631,6 +724,7 @@ export default function Sales() {
   }
 
   function openEditModal(s: SaleRow) {
+    const { modalPrice: resolvedModal } = getSaleFinancials(s)
     setEditingId(s.id)
     setEditingItemName(s.inventory_items?.item_name ?? '-')
     setSelectedItemName(s.inventory_items?.item_name ?? '-')
@@ -638,7 +732,7 @@ export default function Sales() {
       inventory_item_id: s.inventory_item_id ?? '',
       buyer_name: s.buyer_name,
       sale_price: String(Math.round(s.sale_price)),
-      modal_price: String(Math.round(s.modal_price)),
+      modal_price: String(Math.round(resolvedModal)),
       marketplace_fee: String(Math.round(s.marketplace_fee)),
       packing_cost: String(Math.round(s.packing_cost)),
       sale_date: s.sale_date,
@@ -679,17 +773,19 @@ export default function Sales() {
     try {
       const updatePromises = childSales.map((s, index) => {
         const itemSalePrice = splitSalePrices[index] ?? 0
-        const itemModalPrice = s.modal_price
-        const grossProfit = itemSalePrice - itemModalPrice
-        const netProfit = grossProfit - (s.marketplace_fee || 0) - (s.packing_cost || 0)
+        const { modalPrice: itemModalPrice, grossProfit: itemGrossProfit, netProfit: itemNetProfit } = getSaleFinancials({
+          ...s,
+          sale_price: itemSalePrice,
+        })
 
         return supabase
           .from('sales')
           .update({
             buyer_name: buyerName,
             sale_price: itemSalePrice,
-            gross_profit: grossProfit,
-            net_profit: netProfit,
+            modal_price: itemModalPrice,
+            gross_profit: itemGrossProfit,
+            net_profit: itemNetProfit,
             sale_date: groupEditForm.sale_date || todayISO(),
             fulfillment_status: groupEditForm.fulfillment_status,
             notes: groupEditForm.notes.trim() || null,
@@ -924,18 +1020,21 @@ export default function Sales() {
   function handleExport() {
     exportToCSV(
       'sales.csv',
-      sales.map((s) => ({
-        item_name: s.inventory_items?.item_name ?? '',
-        booking_group: bookingGroupDisplayId(s.booking_group_id, knownGroupIds),
-        buyer_name: s.buyer_name,
-        sale_price: s.sale_price,
-        modal_price: s.modal_price,
-        marketplace_fee: s.marketplace_fee,
-        packing_cost: s.packing_cost,
-        gross_profit: s.gross_profit,
-        net_profit: s.net_profit,
-        sale_date: s.sale_date,
-      }))
+      sales.map((s) => {
+        const financials = getSaleFinancials(s)
+        return {
+          item_name: s.inventory_items?.item_name ?? '',
+          booking_group: bookingGroupDisplayId(s.booking_group_id, knownGroupIds),
+          buyer_name: s.buyer_name,
+          sale_price: s.sale_price,
+          modal_price: financials.modalPrice,
+          marketplace_fee: s.marketplace_fee,
+          packing_cost: s.packing_cost,
+          gross_profit: financials.grossProfit,
+          net_profit: financials.netProfit,
+          sale_date: s.sale_date,
+        }
+      })
     )
   }
 
@@ -1165,7 +1264,7 @@ export default function Sales() {
                 </button>
                 <button
                   onClick={() => {
-                    const firstSelected = sales.find((s) => selectedSaleIds.includes(s.id))
+                    const firstSelected = selectedSaleIds.map((id) => mergedSalesById.get(id)).find(Boolean)
                     setBulkSaleDate(firstSelected?.sale_date || todayISO())
                     setBulkActionError(null)
                     setShowBulkDateModal(true)
@@ -1358,8 +1457,8 @@ export default function Sales() {
                                   </div>
                                   <div>
                                     <span className="text-gray-400 block text-[11px]">Net Profit</span>
-                                    <span className={`font-bold text-sm ${firstSale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}`}>
-                                      {formatIDR(firstSale.net_profit)}
+                                    <span className={`font-bold text-sm ${group.netProfit < 0 ? 'text-red-600' : 'text-green-700'}`}>
+                                      {formatIDR(group.netProfit)}
                                     </span>
                                   </div>
                                 </div>
@@ -1381,31 +1480,34 @@ export default function Sales() {
                               {/* Expanded Child Sales if bulk transaction */}
                               {group.isGrouped && isExpanded && (
                                 <div className="space-y-2 pl-2 border-l-2 border-amber-200 mt-2">
-                                  {group.sales.map((sale) => (
-                                    <div key={sale.id} className="rounded-md border border-gray-200 bg-white p-2.5 text-xs space-y-1.5">
-                                      <div className="flex items-start justify-between gap-2">
-                                        <div className="flex items-center gap-2">
-                                          <input
-                                            type="checkbox"
-                                            checked={selectedSaleIds.includes(sale.id)}
-                                            onChange={() => toggleSaleSelection(sale.id)}
-                                            className="h-4 w-4 rounded border-gray-300"
-                                          />
-                                          <span className="font-medium text-gray-900">{sale.inventory_items?.item_name ?? '-'}</span>
+                                  {group.sales.map((sale) => {
+                                    const { netProfit: childNetProfit } = getSaleFinancials(sale)
+                                    return (
+                                      <div key={sale.id} className="rounded-md border border-gray-200 bg-white p-2.5 text-xs space-y-1.5">
+                                        <div className="flex items-start justify-between gap-2">
+                                          <div className="flex items-center gap-2">
+                                            <input
+                                              type="checkbox"
+                                              checked={selectedSaleIds.includes(sale.id)}
+                                              onChange={() => toggleSaleSelection(sale.id)}
+                                              className="h-4 w-4 rounded border-gray-300"
+                                            />
+                                            <span className="font-medium text-gray-900">{sale.inventory_items?.item_name ?? '-'}</span>
+                                          </div>
+                                          <span className="font-semibold text-gray-900">{formatIDR(sale.sale_price)}</span>
                                         </div>
-                                        <span className="font-semibold text-gray-900">{formatIDR(sale.sale_price)}</span>
+                                        <div className="flex items-center justify-between text-[11px] text-gray-500 pl-6">
+                                          <span>Batch: {getBatchLabel(sale)}</span>
+                                          <span className={childNetProfit < 0 ? 'text-red-600' : 'text-green-700'}>
+                                            Profit: {formatIDR(childNetProfit)}
+                                          </span>
+                                        </div>
+                                        <div className="pt-1 pl-6 flex gap-2">
+                                          {renderMobileSaleCardActions(sale)}
+                                        </div>
                                       </div>
-                                      <div className="flex items-center justify-between text-[11px] text-gray-500 pl-6">
-                                        <span>Batch: {getBatchLabel(sale)}</span>
-                                        <span className={sale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
-                                          Profit: {formatIDR(sale.net_profit)}
-                                        </span>
-                                      </div>
-                                      <div className="pt-1 pl-6 flex gap-2">
-                                        {renderMobileSaleCardActions(sale)}
-                                      </div>
-                                    </div>
-                                  ))}
+                                    )
+                                  })}
                                 </div>
                               )}
 
@@ -1516,44 +1618,48 @@ export default function Sales() {
                                   </tr>
                                   {group.isGrouped &&
                                     isExpanded &&
-                                    group.sales.map((sale) => (
-                                      <tr key={sale.id} className="group bg-gray-50 text-xs hover:bg-gray-100/70">
-                                        <td className="whitespace-nowrap px-3 py-2">
-                                          <input
-                                            type="checkbox"
-                                            checked={selectedSaleIds.includes(sale.id)}
-                                            onChange={() => toggleSaleSelection(sale.id)}
-                                            className="h-4 w-4 rounded border-gray-300"
-                                          />
-                                        </td>
-                                        <td className="whitespace-nowrap px-3 py-2"></td>
-                                        <td className="max-w-[200px] truncate px-3 py-2 pl-8 sm:max-w-[300px] lg:max-w-[400px]" title={sale.inventory_items?.item_name ?? '-'}>
-                                          <span className="block truncate">{sale.inventory_items?.item_name ?? '-'}</span>
-                                        </td>
-                                        <td className="max-w-[180px] truncate px-3 py-2 text-gray-500 sm:max-w-[250px] lg:max-w-[350px]" title={getBatchLabel(sale)}>
-                                          <span className="block truncate">{getBatchLabel(sale)}</span>
-                                        </td>
-                                        <td className="whitespace-nowrap px-3 py-2">
-                                          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[sale.fulfillment_status ?? 'parking']}`}>
-                                            {FULFILLMENT_LABELS[sale.fulfillment_status ?? 'parking']}
-                                          </span>
-                                        </td>
-                                        <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={sale.buyer_name}>
-                                          <span className="block truncate">{sale.buyer_name}</span>
-                                        </td>
-                                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
-                                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.modal_price)}</td>
-                                        <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.gross_profit)}</td>
-                                        <td className="whitespace-nowrap px-3 py-2">
-                                          <span className={sale.net_profit < 0 ? 'text-red-600' : 'text-green-700'}>
-                                            {formatIDR(sale.net_profit)}
-                                          </span>
-                                        </td>
-                                        <td className="sticky right-0 z-10 whitespace-nowrap bg-gray-50/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-100/95 dark:bg-zinc-800/95 dark:group-hover:bg-zinc-700/95">
-                                          {renderSaleActions(sale)}
-                                        </td>
-                                      </tr>
-                                    ))}
+                                    group.sales.map((sale) => {
+                                      const { modalPrice: childModal, grossProfit: childGrossProfit, netProfit: childNetProfit } =
+                                        getSaleFinancials(sale)
+                                      return (
+                                        <tr key={sale.id} className="group bg-gray-50 text-xs hover:bg-gray-100/70">
+                                          <td className="whitespace-nowrap px-3 py-2">
+                                            <input
+                                              type="checkbox"
+                                              checked={selectedSaleIds.includes(sale.id)}
+                                              onChange={() => toggleSaleSelection(sale.id)}
+                                              className="h-4 w-4 rounded border-gray-300"
+                                            />
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-2"></td>
+                                          <td className="max-w-[200px] truncate px-3 py-2 pl-8 sm:max-w-[300px] lg:max-w-[400px]" title={sale.inventory_items?.item_name ?? '-'}>
+                                            <span className="block truncate">{sale.inventory_items?.item_name ?? '-'}</span>
+                                          </td>
+                                          <td className="max-w-[180px] truncate px-3 py-2 text-gray-500 sm:max-w-[250px] lg:max-w-[350px]" title={getBatchLabel(sale)}>
+                                            <span className="block truncate">{getBatchLabel(sale)}</span>
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-2">
+                                            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${FULFILLMENT_BADGE_CLASSES[sale.fulfillment_status ?? 'parking']}`}>
+                                              {FULFILLMENT_LABELS[sale.fulfillment_status ?? 'parking']}
+                                            </span>
+                                          </td>
+                                          <td className="max-w-[150px] truncate px-3 py-2 sm:max-w-[200px]" title={sale.buyer_name}>
+                                            <span className="block truncate">{sale.buyer_name}</span>
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-2">{formatIDR(sale.sale_price)}</td>
+                                          <td className="whitespace-nowrap px-3 py-2">{formatIDR(childModal)}</td>
+                                          <td className="whitespace-nowrap px-3 py-2">{formatIDR(childGrossProfit)}</td>
+                                          <td className="whitespace-nowrap px-3 py-2">
+                                            <span className={childNetProfit < 0 ? 'text-red-600' : 'text-green-700'}>
+                                              {formatIDR(childNetProfit)}
+                                            </span>
+                                          </td>
+                                          <td className="sticky right-0 z-10 whitespace-nowrap bg-gray-50/95 px-3 py-2 backdrop-blur-md shadow-[-4px_0_8px_-4px_rgba(0,0,0,0.05)] group-hover:bg-gray-100/95 dark:bg-zinc-800/95 dark:group-hover:bg-zinc-700/95">
+                                            {renderSaleActions(sale)}
+                                          </td>
+                                        </tr>
+                                      )
+                                    })}
                                 </Fragment>
                               )
                             })}
@@ -1803,11 +1909,38 @@ export default function Sales() {
                   allowedStatuses={SELLABLE_ITEM_STATUSES}
                   onChange={(item) => {
                     setSelectedItemName(item?.item_name ?? '')
+                    const immediateModal = item
+                      ? resolveIndividualItemModal({
+                          itemModal: item.modal_price,
+                          batchModalTotal: item.batch_modal_total,
+                        })
+                      : 0
                     setForm((current) => ({
                       ...current,
                       inventory_item_id: item?.id ?? '',
-                      modal_price: item ? String(Math.round(item.modal_price)) : current.modal_price,
+                      modal_price: item ? String(Math.round(immediateModal)) : current.modal_price,
                     }))
+                    if (item && shouldFetchBatchCountForItem(item)) {
+                      const batchName = item.batch_name
+                      if (batchName) {
+                        void fetchExactBatchItemCounts([batchName]).then((counts) => {
+                          const count = counts.get(batchName.trim())
+                          if (!count) return
+                          const resolved = resolveIndividualItemModal({
+                            itemModal: item.modal_price,
+                            batchModalTotal: item.batch_modal_total,
+                            batchItemCount: count,
+                          })
+                          setForm((current) => {
+                            if (current.inventory_item_id !== item.id) return current
+                            return {
+                              ...current,
+                              modal_price: String(Math.round(resolved)),
+                            }
+                          })
+                        })
+                      }
+                    }
                     if (item?.id && item.status === 'booked') {
                       void supabase
                         .from('bookings')

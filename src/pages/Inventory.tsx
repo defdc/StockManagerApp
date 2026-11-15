@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus } from '../lib/format'
 import { exportToCSV } from '../lib/csv'
+import { runChunked } from '../lib/chunk'
 import { logActivity } from '../lib/activityLog'
 import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { Booking, InventoryItem, Sale } from '../types/database'
@@ -14,7 +15,11 @@ import BatchAutocomplete from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
 import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
-import { getLiveModalPrice } from '../lib/inventoryModal'
+import {
+  fetchExactBatchItemCounts,
+  resolveIndividualItemModal,
+  shouldFetchBatchCountForItem,
+} from '../lib/inventoryModal'
 import { resolveItemTransactionDetails } from '../lib/itemTransactionSync'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -68,15 +73,9 @@ function saveCollapsed(set: Set<string>) {
 }
 
 /**
- * Split UUIDs into batches for `.in('id', ...)` filters. PostgREST encodes the filter in the
- * URL, so selecting hundreds of rows at once can exceed URL length limits.
+ * Bulk `.in('id', ...)` requests are split into chunks of 150 via `runChunked` (see lib/chunk.ts)
+ * so selecting hundreds of rows never exceeds PostgREST URL length limits.
  */
-const ID_CHUNK_SIZE = 150
-function chunkIds(ids: string[], size = ID_CHUNK_SIZE): string[][] {
-  const chunks: string[][] = []
-  for (let i = 0; i < ids.length; i += size) chunks.push(ids.slice(i, i + size))
-  return chunks
-}
 
 /**
  * Explicit column selection for `inventory_items` to minimize Supabase egress payload.
@@ -146,6 +145,7 @@ export default function Inventory() {
   const [drawerItem, setDrawerItem] = useState<InventoryItem | null>(null)
   const [drawerBookings, setDrawerBookings] = useState<BookingRow[]>([])
   const [drawerSales, setDrawerSales] = useState<Sale[]>([])
+  const [drawerBatchCount, setDrawerBatchCount] = useState<number | undefined>(undefined)
   const [drawerLoading, setDrawerLoading] = useState(false)
 
   const [refreshing, setRefreshing] = useState(false)
@@ -248,14 +248,21 @@ export default function Inventory() {
 
   // Load drawer history when an item is selected
   useEffect(() => {
-    if (!drawerItem) return
+    if (!drawerItem) {
+      setDrawerBatchCount(undefined)
+      return
+    }
 
-    const itemId = drawerItem.id
+    const currentItem = drawerItem
+    const itemId = currentItem.id
     let cancelled = false
     setDrawerLoading(true)
+    setDrawerBatchCount(undefined)
 
     async function loadHistory() {
-      const [bookingsRes, salesRes] = await Promise.all([
+      const batchName = currentItem.batch_name?.trim()
+      const needsCount = shouldFetchBatchCountForItem(currentItem)
+      const [bookingsRes, salesRes, countsMap] = await Promise.all([
         supabase
           .from('bookings')
           .select('id, buyer_name, deal_price, group_total_deal_price, status, created_at, inventory_items(item_name)')
@@ -263,13 +270,17 @@ export default function Inventory() {
           .order('created_at', { ascending: false }),
         supabase
           .from('sales')
-          .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, created_at')
+          .select('id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, created_at')
           .eq('inventory_item_id', itemId)
           .order('sale_date', { ascending: false }),
+        needsCount && currentItem.batch_name
+          ? fetchExactBatchItemCounts([currentItem.batch_name])
+          : Promise.resolve(new Map<string, number>()),
       ])
       if (cancelled) return
       setDrawerBookings((bookingsRes.data as unknown as BookingRow[]) ?? [])
       setDrawerSales((salesRes.data as unknown as Sale[]) ?? [])
+      setDrawerBatchCount(batchName ? countsMap.get(batchName) : undefined)
       setDrawerLoading(false)
     }
 
@@ -320,8 +331,6 @@ export default function Inventory() {
     }
     return map
   }, [knownItemsById, items])
-
-  const allKnownItems = useMemo(() => [...mergedItemsById.values()], [mergedItemsById])
 
   const selectedItems = useMemo(
     () =>
@@ -618,27 +627,86 @@ export default function Inventory() {
     setBulkBookingSaving(true)
     setBulkBookingError(null)
 
+    const fallbackBatchTotals = new Map<string, number>()
+    const batchesMissingTotal = Array.from(
+      new Set(
+        selectedItems
+          .filter((item) => item.batch_name?.trim() && item.modal_price <= 0 && (item.batch_modal_total ?? 0) <= 0)
+          .map((item) => item.batch_name!.trim())
+      )
+    )
+    if (batchesMissingTotal.length > 0) {
+      await Promise.all(
+        batchesMissingTotal.map(async (batchName) => {
+          const { data } = await supabase
+            .from('inventory_items')
+            .select('batch_modal_total')
+            .eq('batch_name', batchName)
+            .gt('batch_modal_total', 0)
+            .limit(1)
+          const total = data?.[0]?.batch_modal_total
+          if (typeof total === 'number' && total > 0) {
+            fallbackBatchTotals.set(batchName, total)
+          }
+        })
+      )
+    }
+
+    const batchNamesNeedingCount = Array.from(
+      new Set(
+        selectedItems
+          .filter((item) => {
+            const resolvedTotal = item.batch_modal_total ?? (item.batch_name ? fallbackBatchTotals.get(item.batch_name.trim()) : undefined)
+            return shouldFetchBatchCountForItem({
+              batch_name: item.batch_name,
+              batch_modal_total: resolvedTotal,
+              modal_price: item.modal_price,
+            })
+          })
+          .map((item) => item.batch_name)
+          .filter((name): name is string => Boolean(name && name.trim()))
+      )
+    )
+    const batchCounts =
+      batchNamesNeedingCount.length > 0
+        ? await fetchExactBatchItemCounts(batchNamesNeedingCount)
+        : new Map<string, number>()
+
     const groupId = selectedItems.length > 1 ? crypto.randomUUID() : null
     const totalDealPrice = Number(bulkBookingForm.total_deal_price) || 0
     const itemCount = selectedItems.length
     const base = Math.floor(totalDealPrice / itemCount)
     const remainder = totalDealPrice - base * itemCount
 
-    const bookingsPayload = selectedItems.map((item, index) => ({
-      inventory_item_id: item.id,
-      booking_group_id: groupId,
-      group_total_deal_price: totalDealPrice,
-      buyer_name: bulkBookingForm.buyer_name.trim(),
-      deal_price: index === itemCount - 1 ? base + remainder : base,
-      // Snapshot modal_price at booking-creation time (Step 1)
-      modal_price: getLiveModalPrice(item, allKnownItems),
-      dp_amount: 0,
-      remaining_amount: 0,
-      deadline: bulkBookingForm.deadline || null,
-      status: 'active',
-      notes: bulkBookingForm.notes.trim() || null,
-      created_by: user?.id,
-    }))
+    const bookingsPayload = selectedItems.map((item, index) => {
+      const batchName = item.batch_name?.trim()
+      const batchModalTotal =
+        (item.batch_modal_total ?? 0) > 0
+          ? item.batch_modal_total
+          : batchName
+            ? fallbackBatchTotals.get(batchName)
+            : null
+      const batchItemCount = batchName ? batchCounts.get(batchName) : undefined
+      return {
+        inventory_item_id: item.id,
+        booking_group_id: groupId,
+        group_total_deal_price: totalDealPrice,
+        buyer_name: bulkBookingForm.buyer_name.trim(),
+        deal_price: index === itemCount - 1 ? base + remainder : base,
+        // Snapshot individual item modal_price at booking-creation time (Step 1)
+        modal_price: resolveIndividualItemModal({
+          itemModal: item.modal_price,
+          batchModalTotal,
+          batchItemCount,
+        }),
+        dp_amount: 0,
+        remaining_amount: 0,
+        deadline: bulkBookingForm.deadline || null,
+        status: 'active',
+        notes: bulkBookingForm.notes.trim() || null,
+        created_by: user?.id,
+      }
+    })
 
     const { error: bookingError } = await supabase.from('bookings').insert(bookingsPayload)
     if (bookingError) {
@@ -649,17 +717,12 @@ export default function Inventory() {
 
     const selectedUuids = selectedItems.map((item) => item.id)
     const now = new Date().toISOString()
-    let itemError: { message: string } | null = null
-    for (const idChunk of chunkIds(selectedUuids)) {
-      const { error } = await supabase
+    const { error: itemError } = await runChunked(selectedUuids, (idChunk) =>
+      supabase
         .from('inventory_items')
         .update({ status: 'booked', updated_at: now })
         .in('id', idChunk)
-      if (error) {
-        itemError = error
-        break
-      }
-    }
+    )
 
     setBulkBookingSaving(false)
     if (itemError) {
@@ -707,18 +770,13 @@ export default function Inventory() {
     if (!confirmed) return
 
     setBulkDeleteSaving(true)
-    let deleteError: { message: string } | null = null
-    for (const idChunk of chunkIds(targetIds)) {
-      const { error } = await supabase
+    const { error: deleteError } = await runChunked(targetIds, (idChunk) =>
+      supabase
         .from('inventory_items')
         .delete()
         .in('id', idChunk)
         .eq('status', 'ready')
-      if (error) {
-        deleteError = error
-        break
-      }
-    }
+    )
     setBulkDeleteSaving(false)
 
     if (deleteError) {
@@ -763,19 +821,40 @@ export default function Inventory() {
     }
   }
 
-  function handleExport() {
+  async function handleExport() {
+    const batchNamesNeedingCount = Array.from(
+      new Set(
+        items
+          .filter((item) => shouldFetchBatchCountForItem(item))
+          .map((item) => item.batch_name)
+          .filter((name): name is string => Boolean(name && name.trim()))
+      )
+    )
+    const batchCounts =
+      batchNamesNeedingCount.length > 0
+        ? await fetchExactBatchItemCounts(batchNamesNeedingCount)
+        : new Map<string, number>()
+
     exportToCSV(
       'inventory.csv',
-      items.map((item) => ({
-        item_name: item.item_name,
-        category: item.category,
-        batch_name: item.batch_name,
-        batch_modal_total: item.batch_modal_total,
-        modal_price: getLiveModalPrice(item, items),
-        status: item.status,
-        notes: item.notes,
-        created_at: item.created_at,
-      }))
+      items.map((item) => {
+        const batchName = item.batch_name?.trim()
+        const batchItemCount = batchName ? batchCounts.get(batchName) : undefined
+        return {
+          item_name: item.item_name,
+          category: item.category,
+          batch_name: item.batch_name,
+          batch_modal_total: item.batch_modal_total,
+          modal_price: resolveIndividualItemModal({
+            itemModal: item.modal_price,
+            batchModalTotal: item.batch_modal_total,
+            batchItemCount,
+          }),
+          status: item.status,
+          notes: item.notes,
+          created_at: item.created_at,
+        }
+      })
     )
   }
 
@@ -796,7 +875,7 @@ export default function Inventory() {
         </div>
         <div className="flex gap-2">
           <button
-            onClick={handleExport}
+            onClick={() => void handleExport()}
             className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
           >
             Export CSV
@@ -1448,7 +1527,16 @@ export default function Inventory() {
                   Batch: <span className="font-medium text-gray-700">{drawerItem.batch_name ?? '-'}</span>
                 </p>
                 <p className="text-sm text-gray-500">
-                  Modal/item: <span className="font-medium text-gray-700">{formatIDR(getLiveModalPrice(drawerItem, items))}</span>
+                  Modal/item:{' '}
+                  <span className="font-medium text-gray-700">
+                    {formatIDR(
+                      resolveIndividualItemModal({
+                        itemModal: drawerItem.modal_price,
+                        batchModalTotal: drawerItem.batch_modal_total,
+                        batchItemCount: drawerBatchCount,
+                      })
+                    )}
+                  </span>
                 </p>
                 <p className="text-sm text-gray-500">
                   Status:{' '}
@@ -1532,13 +1620,22 @@ export default function Inventory() {
                             : (drawerResolvedDetails.salePrice ?? sale.sale_price)
                         const effectiveBuyerName =
                           sale.buyer_name?.trim() || drawerResolvedDetails.buyerName || '-'
+                        const resolvedModal = resolveIndividualItemModal({
+                          itemModal: drawerItem.modal_price,
+                          batchModalTotal: drawerItem.batch_modal_total,
+                          batchItemCount: drawerBatchCount,
+                          fallbackModal: sale.modal_price,
+                        })
+                        const effectiveGrossProfit = effectiveSalePrice - resolvedModal
+                        const effectiveNetProfit =
+                          effectiveGrossProfit - (sale.marketplace_fee || 0) - (sale.packing_cost || 0)
                         return (
                           <li key={sale.id} className="rounded-md border border-gray-200 p-3">
                             <p className="font-medium text-gray-800">{effectiveBuyerName}</p>
                             <p className="text-gray-500">Sale date: {formatDate(sale.sale_date)}</p>
                             <p className="text-gray-500">Sale price: {formatIDR(effectiveSalePrice)}</p>
-                            <p className="text-gray-500">Gross profit: {formatIDR(sale.gross_profit)}</p>
-                            <p className="text-gray-500">Net profit: {formatIDR(sale.net_profit)}</p>
+                            <p className="text-gray-500">Gross profit: {formatIDR(effectiveGrossProfit)}</p>
+                            <p className="text-gray-500">Net profit: {formatIDR(effectiveNetProfit)}</p>
                           </li>
                         )
                       })}

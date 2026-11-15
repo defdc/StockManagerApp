@@ -46,26 +46,29 @@ export function generateInvoiceText(buyerName: string, activeBookings: BuyerBook
   return `*INVOICE - LOYAL BUYER ${buyerName.toUpperCase()} PINKIEPIE.GARAGE* 🦄
 *🛒 PESANAN*
 ${itemListSection}- Total item (${qty} pcs): ${formattedTotal} 
-- Packing: Rp. 3k
+- Packing: Rp. 3.000
 - Ongkir: (tergantung lokasi, estimasi di bawah)
-- TOTAL:
  
 (Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
 
 💳 PEMBAYARAN (a.n Benedictus Jody Setiawan)
-
 •⁠  ⁠BCA: 6041522337
 •⁠  ⁠DANA: 08161928280
 
 ⚠️ KETENTUAN WAJIB
-
 1   ⁠Bayar maksimal 1x24 jam (Lewat dari itu = B&R/Cancel). Diproses setelah payment.
 2.  Pastikan Nama, Alamat, dan No. HP sudah BENAR.
 3.⁠  ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
-4.⁠  ⁠📦 Syarat Komplain Lain (Kompensasi): Wajib sertakan video unboxing utuh dari awal buka paket tanpa jeda/edit.
-5.⁠   ⁠Wajib kirim bukti transfer ke sini.
+4. 🚚 Kami tidak menerima komplain atas kerusakan barang akibat pihak ekspedisi(box hancur/rusak/terbuka saat diterima). Silakan hubungi pihak ekspedisi sebelum membuka paket Anda.
+5. 📦 Syarat Komplain/Kompensasi Di Luar Kerusakan Ekspedisi: 
+      - Wajib menyertakan video unboxing utuh tanpa jeda, tanpa potong, dan tanpa edit.
+      - Video wajib dimulai sebelum paket dibuka, dengan memperlihatkan kondisi paket yang masih tersegel dari segala sisi (atas, bawah, samping) dan label resi wajib tersorot jelas.
+      - Selama proses buka paket hingga pengecekan detail barang selesai, paket dan barang tidak boleh keluar dari sorotan kamera tidak boleh keluar dari frame.
+      - Tanpa bukti video yang memenuhi seluruh syarat ketat ini, mohon maaf segala bentuk komplain dianggap tidak sah dan tidak dapat kami proses.
+6.⁠   ⁠Wajib kirim bukti transfer ke sini.
+Link Group: https://chat.whatsapp.com/K5NLbkHcrDt2KdBs1lJ3zq?mode=gi_t 
 
-Thank you for shopping! ✨`
+Terima kasih Sudah Berbelanja di PinkiePie.Garage! ✨`
 }
 
 export default function Buyers() {

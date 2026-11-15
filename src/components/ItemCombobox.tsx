@@ -3,7 +3,6 @@ import { formatIDR, formatStatus } from '../lib/format'
 import { smartSearchRank } from '../lib/search'
 import { supabase } from '../lib/supabase'
 import type { InventoryItem } from '../types/database'
-import { getLiveModalPrice } from '../lib/inventoryModal'
 
 interface ItemComboboxProps {
   value: string | null
@@ -286,8 +285,12 @@ export default function ItemCombobox({
                 <span className="block text-sm font-medium text-gray-900">{itemLabel(item)}</span>
                 <span className="block text-xs text-gray-500">
                   {item.batch_name ? `${item.batch_name} · ` : ''}
-                  {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} · Modal:{' '}
-                  {formatIDR(getLiveModalPrice(item, suggestions))}
+                  {item.category ?? 'Uncategorized'} · {formatStatus(item.status)} ·{' '}
+                  {item.modal_price > 0 && !((item.batch_modal_total ?? 0) > 0 && item.modal_price >= (item.batch_modal_total ?? 0))
+                    ? `Modal: ${formatIDR(item.modal_price)}`
+                    : (item.batch_modal_total ?? 0) > 0
+                      ? `Batch Modal: ${formatIDR(item.batch_modal_total)}`
+                      : `Modal: ${formatIDR(0)}`}
                 </span>
               </button>
             ))
