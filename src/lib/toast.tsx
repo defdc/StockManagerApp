@@ -23,7 +23,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 rounded-md px-4 py-2.5 text-sm font-medium text-white shadow-xl transition-all ${
+          className={`fixed bottom-5 right-5 z-50 rounded-md px-4 py-2.5 text-sm font-medium text-white shadow-xl transition-all print:hidden ${
             toast.type === 'error'
               ? 'bg-red-600'
               : toast.type === 'info'

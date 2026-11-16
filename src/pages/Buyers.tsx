@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useDataInvalidation } from '../lib/dataSync'
 import { formatDate, formatIDR } from '../lib/format'
@@ -16,8 +16,16 @@ const BUYER_SALES_SELECT =
 type BuyerBooking = Booking & { inventory_items: { item_name: string; batch_name: string | null } | null }
 type BuyerSale = Sale & { inventory_items: { item_name: string } | null }
 
-interface BuyerSummary {
-  id: string
+interface BuyerSummaryRow {
+  buyer_name: string
+  booked: number
+  purchased: number
+  revenue: number
+  profit: number
+  last_activity: string | null
+}
+
+interface BuyerDetailData {
   buyer: string
   booked: number
   bookings: BuyerBooking[]
@@ -26,7 +34,6 @@ interface BuyerSummary {
   salesRevenue: number
   revenue: number
   netProfit: number
-  lastActivity: string | null
   fulfillmentSummary: Record<FulfillmentStatus, number>
 }
 
@@ -56,15 +63,11 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 •⁠  ⁠DANA: 08161928280
 
 ⚠️ KETENTUAN WAJIB
-1   ⁠Bayar maksimal 1x24 jam (Lewat dari itu = B&R/Cancel). Diproses setelah payment.
-2.  Pastikan Nama, Alamat, dan No. HP sudah BENAR.
-3.⁠  ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
-4. 🚚 Kami tidak menerima komplain atas kerusakan barang akibat pihak ekspedisi(box hancur/rusak/terbuka saat diterima). Silakan hubungi pihak ekspedisi sebelum membuka paket Anda.
-5. 📦 Syarat Komplain/Kompensasi Di Luar Kerusakan Ekspedisi: 
-      - Wajib menyertakan video unboxing utuh tanpa jeda, tanpa potong, dan tanpa edit.
-      - Video wajib dimulai sebelum paket dibuka, dengan memperlihatkan kondisi paket yang masih tersegel dari segala sisi (atas, bawah, samping) dan label resi wajib tersorot jelas.
-      - Selama proses buka paket hingga pengecekan detail barang selesai, paket dan barang tidak boleh keluar dari sorotan kamera tidak boleh keluar dari frame.
-      - Tanpa bukti video yang memenuhi seluruh syarat ketat ini, mohon maaf segala bentuk komplain dianggap tidak sah dan tidak dapat kami proses.
+1  ⁠Bayar maksimal 1x24 jam (Lewat dari itu = B&R/Cancel). Diproses setelah payment.
+2. Pastikan Nama, Alamat, dan No. HP sudah BENAR.
+3.⁠ ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
+4. 🚚 Tidak terima komplain barang rusak akibat pihak ekspedisi(box hancur/rusak/terbuka)saat diterima. JANGAN DIBUKA dan segera hubungi dahulu pihak ekspedisi.
+5. 📦 Syarat Komplain: Wajib video unboxing utuh tanpa jeda/edit. Rekam dari sebelum paket dibuka(segel utuh, resi & semua sisi terlihat). Barang tidak boleh out of frame sampai selesai.(Tanpa video sesuai syarat = komplain tidak sah).
 6.⁠   ⁠Wajib kirim bukti transfer ke sini.
 Link Group: https://chat.whatsapp.com/K5NLbkHcrDt2KdBs1lJ3zq?mode=gi_t 
 
@@ -73,17 +76,24 @@ Terima kasih Sudah Berbelanja di PinkiePie.Garage! ✨`
 
 export default function Buyers() {
   const { showToast } = useToast()
-  const [bookings, setBookings] = useState<BuyerBooking[]>([])
-  const [sales, setSales] = useState<BuyerSale[]>([])
+  const [buyerSummaries, setBuyerSummaries] = useState<BuyerSummaryRow[]>([])
   const [totalCount, setTotalCount] = useState<number>(0)
   const [page, setPage] = useState<number>(1)
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [showOnlyActiveBookings, setShowOnlyActiveBookings] = useState(false)
   const [invoicedBuyers, setInvoicedBuyers] = useState<Set<string>>(new Set())
-  const [selectedBuyer, setSelectedBuyer] = useState<BuyerSummary | null>(null)
-  const [invoiceBuyer, setInvoiceBuyer] = useState<BuyerSummary | null>(null)
+
+  const [copyingBuyer, setCopyingBuyer] = useState<string | null>(null)
+  const [invoiceBuyerName, setInvoiceBuyerName] = useState<string | null>(null)
+  const [invoiceBookings, setInvoiceBookings] = useState<BuyerBooking[]>([])
+  const [invoiceLoading, setInvoiceLoading] = useState(false)
   const [includeItemList, setIncludeItemList] = useState(false)
+  const [invoiceText, setInvoiceText] = useState('')
+
+  const [selectedBuyer, setSelectedBuyer] = useState<BuyerDetailData | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const loadSeqRef = useRef(0)
@@ -91,9 +101,14 @@ export default function Buyers() {
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(search)
+      setPage(1)
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])
+
+  useEffect(() => {
+    setPage(1)
+  }, [showOnlyActiveBookings])
 
   const loadBuyers = useCallback(async () => {
     const seq = ++loadSeqRef.current
@@ -104,66 +119,38 @@ export default function Buyers() {
       const from = (page - 1) * PAGE_SIZE
       const to = from + PAGE_SIZE - 1
 
-      let bookingsQuery = supabase
-        .from('bookings')
-        .select(BUYER_BOOKINGS_SELECT, { count: 'exact' })
-
-      let salesQuery = supabase
-        .from('sales')
-        .select(BUYER_SALES_SELECT, { count: 'exact' })
+      let query = supabase
+        .from('buyer_summaries')
+        .select('*', { count: 'exact' })
 
       if (showOnlyActiveBookings) {
-        bookingsQuery = bookingsQuery.eq('status', 'active')
+        query = query.gt('booked', 0)
       }
 
       const trimmedSearch = debouncedSearch.trim()
       if (trimmedSearch) {
-        const words = trimmedSearch.split(/\s+/).filter(Boolean)
-        for (const word of words) {
-          const safeWord = word.replace(/[,()]/g, '')
-          if (!safeWord) continue
-          bookingsQuery = bookingsQuery.or(`buyer_name.ilike.%${safeWord}%`)
-          salesQuery = salesQuery.or(`buyer_name.ilike.%${safeWord}%`)
-        }
+        query = query.ilike('buyer_name', `%${trimmedSearch}%`)
       }
 
-      const [bookingsRes, salesRes] = await Promise.all([
-        bookingsQuery.order('created_at', { ascending: false }).range(from, to),
-        salesQuery.order('sale_date', { ascending: false }).range(from, to),
-      ])
+      const { data, count, error: queryErr } = await query
+        .order('booked', { ascending: false })
+        .order('revenue', { ascending: false })
+        .range(from, to)
 
       if (!isLatest()) return
-      const firstErr = bookingsRes.error || salesRes.error
-      if (firstErr) throw new Error(firstErr.message)
+      if (queryErr) throw new Error(queryErr.message)
 
-      const loadedBookings = (bookingsRes.data as unknown as BuyerBooking[]) ?? []
-      let loadedSales = (salesRes.data as unknown as BuyerSale[]) ?? []
+      const rows: BuyerSummaryRow[] = ((data ?? []) as Record<string, unknown>[]).map((row) => ({
+        buyer_name: String(row.buyer_name ?? ''),
+        booked: Number(row.booked ?? 0),
+        purchased: Number(row.purchased ?? 0),
+        revenue: Number(row.revenue ?? 0),
+        profit: Number(row.profit ?? 0),
+        last_activity: typeof row.last_activity === 'string' ? row.last_activity : null,
+      }))
 
-      if (showOnlyActiveBookings) {
-        const activeBuyerNames = Array.from(
-          new Set(loadedBookings.map((b) => b.buyer_name?.trim()).filter((n): n is string => Boolean(n)))
-        )
-        if (activeBuyerNames.length > 0) {
-          const { data: relatedSales } = await supabase
-            .from('sales')
-            .select(BUYER_SALES_SELECT)
-            .in('buyer_name', activeBuyerNames)
-            .order('sale_date', { ascending: false })
-            .range(0, PAGE_SIZE - 1)
-          if (!isLatest()) return
-          loadedSales = (relatedSales as unknown as BuyerSale[]) ?? []
-        } else {
-          loadedSales = []
-        }
-      }
-
-      setBookings(loadedBookings)
-      setSales(loadedSales)
-      setTotalCount(
-        showOnlyActiveBookings
-          ? (bookingsRes.count ?? loadedBookings.length)
-          : Math.max(bookingsRes.count ?? 0, salesRes.count ?? 0)
-      )
+      setBuyerSummaries(rows)
+      setTotalCount(count ?? rows.length)
     } catch (err) {
       if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load buyers.')
@@ -184,55 +171,6 @@ export default function Buyers() {
     { remoteOnly: true }
   )
 
-  const buyerSummaries = useMemo(() => {
-    const summaries = new Map<string, BuyerSummary>()
-
-    function ensureBuyer(name: string): BuyerSummary {
-      const existing = summaries.get(name)
-      if (existing) return existing
-      const summary: BuyerSummary = {
-        id: name,
-        buyer: name,
-        booked: 0,
-        bookings: [],
-        sales: [],
-        bookedRevenue: 0,
-        salesRevenue: 0,
-        revenue: 0,
-        netProfit: 0,
-        lastActivity: null,
-        fulfillmentSummary: { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 },
-      }
-      summaries.set(name, summary)
-      return summary
-    }
-
-    for (const booking of bookings) {
-      const summary = ensureBuyer(booking.buyer_name)
-      summary.bookings.push(booking)
-      if (booking.status === 'active') {
-        summary.booked += 1
-        summary.bookedRevenue += booking.deal_price
-      }
-      if (!summary.lastActivity || booking.created_at > summary.lastActivity) summary.lastActivity = booking.created_at
-    }
-
-    for (const sale of sales) {
-      const summary = ensureBuyer(sale.buyer_name)
-      summary.sales.push(sale)
-      summary.salesRevenue += sale.sale_price
-      summary.revenue += sale.sale_price
-      summary.netProfit += sale.net_profit
-      const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
-      summary.fulfillmentSummary[rawStatus] = (summary.fulfillmentSummary[rawStatus] ?? 0) + 1
-      if (!summary.lastActivity || sale.sale_date > summary.lastActivity) summary.lastActivity = sale.sale_date
-    }
-
-    return [...summaries.values()]
-      .filter((summary) => !showOnlyActiveBookings || summary.booked > 0)
-      .sort((a, b) => b.revenue - a.revenue || b.bookedRevenue - a.bookedRevenue || a.buyer.localeCompare(b.buyer))
-  }, [bookings, sales, showOnlyActiveBookings])
-
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
   const hasPrevPage = page > 1
   const hasNextPage = page < totalPages
@@ -251,20 +189,128 @@ export default function Buyers() {
     })
   }
 
-  function handleCopyInvoice(buyer: BuyerSummary) {
-    const activeBookings = buyer.bookings.filter((b) => b.status === 'active')
-    if (activeBookings.length === 0) return
-    setInvoiceBuyer(buyer)
+  async function fetchActiveBookingsForBuyer(buyerName: string): Promise<BuyerBooking[]> {
+    const { data, error: fetchErr } = await supabase
+      .from('bookings')
+      .select(BUYER_BOOKINGS_SELECT)
+      .eq('buyer_name', buyerName)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+
+    if (fetchErr) throw new Error(fetchErr.message)
+    return (data as unknown as BuyerBooking[]) ?? []
+  }
+
+  async function handleDirectCopyInvoice(buyerName: string) {
+    if (copyingBuyer) return
+    setCopyingBuyer(buyerName)
+    try {
+      const activeBookings = await fetchActiveBookingsForBuyer(buyerName)
+      if (activeBookings.length === 0) {
+        showToast('No active bookings found for this buyer.', 'error')
+        return
+      }
+      const invoiceTextToCopy = generateInvoiceText(buyerName, activeBookings, false)
+      await navigator.clipboard.writeText(invoiceTextToCopy)
+      showToast('Invoice copied to clipboard!')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to copy invoice.', 'error')
+    } finally {
+      setCopyingBuyer(null)
+    }
+  }
+
+  async function handleOpenEditInvoice(buyerName: string) {
+    setInvoiceBuyerName(buyerName)
     setIncludeItemList(false)
+    setInvoiceBookings([])
+    setInvoiceText('')
+    setInvoiceLoading(true)
+    try {
+      const activeBookings = await fetchActiveBookingsForBuyer(buyerName)
+      setInvoiceBookings(activeBookings)
+      setInvoiceText(generateInvoiceText(buyerName, activeBookings, false))
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to load invoice details.', 'error')
+      setInvoiceBuyerName(null)
+    } finally {
+      setInvoiceLoading(false)
+    }
+  }
+
+  function handleToggleIncludeItemList(checked: boolean) {
+    setIncludeItemList(checked)
+    if (invoiceBuyerName) {
+      setInvoiceText(generateInvoiceText(invoiceBuyerName, invoiceBookings, checked))
+    }
   }
 
   async function executeCopy() {
-    if (!invoiceBuyer) return
-    const activeBookings = invoiceBuyer.bookings.filter((b) => b.status === 'active')
-    const text = generateInvoiceText(invoiceBuyer.buyer, activeBookings, includeItemList)
-    await navigator.clipboard.writeText(text)
+    if (!invoiceBuyerName) return
+    await navigator.clipboard.writeText(invoiceText)
     showToast('Invoice copied to clipboard!')
-    setInvoiceBuyer(null)
+    setInvoiceBuyerName(null)
+  }
+
+  async function handleSelectBuyer(summary: BuyerSummaryRow) {
+    setDetailLoading(true)
+    setSelectedBuyer({
+      buyer: summary.buyer_name,
+      booked: summary.booked,
+      bookings: [],
+      sales: [],
+      bookedRevenue: 0,
+      salesRevenue: summary.revenue,
+      revenue: summary.revenue,
+      netProfit: summary.profit,
+      fulfillmentSummary: { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 },
+    })
+
+    try {
+      const [bookingsRes, salesRes] = await Promise.all([
+        supabase
+          .from('bookings')
+          .select(BUYER_BOOKINGS_SELECT)
+          .eq('buyer_name', summary.buyer_name)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('sales')
+          .select(BUYER_SALES_SELECT)
+          .eq('buyer_name', summary.buyer_name)
+          .order('sale_date', { ascending: false }),
+      ])
+
+      const loadedBookings = (bookingsRes.data as unknown as BuyerBooking[]) ?? []
+      const loadedSales = (salesRes.data as unknown as BuyerSale[]) ?? []
+
+      const activeBookings = loadedBookings.filter((b) => b.status === 'active')
+      const bookedRevenue = activeBookings.reduce((sum, b) => sum + b.deal_price, 0)
+      const fulfillmentSummary: Record<FulfillmentStatus, number> = {
+        parking: 0,
+        shipping: 0,
+        parking_shipping: 0,
+        shipping_cod: 0,
+        delivered: 0,
+      }
+      for (const sale of loadedSales) {
+        const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+        fulfillmentSummary[rawStatus] = (fulfillmentSummary[rawStatus] ?? 0) + 1
+      }
+
+      setSelectedBuyer({
+        buyer: summary.buyer_name,
+        booked: activeBookings.length || summary.booked,
+        bookings: loadedBookings,
+        sales: loadedSales,
+        bookedRevenue,
+        salesRevenue: summary.revenue,
+        revenue: summary.revenue,
+        netProfit: summary.profit,
+        fulfillmentSummary,
+      })
+    } finally {
+      setDetailLoading(false)
+    }
   }
 
   return (
@@ -326,27 +372,32 @@ export default function Buyers() {
                 </tr>
               ) : (
                 buyerSummaries.map((buyer) => {
-                  const isChecked = invoicedBuyers.has(buyer.id) && buyer.booked > 0
+                  const isChecked = invoicedBuyers.has(buyer.buyer_name) && buyer.booked > 0
                   const isDisabled = buyer.booked === 0
+                  const isCopyingThis = copyingBuyer === buyer.buyer_name
 
                   return (
-                    <tr key={buyer.id} className="hover:bg-gray-50">
+                    <tr key={buyer.buyer_name} className="hover:bg-gray-50">
                       <td className="whitespace-nowrap px-3 py-2">
-                        <button onClick={() => setSelectedBuyer(buyer)} className="font-medium text-blue-700 hover:underline">
-                          {buyer.buyer}
+                        <button
+                          type="button"
+                          onClick={() => void handleSelectBuyer(buyer)}
+                          className="font-medium text-blue-700 hover:underline"
+                        >
+                          {buyer.buyer_name}
                         </button>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2">{buyer.booked}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{buyer.sales.length}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{buyer.purchased}</td>
                       <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.revenue)}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.netProfit)}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.lastActivity)}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{formatIDR(buyer.profit)}</td>
+                      <td className="whitespace-nowrap px-3 py-2">{formatDate(buyer.last_activity)}</td>
                       <td className="whitespace-nowrap px-3 py-2 text-center">
                         <input
                           type="checkbox"
                           checked={isChecked}
                           disabled={isDisabled}
-                          onChange={() => toggleInvoiced(buyer.id)}
+                          onChange={() => toggleInvoiced(buyer.buyer_name)}
                           title={
                             isDisabled
                               ? 'No active bookings'
@@ -354,20 +405,31 @@ export default function Buyers() {
                                 ? 'Mark as not invoiced'
                                 : 'Mark as invoiced'
                           }
-                          aria-label={`Mark ${buyer.buyer} as invoiced`}
+                          aria-label={`Mark ${buyer.buyer_name} as invoiced`}
                           className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
                         />
                       </td>
                       <td className="whitespace-nowrap px-3 py-2">
                         {buyer.booked > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => handleCopyInvoice(buyer)}
-                            title="Generate & copy invoice"
-                            className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800"
-                          >
-                            Copy Invoice
-                          </button>
+                          <div className="flex items-center gap-2 whitespace-nowrap">
+                            <button
+                              type="button"
+                              disabled={isCopyingThis}
+                              onClick={() => void handleDirectCopyInvoice(buyer.buyer_name)}
+                              title="Directly copy standard invoice to clipboard"
+                              className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isCopyingThis ? 'Copying...' : 'Copy Invoice'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenEditInvoice(buyer.buyer_name)}
+                              title="Preview & edit invoice before copying"
+                              className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                            >
+                              Edit Invoice
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -410,15 +472,16 @@ export default function Buyers() {
         </div>
       )}
 
-      {/* Invoice Preview Modal */}
-      {invoiceBuyer && (
-        <Modal title={`Invoice - ${invoiceBuyer.buyer}`} onClose={() => setInvoiceBuyer(null)}>
+      {/* Invoice Preview / Edit Modal */}
+      {invoiceBuyerName && (
+        <Modal title={`Invoice - ${invoiceBuyerName}`} onClose={() => setInvoiceBuyerName(null)}>
           <div className="space-y-4">
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input
                 type="checkbox"
                 checked={includeItemList}
-                onChange={(e) => setIncludeItemList(e.target.checked)}
+                disabled={invoiceLoading}
+                onChange={(e) => handleToggleIncludeItemList(e.target.checked)}
                 className="h-4 w-4 rounded border-gray-300"
               />
               Include itemized list breakdown
@@ -426,30 +489,33 @@ export default function Buyers() {
 
             <div>
               <label className="mb-1 block text-xs font-medium text-gray-500">Invoice Preview:</label>
-              <textarea
-                readOnly
-                rows={14}
-                value={generateInvoiceText(
-                  invoiceBuyer.buyer,
-                  invoiceBuyer.bookings.filter((b) => b.status === 'active'),
-                  includeItemList
-                )}
-                className="w-full rounded-md border border-gray-300 bg-gray-50 p-3 font-mono text-xs text-gray-800 focus:outline-none"
-              />
+              {invoiceLoading ? (
+                <div className="flex h-64 items-center justify-center rounded-md border border-gray-300 bg-gray-50 text-sm text-gray-500">
+                  Loading invoice details...
+                </div>
+              ) : (
+                <textarea
+                  rows={14}
+                  value={invoiceText}
+                  onChange={(e) => setInvoiceText(e.target.value)}
+                  className="w-full rounded-md border border-gray-300 bg-gray-50 p-3 font-mono text-xs text-gray-800 focus:border-gray-500 focus:bg-white focus:outline-none"
+                />
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setInvoiceBuyer(null)}
+                onClick={() => setInvoiceBuyerName(null)}
                 className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
+                disabled={invoiceLoading}
                 onClick={() => void executeCopy()}
-                className="rounded-md bg-purple-700 px-4 py-2 text-sm font-medium text-white hover:bg-purple-800"
+                className="rounded-md bg-purple-700 px-4 py-2 text-sm font-medium text-white hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Copy to Clipboard
               </button>
@@ -506,17 +572,29 @@ export default function Buyers() {
             <section className="space-y-2">
               <div className="flex items-center justify-between">
                 <h2 className="font-medium text-gray-900">Active bookings</h2>
-                {selectedBuyer.bookings.filter((booking) => booking.status === 'active').length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => handleCopyInvoice(selectedBuyer)}
-                    className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800"
-                  >
-                    Copy Invoice
-                  </button>
+                {selectedBuyer.booked > 0 && (
+                  <div className="flex items-center gap-2 whitespace-nowrap">
+                    <button
+                      type="button"
+                      disabled={copyingBuyer === selectedBuyer.buyer}
+                      onClick={() => void handleDirectCopyInvoice(selectedBuyer.buyer)}
+                      className="rounded-md bg-purple-700 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {copyingBuyer === selectedBuyer.buyer ? 'Copying...' : 'Copy Invoice'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenEditInvoice(selectedBuyer.buyer)}
+                      className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      Edit Invoice
+                    </button>
+                  </div>
                 )}
               </div>
-              {selectedBuyer.bookings.filter((booking) => booking.status === 'active').length === 0 ? (
+              {detailLoading ? (
+                <p className="text-sm text-gray-400">Loading bookings...</p>
+              ) : selectedBuyer.bookings.filter((booking) => booking.status === 'active').length === 0 ? (
                 <p className="text-sm text-gray-400">No active bookings.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -550,7 +628,9 @@ export default function Buyers() {
 
             <section>
               <h2 className="mb-2 font-medium text-gray-900">Purchase history</h2>
-              {selectedBuyer.sales.length === 0 ? (
+              {detailLoading ? (
+                <p className="text-sm text-gray-400">Loading purchase history...</p>
+              ) : selectedBuyer.sales.length === 0 ? (
                 <p className="text-sm text-gray-400">No purchases.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-gray-200">

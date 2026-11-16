@@ -47,6 +47,13 @@ export interface Customer {
   created_at: string
 }
 
+export interface BuyerAddress {
+  buyer_name: string
+  address_text: string
+  created_at: string
+  updated_at: string
+}
+
 export interface Booking {
   id: string
   inventory_item_id: string | null
