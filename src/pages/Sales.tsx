@@ -15,6 +15,7 @@ import {
   resolveIndividualItemModal,
   shouldFetchBatchCountForItem,
 } from '../lib/inventoryModal'
+import { fetchAllRows } from '../lib/supabasePagination'
 import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -76,10 +77,43 @@ const emptyGroupEditForm = {
 }
 
 const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
-const PAGE_SIZE = 200
+const SOFT_PAGE_ITEM_LIMIT = 200
+const DATE_AGGREGATION_FETCH_SIZE = 1000
 const SEARCH_DEBOUNCE_MS = 300
 const SALES_SELECT_COLUMNS =
   'id, inventory_item_id, customer_id, booking_group_id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, fulfillment_status, notes, created_at, inventory_items(item_name, batch_name, modal_price, batch_modal_total)'
+
+interface SearchWordFilter {
+  safeWord: string
+  matchedItemIds: string[]
+}
+
+function chunkDatesBySoftLimit(
+  dailyAggregations: Array<{ date: string; count: number }>,
+  softLimit = SOFT_PAGE_ITEM_LIMIT
+): string[][] {
+  const pages: string[][] = []
+  let currentPageDates: string[] = []
+  let currentCount = 0
+
+  for (const day of dailyAggregations) {
+    currentPageDates.push(day.date)
+    currentCount += day.count
+
+    // Close the page chunk once the soft limit is reached/exceeded
+    if (currentCount >= softLimit) {
+      pages.push(currentPageDates)
+      currentPageDates = []
+      currentCount = 0
+    }
+  }
+
+  if (currentPageDates.length > 0) {
+    pages.push(currentPageDates)
+  }
+
+  return pages
+}
 
 export default function Sales() {
   const { user, canWrite } = useAuth()
@@ -87,6 +121,8 @@ export default function Sales() {
   const [sales, setSales] = useState<SaleRow[]>([])
   const [batchItemCounts, setBatchItemCounts] = useState<Map<string, number>>(() => new Map())
   const [totalCount, setTotalCount] = useState<number>(0)
+  const [totalPages, setTotalPages] = useState<number>(1)
+  const [activeDayCount, setActiveDayCount] = useState<number>(0)
   const [page, setPage] = useState<number>(1)
   const [deletingSale, setDeletingSale] = useState<SaleRow | null>(null)
   const [undoingSale, setUndoingSale] = useState<SaleRow | null>(null)
@@ -144,25 +180,9 @@ export default function Sales() {
     else setLoading(true)
     setError(null)
     try {
-      const from = (page - 1) * PAGE_SIZE
-      const to = from + PAGE_SIZE - 1
-
-      let query = supabase
-        .from('sales')
-        .select(SALES_SELECT_COLUMNS, { count: 'exact' })
-
-      if (fulfillmentFilter !== 'all') {
-        query = query.eq('fulfillment_status', fulfillmentFilter)
-      }
-
-      if (startDate) {
-        query = query.gte('sale_date', startDate)
-      }
-
-      if (endDate) {
-        query = query.lte('sale_date', endDate)
-      }
-
+      // Pre-resolve search word matches once so Step 1 (date aggregation) and Step 3 (page fetch)
+      // apply identical filter conditions.
+      const searchFilters: SearchWordFilter[] = []
       const trimmedSearch = debouncedSearch.trim()
       if (trimmedSearch) {
         const words = trimmedSearch.split(/\s+/).filter(Boolean)
@@ -174,21 +194,87 @@ export default function Sales() {
             .select('id')
             .or(`item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%`)
             .limit(200)
-          const matchedIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
-          if (matchedIds.length > 0) {
-            query = query.or(
-              `buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%,inventory_item_id.in.(${matchedIds.join(',')})`
-            )
-          } else {
-            query = query.or(`buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%`)
-          }
+          const matchedItemIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
+          searchFilters.push({ safeWord, matchedItemIds })
         }
       }
 
-      const { data, count, error: fetchError } = await query
+      if (!isLatest()) return
+
+      const buildFilteredSalesQuery = <Columns extends string>(columns: Columns) => {
+        let q = supabase.from('sales').select(columns)
+        if (fulfillmentFilter !== 'all') {
+          q = q.eq('fulfillment_status', fulfillmentFilter)
+        }
+        if (startDate) {
+          q = q.gte('sale_date', startDate)
+        }
+        if (endDate) {
+          q = q.lte('sale_date', endDate)
+        }
+        for (const { safeWord, matchedItemIds } of searchFilters) {
+          if (matchedItemIds.length > 0) {
+            q = q.or(
+              `buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%,inventory_item_id.in.(${matchedItemIds.join(',')})`
+            )
+          } else {
+            q = q.or(`buyer_name.ilike.%${safeWord}%,notes.ilike.%${safeWord}%`)
+          }
+        }
+        return q
+      }
+
+      // Step 1: Fetch lightweight sale_date column for all matching records and aggregate counts per day
+      const dateRows = await fetchAllRows<{ sale_date: string }>(
+        (from, to) =>
+          buildFilteredSalesQuery('sale_date')
+            .order('sale_date', { ascending: false })
+            .order('id', { ascending: false })
+            .range(from, to),
+        DATE_AGGREGATION_FETCH_SIZE
+      )
+
+      if (!isLatest()) return
+
+      const countsByDate = new Map<string, number>()
+      for (const row of dateRows) {
+        if (!row.sale_date) continue
+        countsByDate.set(row.sale_date, (countsByDate.get(row.sale_date) ?? 0) + 1)
+      }
+
+      const dailyAggregations = Array.from(countsByDate.entries())
+        .map(([date, count]) => ({ date, count }))
+        .sort((a, b) => b.date.localeCompare(a.date))
+
+      // Step 2: Client-side dynamic page chunking (soft limit: 200 items, never splitting a day)
+      const pages = chunkDatesBySoftLimit(dailyAggregations, SOFT_PAGE_ITEM_LIMIT)
+      const nextTotalPages = Math.max(1, pages.length)
+      const safePage = Math.min(page, nextTotalPages)
+
+      if (safePage !== page) {
+        setTotalPages(nextTotalPages)
+        setTotalCount(dateRows.length)
+        setPage(safePage)
+        return
+      }
+
+      const activeDates = pages[safePage - 1] ?? []
+
+      if (activeDates.length === 0) {
+        setBatchItemCounts(new Map())
+        setSales([])
+        setTotalCount(0)
+        setTotalPages(1)
+        setActiveDayCount(0)
+        hasLoadedRef.current = true
+        return
+      }
+
+      // Step 3: Fetch ALL full sales rows for the active page's dates (no .limit() or .range())
+      const { data, error: fetchError } = await buildFilteredSalesQuery(SALES_SELECT_COLUMNS)
+        .in('sale_date', activeDates)
         .order('sale_date', { ascending: false })
         .order('id', { ascending: false })
-        .range(from, to)
 
       if (fetchError) throw new Error(fetchError.message)
       if (!isLatest()) return
@@ -245,7 +331,9 @@ export default function Sales() {
 
       setBatchItemCounts(countsMap)
       setSales(nextSales)
-      setTotalCount(count ?? nextSales.length)
+      setTotalCount(dateRows.length)
+      setTotalPages(nextTotalPages)
+      setActiveDayCount(activeDates.length)
       hasLoadedRef.current = true
       // Selections persist across searches/pages: never filter selectedSaleIds here.
       // Instead, merge fetched rows into the metadata cache (keeping rows that are still selected).
@@ -315,11 +403,8 @@ export default function Sales() {
     })
   }, [sales, sortBy])
 
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
   const hasPrevPage = page > 1
   const hasNextPage = page < totalPages
-  const pageFrom = totalCount === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
-  const pageTo = totalCount === 0 ? 0 : Math.min(totalCount, page * PAGE_SIZE)
 
   const knownGroupIds = useMemo(
     () => sales.map((sale) => sale.booking_group_id).filter((id): id is string => Boolean(id)),
@@ -1676,9 +1761,11 @@ export default function Sales() {
           {/* Server-Side Pagination Controls */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm">
             <div className="text-gray-600">
-              Showing <span className="font-medium text-gray-900">{pageFrom}</span> to{' '}
-              <span className="font-medium text-gray-900">{pageTo}</span> of{' '}
-              <span className="font-medium text-gray-900">{totalCount}</span> sales (Page{' '}
+              Showing <span className="font-medium text-gray-900">{sales.length}</span>{' '}
+              {sales.length === 1 ? 'item' : 'items'} across{' '}
+              <span className="font-medium text-gray-900">{activeDayCount}</span>{' '}
+              {activeDayCount === 1 ? 'day' : 'days'} (of{' '}
+              <span className="font-medium text-gray-900">{totalCount}</span> total, Page{' '}
               <span className="font-medium text-gray-900">{page}</span> of{' '}
               <span className="font-medium text-gray-900">{totalPages}</span>)
             </div>

@@ -1,6 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
 
 interface BuyerAutocompleteProps {
   value: string
@@ -63,88 +62,102 @@ export default function BuyerAutocomplete({
   }, [])
 
   useEffect(() => {
-    if (!open || suggestions.length > 0) return
+    if (!open) return
 
     let cancelled = false
     setLoading(true)
 
-    async function loadBuyerNames() {
+    const timer = window.setTimeout(async () => {
       try {
-        const [bookingsData, salesData] = await Promise.all([
-          fetchAllRows<{ buyer_name: string | null }>((from, to) =>
-            supabase.from('bookings').select('buyer_name').range(from, to)
-          ),
-          fetchAllRows<{ buyer_name: string | null }>((from, to) =>
-            supabase.from('sales').select('buyer_name').range(from, to)
-          ),
-        ])
+        let query = supabase
+          .from('buyer_summaries')
+          .select('buyer_name, purchased, booked')
+          .not('buyer_name', 'is', null)
+
+        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        searchWords.forEach((word) => {
+          query = query.ilike('buyer_name', `%${word}%`)
+        })
+
+        const { data } = await query
+          .order('purchased', { ascending: false })
+          .order('booked', { ascending: false })
+          .order('buyer_name', { ascending: true })
+          .limit(50)
 
         if (cancelled) return
 
-        const suggestionsByName = new Map<string, BuyerSuggestion>()
-        function ensureSuggestion(rawName: string): BuyerSuggestion {
-          const name = rawName.trim()
-          const existingName = [...suggestionsByName.keys()].find(
-            (candidate) => candidate.toLowerCase() === name.toLowerCase()
-          )
-          if (existingName) return suggestionsByName.get(existingName) as BuyerSuggestion
-          const suggestion = { name, purchases: 0, transactions: 0 }
-          suggestionsByName.set(name, suggestion)
-          return suggestion
-        }
-
-        for (const raw of existingBuyers ?? []) {
-          const name = raw.trim()
+        const seen = new Map<string, BuyerSuggestion>()
+        for (const row of data ?? []) {
+          const name = String(row.buyer_name ?? '').trim()
           if (!name) continue
-          ensureSuggestion(name)
+          const key = name.toLowerCase()
+          if (!seen.has(key)) {
+            const purchases = Number(row.purchased ?? 0)
+            const booked = Number(row.booked ?? 0)
+            seen.set(key, {
+              name,
+              purchases,
+              transactions: purchases + booked,
+            })
+          }
         }
 
-        for (const row of bookingsData ?? []) {
-          const name = row.buyer_name?.trim()
-          if (!name) continue
-          ensureSuggestion(name).transactions += 1
-        }
-
-        for (const row of salesData ?? []) {
-          const name = row.buyer_name?.trim()
-          if (!name) continue
-          const suggestion = ensureSuggestion(name)
-          suggestion.transactions += 1
-          suggestion.purchases += 1
-        }
-
-        setSuggestions(
-          [...suggestionsByName.values()].sort(
-            (a, b) => b.purchases - a.purchases || b.transactions - a.transactions || a.name.localeCompare(b.name)
-          )
-        )
+        setSuggestions([...seen.values()])
       } catch {
         // ignore errors
       } finally {
         if (!cancelled) setLoading(false)
       }
-    }
-
-    loadBuyerNames()
+    }, 300)
 
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [open, suggestions.length, existingBuyers])
+  }, [open, value])
+
+  const combinedSuggestions = useMemo(() => {
+    const seen = new Map<string, BuyerSuggestion>()
+
+    for (const suggestion of suggestions) {
+      const key = suggestion.name.toLowerCase()
+      if (!seen.has(key)) {
+        seen.set(key, suggestion)
+      }
+    }
+
+    for (const raw of existingBuyers ?? []) {
+      const name = raw.trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (!seen.has(key)) {
+        seen.set(key, { name, purchases: 0, transactions: 0 })
+      }
+    }
+
+    return [...seen.values()]
+  }, [suggestions, existingBuyers])
 
   const filteredSuggestions = useMemo(() => {
-    const searchInput = value.trim().toLowerCase()
-    if (!searchInput) {
-      return suggestions.slice(0, 8)
+    const trimmed = value.trim()
+    if (!trimmed) {
+      return combinedSuggestions.slice(0, 50)
     }
 
-    return suggestions
-      .filter((buyer) => buyer.name.toLowerCase().includes(searchInput))
+    const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+    const searchLower = trimmed.toLowerCase()
+
+    return combinedSuggestions
+      .filter((buyer) => {
+        const normalizedName = buyer.name.toLowerCase()
+        return searchWords.every((word) => normalizedName.includes(word))
+      })
       .sort((a, b) => {
         const aLower = a.name.toLowerCase()
         const bLower = b.name.toLowerCase()
-        const aStarts = aLower.startsWith(searchInput) ? 0 : 1
-        const bStarts = bLower.startsWith(searchInput) ? 0 : 1
+        const aStarts = aLower.startsWith(searchLower) ? 0 : 1
+        const bStarts = bLower.startsWith(searchLower) ? 0 : 1
         return (
           aStarts - bStarts ||
           b.purchases - a.purchases ||
@@ -152,8 +165,12 @@ export default function BuyerAutocomplete({
           a.name.localeCompare(b.name)
         )
       })
-      .slice(0, 8)
-  }, [suggestions, value])
+      .slice(0, 50)
+  }, [combinedSuggestions, value])
+
+  const isExisting = combinedSuggestions.some(
+    (s) => s.name.toLowerCase() === value.trim().toLowerCase()
+  )
 
   return (
     <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>
@@ -190,26 +207,53 @@ export default function BuyerAutocomplete({
           {loading ? (
             <p className="px-3 py-3 text-sm text-gray-500">Loading buyers...</p>
           ) : filteredSuggestions.length === 0 ? (
-            <p className="px-3 py-3 text-sm text-gray-500">Type a new buyer name</p>
-          ) : (
-            filteredSuggestions.map((suggestion) => (
+            value.trim() ? (
               <button
-                key={suggestion.name}
                 type="button"
-                role="option"
-                aria-selected={suggestion.name.toLowerCase() === value.trim().toLowerCase()}
                 onClick={() => {
-                  onChange(suggestion.name)
+                  onChange(value.trim())
                   setOpen(false)
                 }}
-                className="block w-full border-b border-gray-100 px-3 py-2 text-left last:border-0 hover:bg-gray-50"
+                className="block w-full px-3 py-2 text-left text-sm text-blue-600 hover:bg-blue-50"
               >
-                <span className="block text-sm font-medium text-gray-900">{suggestion.name}</span>
-                <span className="block text-xs text-gray-500">
-                  {suggestion.purchases} previous purchase{suggestion.purchases === 1 ? '' : 's'}
-                </span>
+                + Use &ldquo;{value.trim()}&rdquo;
               </button>
-            ))
+            ) : (
+              <p className="px-3 py-3 text-sm text-gray-500">Type a new buyer name</p>
+            )
+          ) : (
+            <>
+              {filteredSuggestions.map((suggestion) => (
+                <button
+                  key={suggestion.name}
+                  type="button"
+                  role="option"
+                  aria-selected={suggestion.name.toLowerCase() === value.trim().toLowerCase()}
+                  onClick={() => {
+                    onChange(suggestion.name)
+                    setOpen(false)
+                  }}
+                  className="block w-full border-b border-gray-100 px-3 py-2 text-left last:border-0 hover:bg-gray-50"
+                >
+                  <span className="block text-sm font-medium text-gray-900">{suggestion.name}</span>
+                  <span className="block text-xs text-gray-500">
+                    {suggestion.purchases} previous purchase{suggestion.purchases === 1 ? '' : 's'}
+                  </span>
+                </button>
+              ))}
+              {value.trim() && !isExisting && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange(value.trim())
+                    setOpen(false)
+                  }}
+                  className="block w-full border-t border-gray-200 px-3 py-2 text-left text-sm text-blue-600 hover:bg-blue-50"
+                >
+                  + Use &ldquo;{value.trim()}&rdquo;
+                </button>
+              )}
+            </>
           )}
         </div>
       )}

@@ -68,10 +68,12 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 3.⁠ ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
 4. 🚚 Tidak terima komplain barang rusak akibat pihak ekspedisi(box hancur/rusak/terbuka)saat diterima. JANGAN DIBUKA dan segera hubungi dahulu pihak ekspedisi.
 5. 📦 Syarat Komplain: Wajib video unboxing utuh tanpa jeda/edit. Rekam dari sebelum paket dibuka(segel utuh, resi & semua sisi terlihat). Barang tidak boleh out of frame sampai selesai.(Tanpa video sesuai syarat = komplain tidak sah).
-6.⁠   ⁠Wajib kirim bukti transfer ke sini.
-Link Group: https://chat.whatsapp.com/K5NLbkHcrDt2KdBs1lJ3zq?mode=gi_t 
+6.⁠   ⁠Wajib kirim bukti transfer.
 
-Terima kasih Sudah Berbelanja di PinkiePie.Garage! ✨`
+Terima kasih Sudah Berbelanja di PinkiePie.Garage! ✨
+
+Link Group: https://chat.whatsapp.com/K5NLbkHcrDt2KdBs1lJ3zq?mode=gi_t 
+`
 }
 
 export default function Buyers() {
