@@ -121,11 +121,13 @@ export function resolveItemTransactionDetails(
   }
 }
 
-// Cache whether the database schema includes flat sold_price / buyer_name columns on inventory_items
-let supportsFlatInventorySaleFields: boolean | null = null
+// Default to false because `inventory_items` in the database schema does not have flat
+// `sold_price` / `buyer_name` columns (those live on `sales` and `bookings`). This prevents
+// firing a guaranteed 400 PGRST204 error + retry on every session.
+let supportsFlatInventorySaleFields: boolean = false
 
 export function detectFlatInventorySaleFields(sampleItem: Record<string, unknown> | null | undefined) {
-  if (!sampleItem || supportsFlatInventorySaleFields !== null) return
+  if (!sampleItem) return
   supportsFlatInventorySaleFields = 'sold_price' in sampleItem && 'buyer_name' in sampleItem
 }
 

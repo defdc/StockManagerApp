@@ -105,7 +105,9 @@ function getRequestUrl(input: RequestInfo | URL) {
   return input.url
 }
 
-/** Returns the PostgREST table for a mutating request, `*` for RPCs, or null otherwise. */
+const READ_ONLY_RPCS = new Set(['get_batch_item_counts', 'get_sales_date_counts'])
+
+/** Returns the PostgREST table for a mutating request, `*` for mutating RPCs, or null otherwise. */
 function getMutatedTable(url: string): DataTable | null {
   let pathname: string
   try {
@@ -118,7 +120,12 @@ function getMutatedTable(url: string): DataTable | null {
   if (idx === -1) return null // auth / storage / realtime requests are ignored
   const [first, second] = pathname.slice(idx + marker.length).split('/')
   if (!first) return null
-  if (first === 'rpc') return second ? ALL_TABLES : null // RPCs may touch anything
+  if (first === 'rpc') {
+    if (!second) return null
+    const rpcName = decodeURIComponent(second)
+    if (READ_ONLY_RPCS.has(rpcName) || rpcName.startsWith('get_')) return null
+    return ALL_TABLES
+  }
   return decodeURIComponent(first)
 }
 
@@ -153,11 +160,11 @@ interface UseDataInvalidationOptions {
   remoteOnly?: boolean
 }
 
-const FOCUS_REFETCH_MIN_INTERVAL_MS = 1000
+const FOCUS_REFETCH_MIN_INTERVAL_MS = 60_000
 
 /**
  * Calls `onInvalidate` whenever any of `tables` is mutated (in this tab or another one),
- * and — by default — whenever the window regains focus.
+ * and — by default — whenever the window regains focus (throttled to at most once per 60s).
  */
 export function useDataInvalidation(
   tables: readonly DataTable[],
@@ -197,13 +204,14 @@ export function useDataInvalidation(
 
   useEffect(() => {
     if (!refetchOnFocus || typeof window === 'undefined') return
-    let lastRun = 0
+    // Initialize lastRun to mount timestamp so an immediate focus event after mount does not double-fetch.
+    let lastRun = Date.now()
     const handleActive = () => {
       if (document.visibilityState === 'hidden') return
       // A pending write will trigger its own invalidation once it settles.
       if (hasPendingMutations()) return
       const now = Date.now()
-      if (now - lastRun < FOCUS_REFETCH_MIN_INTERVAL_MS) return // focus + visibilitychange fire together
+      if (now - lastRun < FOCUS_REFETCH_MIN_INTERVAL_MS) return
       lastRun = now
       callbackRef.current()
     }

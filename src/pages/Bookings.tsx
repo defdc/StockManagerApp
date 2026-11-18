@@ -59,7 +59,7 @@ const emptyBulkEditForm = {
 const STATUS_ORDER: Record<string, number> = { active: 0, converted_to_sale: 1, cancelled: 2 }
 const BOOKING_STATUSES: BookingStatus[] = ['active', 'converted_to_sale', 'cancelled']
 const PAGE_SIZE = 200
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 const BOOKINGS_SELECT_COLUMNS =
   'id, inventory_item_id, customer_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, modal_price, dp_amount, remaining_amount, deadline, status, notes, created_at, inventory_items(item_name, modal_price, batch_name, batch_modal_total)'
 
@@ -122,7 +122,8 @@ export default function Bookings() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])
@@ -880,20 +881,18 @@ export default function Bookings() {
       )
     )
     if (batchesMissingTotal.length > 0) {
-      await Promise.all(
-        batchesMissingTotal.map(async (batchName) => {
-          const { data } = await supabase
-            .from('inventory_items')
-            .select('batch_modal_total')
-            .eq('batch_name', batchName)
-            .gt('batch_modal_total', 0)
-            .limit(1)
-          const total = data?.[0]?.batch_modal_total
-          if (typeof total === 'number' && total > 0) {
-            fallbackBatchTotals.set(batchName, total)
-          }
-        })
-      )
+      const { data } = await supabase
+        .from('inventory_items')
+        .select('batch_name, batch_modal_total')
+        .in('batch_name', batchesMissingTotal)
+        .gt('batch_modal_total', 0)
+      for (const row of data ?? []) {
+        const bName = (row.batch_name as string | null)?.trim()
+        const total = row.batch_modal_total as number | null
+        if (bName && typeof total === 'number' && total > 0 && !fallbackBatchTotals.has(bName)) {
+          fallbackBatchTotals.set(bName, total)
+        }
+      }
     }
 
     const batchNamesNeedingCount = Array.from(
@@ -1235,19 +1234,22 @@ export default function Bookings() {
       return
     }
 
-    // Atomically update each inventory item with its individual sold state and price/buyer
-    const itemResults = await Promise.all(
-      resolvedItems.map(({ booking, salePrice, buyerName }) =>
-        booking.inventory_item_id
-          ? updateInventoryItemSoldState(booking.inventory_item_id, salePrice, buyerName)
-          : Promise.resolve({ error: null })
+    // Batch-update all sold inventory items in a single chunked `.in('id', ...)` query
+    const soldItemIds = resolvedItems
+      .map(({ booking }) => booking.inventory_item_id)
+      .filter((id): id is string => Boolean(id))
+    if (soldItemIds.length > 0) {
+      const { error: itemError } = await runChunked(soldItemIds, (chunk) =>
+        supabase
+          .from('inventory_items')
+          .update({ status: 'sold', updated_at: now })
+          .in('id', chunk)
       )
-    )
-    const failedItem = itemResults.find((r) => r.error)
-    if (failedItem?.error) {
-      setBulkSaleSaving(false)
-      setBulkSaleError(failedItem.error.message)
-      return
+      if (itemError) {
+        setBulkSaleSaving(false)
+        setBulkSaleError(itemError.message)
+        return
+      }
     }
 
     // Atomically update each booking with converted_to_sale status and individual deal_price / buyer_name

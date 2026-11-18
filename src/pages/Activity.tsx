@@ -5,7 +5,7 @@ import { formatDateTime } from '../lib/format'
 import type { ActivityLog, Profile } from '../types/database'
 
 const PAGE_SIZE = 200
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 
 function getUserDisplay(
   userId: string | null,
@@ -138,7 +138,8 @@ export default function Activity() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])

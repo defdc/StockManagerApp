@@ -156,13 +156,19 @@ export default function ItemCombobox({
   useEffect(() => {
     if (!open || selectedItem) return
 
+    const trimmed = query.trim()
+    if (trimmed.length < 2) {
+      setLoading(false)
+      return
+    }
+
     let cancelled = false
     setLoading(true)
     const timer = window.setTimeout(async () => {
       setError(null)
       try {
         const currentExcludeIds = excludeKey ? excludeKey.split(',') : []
-        const items = await findItems(query.trim(), statusKey.split(','), currentExcludeIds)
+        const items = await findItems(trimmed, statusKey.split(','), currentExcludeIds)
         if (!cancelled) setSuggestions(items)
       } catch (searchError) {
         if (!cancelled) {
@@ -172,7 +178,7 @@ export default function ItemCombobox({
       } finally {
         if (!cancelled) setLoading(false)
       }
-    }, 300)
+    }, 600)
 
     return () => {
       cancelled = true

@@ -60,6 +60,12 @@ export default function CategoryAutocomplete({
     // If existingCategories is passed by parent, skip fetching from Supabase
     if (existingCategories || !open) return
 
+    const trimmed = value.trim()
+    if (trimmed.length < 2) {
+      setLoading(false)
+      return
+    }
+
     let cancelled = false
     setLoading(true)
 
@@ -70,7 +76,7 @@ export default function CategoryAutocomplete({
           .select('category')
           .not('category', 'is', null)
 
-        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
         searchWords.forEach((word) => {
           query = query.ilike('category', `%${word}%`)
         })
@@ -96,7 +102,7 @@ export default function CategoryAutocomplete({
           setLoading(false)
         }
       }
-    }, 300)
+    }, 600)
 
     return () => {
       cancelled = true

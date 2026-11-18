@@ -21,12 +21,19 @@ const AuthContext = createContext<AuthContextValue>({
   loading: true,
 })
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null)
-  const [role, setRole] = useState<UserRole>('viewer')
-  const [loading, setLoading] = useState(true)
+// Module-level role cache & in-flight deduplication to prevent duplicate `profiles` queries
+// across simultaneous `getSession()` + `onAuthStateChange()` calls and Vite HMR reloads.
+const cachedRoleByUserId = new Map<string, UserRole>()
+const inFlightRoleFetch = new Map<string, Promise<UserRole>>()
 
-  async function fetchUserRole(userId: string) {
+async function resolveUserRole(userId: string): Promise<UserRole> {
+  const cached = cachedRoleByUserId.get(userId)
+  if (cached) return cached
+
+  const existingPromise = inFlightRoleFetch.get(userId)
+  if (existingPromise) return existingPromise
+
+  const fetchPromise = (async (): Promise<UserRole> => {
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -34,37 +41,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .eq('id', userId)
         .single()
       if (!error && data?.role && ['admin', 'editor', 'viewer'].includes(data.role)) {
-        setRole(data.role as UserRole)
-      } else {
-        setRole('viewer')
+        const resolved = data.role as UserRole
+        cachedRoleByUserId.set(userId, resolved)
+        return resolved
       }
+      return 'viewer'
     } catch {
-      setRole('viewer')
+      return 'viewer'
+    } finally {
+      inFlightRoleFetch.delete(userId)
     }
-  }
+  })()
+
+  inFlightRoleFetch.set(userId, fetchPromise)
+  return fetchPromise
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session | null>(null)
+  const [role, setRole] = useState<UserRole>('viewer')
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    let mounted = true
+
     supabase.auth.getSession().then(async ({ data }) => {
+      if (!mounted) return
       setSession(data.session)
       if (data.session?.user) {
-        await fetchUserRole(data.session.user.id)
+        const resolvedRole = await resolveUserRole(data.session.user.id)
+        if (mounted) setRole(resolvedRole)
       } else {
         setRole('viewer')
       }
-      setLoading(false)
+      if (mounted) setLoading(false)
     })
 
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange(async (event, newSession) => {
+      if (!mounted) return
+      if (event === 'SIGNED_OUT') {
+        cachedRoleByUserId.clear()
+      }
       setSession(newSession)
       if (newSession?.user) {
-        await fetchUserRole(newSession.user.id)
+        const resolvedRole = await resolveUserRole(newSession.user.id)
+        if (mounted) setRole(resolvedRole)
       } else {
         setRole('viewer')
       }
-      setLoading(false)
+      if (mounted) setLoading(false)
     })
 
-    return () => listener.subscription.unsubscribe()
+    return () => {
+      mounted = false
+      listener.subscription.unsubscribe()
+    }
   }, [])
 
   const canWrite = role === 'admin' || role === 'editor'

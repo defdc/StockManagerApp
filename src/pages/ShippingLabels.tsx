@@ -18,7 +18,7 @@ interface MergedBuyer {
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
-const AUTO_SAVE_DEBOUNCE_MS = 800
+const AUTO_SAVE_DEBOUNCE_MS = 1500
 const PAGE_SIZE = 100
 
 export default function ShippingLabels() {
@@ -42,6 +42,7 @@ export default function ShippingLabels() {
   const [saveStatuses, setSaveStatuses] = useState<Record<string, SaveStatus>>({})
   const debounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const pendingPayloadsRef = useRef<Map<string, { buyer_name: string; address_text: string }>>(new Map())
+  const lastSavedAddressesRef = useRef<Map<string, string>>(new Map())
 
   // Add New Buyer Modal state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
@@ -49,48 +50,74 @@ export default function ShippingLabels() {
   const [newBuyerAddress, setNewBuyerAddress] = useState('')
   const [addingBuyer, setAddingBuyer] = useState(false)
 
+  // Continuous 80mm thermal roll dynamic print height state & ref
+  const printContainerRef = useRef<HTMLDivElement>(null)
+  const [printHeightMm, setPrintHeightMm] = useState<number>(100)
+
   // ── Data Fetching & Merging (Egress-Safe) ──────────────────────────────────
 
   const loadData = useCallback(async (isInitial = false) => {
     if (isInitial) setLoading(true)
     setFetchError(null)
     try {
-      const [addressesRows, salesBuyerRows, bookingsBuyerRows] = await Promise.all([
-        fetchAllRows<BuyerAddress>(
+      const addressesPromise = fetchAllRows<BuyerAddress>(
+        (from, to) =>
+          supabase
+            .from('buyer_addresses')
+            .select('buyer_name, address_text, created_at, updated_at')
+            .order('buyer_name', { ascending: true })
+            .range(from, to) as unknown as PromiseLike<{
+            data: BuyerAddress[] | null
+            error: { message: string } | null
+          }>,
+        1000
+      )
+
+      // Prefer the pre-aggregated `buyer_summaries` view (1 distinct row per buyer) to avoid
+      // scanning thousands of individual sales and bookings rows; fall back if unavailable.
+      let distinctBuyerRows: { buyer_name: string }[] = []
+      try {
+        distinctBuyerRows = await fetchAllRows<{ buyer_name: string }>(
           (from, to) =>
             supabase
-              .from('buyer_addresses')
-              .select('buyer_name, address_text, created_at, updated_at')
+              .from('buyer_summaries')
+              .select('buyer_name')
               .order('buyer_name', { ascending: true })
               .range(from, to) as unknown as PromiseLike<{
-              data: BuyerAddress[] | null
-              error: { message: string } | null
-            }>,
-          1000
-        ),
-        fetchAllRows<{ buyer_name: string }>(
-          (from, to) =>
-            supabase
-              .from('sales')
-              .select('buyer_name')
-              .range(from, to) as unknown as PromiseLike<{
               data: { buyer_name: string }[] | null
               error: { message: string } | null
             }>,
           1000
-        ),
-        fetchAllRows<{ buyer_name: string }>(
-          (from, to) =>
-            supabase
-              .from('bookings')
-              .select('buyer_name')
-              .range(from, to) as unknown as PromiseLike<{
-              data: { buyer_name: string }[] | null
-              error: { message: string } | null
-            }>,
-          1000
-        ),
-      ])
+        )
+      } catch {
+        const [salesBuyerRows, bookingsBuyerRows] = await Promise.all([
+          fetchAllRows<{ buyer_name: string }>(
+            (from, to) =>
+              supabase
+                .from('sales')
+                .select('buyer_name')
+                .range(from, to) as unknown as PromiseLike<{
+                data: { buyer_name: string }[] | null
+                error: { message: string } | null
+              }>,
+            1000
+          ),
+          fetchAllRows<{ buyer_name: string }>(
+            (from, to) =>
+              supabase
+                .from('bookings')
+                .select('buyer_name')
+                .range(from, to) as unknown as PromiseLike<{
+                data: { buyer_name: string }[] | null
+                error: { message: string } | null
+              }>,
+            1000
+          ),
+        ])
+        distinctBuyerRows = [...bookingsBuyerRows, ...salesBuyerRows]
+      }
+
+      const addressesRows = await addressesPromise
 
       const map = new Map<string, MergedBuyer>()
 
@@ -109,22 +136,8 @@ export default function ShippingLabels() {
         }
       }
 
-      // 2. Merge distinct buyer_name from bookings
-      for (const row of bookingsBuyerRows) {
-        const trimmed = row.buyer_name?.trim()
-        if (!trimmed) continue
-        const key = trimmed.toLowerCase()
-        if (!map.has(key)) {
-          map.set(key, {
-            key,
-            buyer_name: trimmed,
-            address_text: '',
-          })
-        }
-      }
-
-      // 3. Merge distinct buyer_name from sales
-      for (const row of salesBuyerRows) {
+      // 2. Merge distinct buyer_name from bookings & sales
+      for (const row of distinctBuyerRows) {
         const trimmed = row.buyer_name?.trim()
         if (!trimmed) continue
         const key = trimmed.toLowerCase()
@@ -138,6 +151,11 @@ export default function ShippingLabels() {
       }
 
       // Preserve any unsaved local edits currently pending in debounce
+      for (const [key, buy] of map.entries()) {
+        if (!pendingPayloadsRef.current.has(key)) {
+          lastSavedAddressesRef.current.set(key, buy.address_text)
+        }
+      }
       for (const [key, pending] of pendingPayloadsRef.current.entries()) {
         map.set(key, {
           key,
@@ -185,6 +203,14 @@ export default function ShippingLabels() {
   const saveAddressToSupabase = useCallback(
     async (key: string, buyer_name: string, address_text: string) => {
       pendingPayloadsRef.current.delete(key)
+
+      // Skip upsert if text has not actually changed from the last saved value
+      const lastSaved = lastSavedAddressesRef.current.get(key) ?? ''
+      if (address_text === lastSaved) {
+        setSaveStatuses((prev) => ({ ...prev, [key]: 'idle' }))
+        return
+      }
+
       setSaveStatuses((prev) => ({ ...prev, [key]: 'saving' }))
 
       const { error } = await supabase.from('buyer_addresses').upsert(
@@ -202,6 +228,7 @@ export default function ShippingLabels() {
         return
       }
 
+      lastSavedAddressesRef.current.set(key, address_text)
       setSaveStatuses((prev) => ({ ...prev, [key]: 'saved' }))
     },
     [showToast]
@@ -213,15 +240,26 @@ export default function ShippingLabels() {
       prev.map((b) => (b.key === buyer.key ? { ...b, address_text: newText } : b))
     )
 
-    // Track pending change and schedule debounced upsert (800ms)
+    const existingTimer = debounceTimersRef.current.get(buyer.key)
+    if (existingTimer) {
+      clearTimeout(existingTimer)
+      debounceTimersRef.current.delete(buyer.key)
+    }
+
+    // If reverted back to last saved value, cancel pending save without hitting Supabase
+    const lastSaved = lastSavedAddressesRef.current.get(buyer.key) ?? ''
+    if (newText === lastSaved) {
+      pendingPayloadsRef.current.delete(buyer.key)
+      setSaveStatuses((prev) => ({ ...prev, [buyer.key]: 'idle' }))
+      return
+    }
+
+    // Track pending change and schedule debounced upsert (1500ms)
     pendingPayloadsRef.current.set(buyer.key, {
       buyer_name: buyer.buyer_name,
       address_text: newText,
     })
     setSaveStatuses((prev) => ({ ...prev, [buyer.key]: 'saving' }))
-
-    const existingTimer = debounceTimersRef.current.get(buyer.key)
-    if (existingTimer) clearTimeout(existingTimer)
 
     const timer = setTimeout(() => {
       debounceTimersRef.current.delete(buyer.key)
@@ -236,10 +274,10 @@ export default function ShippingLabels() {
     if (existingTimer) {
       clearTimeout(existingTimer)
       debounceTimersRef.current.delete(buyer.key)
-      const pending = pendingPayloadsRef.current.get(buyer.key)
-      if (pending) {
-        void saveAddressToSupabase(buyer.key, pending.buyer_name, pending.address_text)
-      }
+    }
+    const pending = pendingPayloadsRef.current.get(buyer.key)
+    if (pending) {
+      void saveAddressToSupabase(buyer.key, pending.buyer_name, pending.address_text)
     }
   }
 
@@ -293,12 +331,18 @@ export default function ShippingLabels() {
       )
     })
 
+    lastSavedAddressesRef.current.set(key, newBuyerAddress)
     setSaveStatuses((prev) => ({ ...prev, [key]: 'saved' }))
     showToast(`Address saved for ${canonicalName}.`, 'success')
     setNewBuyerName('')
     setNewBuyerAddress('')
     setIsAddModalOpen(false)
   }
+
+  const existingBuyerNames = useMemo(
+    () => buyers.map((b) => b.buyer_name),
+    [buyers]
+  )
 
   // ── Multi-Buyer Search & Filtering ─────────────────────────────────────────
 
@@ -393,7 +437,14 @@ export default function ShippingLabels() {
       )
       return
     }
-    window.print()
+    const pxHeight = printContainerRef.current?.scrollHeight || 300
+    const calculatedMm = Math.max(30, Math.ceil((pxHeight * 25.4) / 96) + 4)
+    setPrintHeightMm(calculatedMm)
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        window.print()
+      }, 50)
+    })
   }
 
   const savedCount = useMemo(
@@ -700,7 +751,7 @@ export default function ShippingLabels() {
                 value={newBuyerName}
                 onChange={setNewBuyerName}
                 placeholder="e.g. Budi Santoso"
-                existingBuyers={buyers.map((b) => b.buyer_name)}
+                existingBuyers={existingBuyerNames}
               />
 
               <div>
@@ -738,25 +789,37 @@ export default function ShippingLabels() {
         )}
       </div>
 
-      {/* ── Print-Only View (STRICTLY ADDRESS TEXT ONLY — 58mm Thermal) ──── */}
+      {/* ── Print-Only View (STRICTLY ADDRESS TEXT ONLY — 80mm Continuous Roll) ──── */}
       <style type="text/css">
         {`
           @media print {
-            @page { size: 58mm auto; margin: 0mm; }
-            body { margin: 0; padding: 0; }
+            @page {
+              size: 80mm ${printHeightMm}mm;
+              margin: 0mm;
+            }
+            html, body {
+              width: 80mm !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #ffffff !important;
+            }
           }
         `}
       </style>
-      <div className="hidden print:block w-[58mm]">
-        {printableSelectedBuyers.map((buyer) => (
-          <div
-            key={buyer.key}
-            style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}
-            className="mb-[0.5rem] w-full text-[12pt] font-medium text-black leading-tight whitespace-pre-wrap break-words break-inside-avoid"
-          >
-            {buyer.address_text}
-          </div>
-        ))}
+      <div
+        ref={printContainerRef}
+        className="fixed -left-[9999px] top-0 w-[80mm] opacity-0 pointer-events-none print:static print:left-auto print:top-auto print:opacity-100 print:pointer-events-auto print:block bg-white"
+      >
+        <div className="px-[3mm] py-[1.5mm]">
+          {printableSelectedBuyers.map((buyer) => (
+            <div
+              key={buyer.key}
+              className="w-full text-center text-[9pt] font-medium text-black leading-[1.15] whitespace-pre-wrap break-words mb-[2.5mm] last:mb-0"
+            >
+              {buyer.address_text}
+            </div>
+          ))}
+        </div>
       </div>
     </>
   )

@@ -84,7 +84,7 @@ function saveCollapsed(set: Set<string>) {
 const INVENTORY_SELECT_COLUMNS =
   'id, item_name, category, batch_name, batch_modal_total, modal_price, status, notes, created_at'
 const INVENTORY_PAGE_SIZE = 200
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -104,7 +104,8 @@ export default function Inventory() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])
@@ -246,35 +247,42 @@ export default function Inventory() {
     { remoteOnly: true }
   )
 
-  // Load drawer history when an item is selected
+  // Load drawer history when an item ID is selected (depend on item id, not object reference)
+  const drawerItemId = drawerItem?.id ?? null
+  const drawerItemBatchName = drawerItem?.batch_name ?? null
+  const drawerItemBatchModalTotal = drawerItem?.batch_modal_total ?? null
+  const drawerItemModalPrice = drawerItem?.modal_price ?? null
+
   useEffect(() => {
-    if (!drawerItem) {
+    if (!drawerItemId) {
       setDrawerBatchCount(undefined)
       return
     }
 
-    const currentItem = drawerItem
-    const itemId = currentItem.id
     let cancelled = false
     setDrawerLoading(true)
     setDrawerBatchCount(undefined)
 
     async function loadHistory() {
-      const batchName = currentItem.batch_name?.trim()
-      const needsCount = shouldFetchBatchCountForItem(currentItem)
+      const batchName = drawerItemBatchName?.trim()
+      const needsCount = shouldFetchBatchCountForItem({
+        batch_name: drawerItemBatchName,
+        batch_modal_total: drawerItemBatchModalTotal,
+        modal_price: drawerItemModalPrice,
+      })
       const [bookingsRes, salesRes, countsMap] = await Promise.all([
         supabase
           .from('bookings')
           .select('id, buyer_name, deal_price, group_total_deal_price, status, created_at, inventory_items(item_name)')
-          .eq('inventory_item_id', itemId)
+          .eq('inventory_item_id', drawerItemId)
           .order('created_at', { ascending: false }),
         supabase
           .from('sales')
           .select('id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, created_at')
-          .eq('inventory_item_id', itemId)
+          .eq('inventory_item_id', drawerItemId)
           .order('sale_date', { ascending: false }),
-        needsCount && currentItem.batch_name
-          ? fetchExactBatchItemCounts([currentItem.batch_name])
+        needsCount && drawerItemBatchName
+          ? fetchExactBatchItemCounts([drawerItemBatchName])
           : Promise.resolve(new Map<string, number>()),
       ])
       if (cancelled) return
@@ -284,11 +292,11 @@ export default function Inventory() {
       setDrawerLoading(false)
     }
 
-    loadHistory()
+    void loadHistory()
     return () => {
       cancelled = true
     }
-  }, [drawerItem])
+  }, [drawerItemId, drawerItemBatchName, drawerItemBatchModalTotal, drawerItemModalPrice])
 
   // ── Filtering & grouping (Server-side filtered; sorted & grouped for display) ──
 
@@ -636,20 +644,18 @@ export default function Inventory() {
       )
     )
     if (batchesMissingTotal.length > 0) {
-      await Promise.all(
-        batchesMissingTotal.map(async (batchName) => {
-          const { data } = await supabase
-            .from('inventory_items')
-            .select('batch_modal_total')
-            .eq('batch_name', batchName)
-            .gt('batch_modal_total', 0)
-            .limit(1)
-          const total = data?.[0]?.batch_modal_total
-          if (typeof total === 'number' && total > 0) {
-            fallbackBatchTotals.set(batchName, total)
-          }
-        })
-      )
+      const { data } = await supabase
+        .from('inventory_items')
+        .select('batch_name, batch_modal_total')
+        .in('batch_name', batchesMissingTotal)
+        .gt('batch_modal_total', 0)
+      for (const row of data ?? []) {
+        const bName = (row.batch_name as string | null)?.trim()
+        const total = row.batch_modal_total as number | null
+        if (bName && typeof total === 'number' && total > 0 && !fallbackBatchTotals.has(bName)) {
+          fallbackBatchTotals.set(bName, total)
+        }
+      }
     }
 
     const batchNamesNeedingCount = Array.from(

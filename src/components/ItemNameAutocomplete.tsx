@@ -72,6 +72,12 @@ export default function ItemNameAutocomplete({
     // If existingRecords is passed by parent, skip fetching from Supabase
     if (existingRecords || !open) return
 
+    const trimmed = value.trim()
+    if (trimmed.length < 2) {
+      setLoading(false)
+      return
+    }
+
     let cancelled = false
     setLoading(true)
 
@@ -82,7 +88,7 @@ export default function ItemNameAutocomplete({
           .select('item_name, category, notes')
           .not('item_name', 'is', null)
 
-        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
         searchWords.forEach((word) => {
           query = query.ilike('item_name', `%${word}%`)
         })
@@ -113,7 +119,7 @@ export default function ItemNameAutocomplete({
           setLoading(false)
         }
       }
-    }, 300)
+    }, 600)
 
     return () => {
       cancelled = true

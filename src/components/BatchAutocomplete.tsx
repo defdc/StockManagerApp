@@ -79,6 +79,12 @@ export default function BatchAutocomplete({
     // If existingBatches is passed by parent, skip fetching from Supabase
     if (existingBatches || !open) return
 
+    const trimmed = value.trim()
+    if (trimmed.length < 2) {
+      setLoading(false)
+      return
+    }
+
     let cancelled = false
     setLoading(true)
 
@@ -89,7 +95,7 @@ export default function BatchAutocomplete({
           .select('batch_name, batch_modal_total, created_at')
           .not('batch_name', 'is', null)
 
-        const searchWords = value.toLowerCase().trim().split(/\s+/).filter(Boolean)
+        const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
         searchWords.forEach((word) => {
           query = query.ilike('batch_name', `%${word}%`)
         })
@@ -128,7 +134,7 @@ export default function BatchAutocomplete({
           setLoading(false)
         }
       }
-    }, 300)
+    }, 600)
 
     return () => {
       cancelled = true

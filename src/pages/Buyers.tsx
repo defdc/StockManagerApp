@@ -7,7 +7,7 @@ import Modal from '../components/Modal'
 import { useToast } from '../lib/toast'
 
 const PAGE_SIZE = 200
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 const BUYER_BOOKINGS_SELECT =
   'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(item_name, batch_name)'
 const BUYER_SALES_SELECT =
@@ -102,7 +102,8 @@ export default function Buyers() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
       setPage(1)
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)

@@ -79,7 +79,7 @@ const emptyGroupEditForm = {
 const SELLABLE_ITEM_STATUSES = ['ready', 'booked']
 const SOFT_PAGE_ITEM_LIMIT = 200
 const DATE_AGGREGATION_FETCH_SIZE = 1000
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 const SALES_SELECT_COLUMNS =
   'id, inventory_item_id, customer_id, booking_group_id, buyer_name, sale_price, modal_price, marketplace_fee, packing_cost, gross_profit, net_profit, sale_date, fulfillment_status, notes, created_at, inventory_items(item_name, batch_name, modal_price, batch_modal_total)'
 
@@ -135,7 +135,8 @@ export default function Sales() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])
@@ -172,8 +173,15 @@ export default function Sales() {
   const [refreshing, setRefreshing] = useState(false)
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
+  const inFlightKeyRef = useRef<string | null>(null)
 
-  const loadSales = useCallback(async () => {
+  const loadSales = useCallback(async (force = false) => {
+    const requestKey = `${page}|${fulfillmentFilter}|${debouncedSearch.trim()}|${startDate}|${endDate}`
+    if (!force && inFlightKeyRef.current === requestKey) {
+      return
+    }
+    inFlightKeyRef.current = requestKey
+
     const seq = ++loadSeqRef.current
     const isLatest = () => seq === loadSeqRef.current
     if (hasLoadedRef.current) setRefreshing(true)
@@ -224,27 +232,63 @@ export default function Sales() {
         return q
       }
 
-      // Step 1: Fetch lightweight sale_date column for all matching records and aggregate counts per day
-      const dateRows = await fetchAllRows<{ sale_date: string }>(
-        (from, to) =>
-          buildFilteredSalesQuery('sale_date')
-            .order('sale_date', { ascending: false })
-            .order('id', { ascending: false })
-            .range(from, to),
-        DATE_AGGREGATION_FETCH_SIZE
-      )
+      // Step 1: Aggregate matching sales count per day using `get_sales_date_counts` RPC
+      // when there is 0 or 1 search word (falling back to `fetchAllRows` only for multi-word search).
+      let dailyAggregations: Array<{ date: string; count: number }> = []
+      let totalMatchingCount = 0
+      let usedRpc = false
 
-      if (!isLatest()) return
+      if (searchFilters.length <= 1) {
+        const singleFilter = searchFilters[0]
+        const { data: rpcRows, error: rpcError } = await supabase.rpc('get_sales_date_counts', {
+          p_fulfillment_status: fulfillmentFilter !== 'all' ? fulfillmentFilter : null,
+          p_start_date: startDate || null,
+          p_end_date: endDate || null,
+          p_search: singleFilter ? singleFilter.safeWord : null,
+          p_matching_item_ids:
+            singleFilter && singleFilter.matchedItemIds.length > 0
+              ? singleFilter.matchedItemIds
+              : null,
+        })
 
-      const countsByDate = new Map<string, number>()
-      for (const row of dateRows) {
-        if (!row.sale_date) continue
-        countsByDate.set(row.sale_date, (countsByDate.get(row.sale_date) ?? 0) + 1)
+        if (!rpcError && Array.isArray(rpcRows)) {
+          usedRpc = true
+          dailyAggregations = (
+            rpcRows as Array<{ sale_date: string | null; row_count: number | string | null }>
+          )
+            .map((r) => ({
+              date: r.sale_date ?? '',
+              count: Number(r.row_count) || 0,
+            }))
+            .filter((d) => Boolean(d.date) && d.count > 0)
+            .sort((a, b) => b.date.localeCompare(a.date))
+          totalMatchingCount = dailyAggregations.reduce((sum, d) => sum + d.count, 0)
+        }
       }
 
-      const dailyAggregations = Array.from(countsByDate.entries())
-        .map(([date, count]) => ({ date, count }))
-        .sort((a, b) => b.date.localeCompare(a.date))
+      if (!usedRpc) {
+        const dateRows = await fetchAllRows<{ sale_date: string }>(
+          (from, to) =>
+            buildFilteredSalesQuery('sale_date')
+              .order('sale_date', { ascending: false })
+              .order('id', { ascending: false })
+              .range(from, to),
+          DATE_AGGREGATION_FETCH_SIZE
+        )
+
+        const countsByDate = new Map<string, number>()
+        for (const row of dateRows) {
+          if (!row.sale_date) continue
+          countsByDate.set(row.sale_date, (countsByDate.get(row.sale_date) ?? 0) + 1)
+        }
+
+        dailyAggregations = Array.from(countsByDate.entries())
+          .map(([date, count]) => ({ date, count }))
+          .sort((a, b) => b.date.localeCompare(a.date))
+        totalMatchingCount = dateRows.length
+      }
+
+      if (!isLatest()) return
 
       // Step 2: Client-side dynamic page chunking (soft limit: 200 items, never splitting a day)
       const pages = chunkDatesBySoftLimit(dailyAggregations, SOFT_PAGE_ITEM_LIMIT)
@@ -253,7 +297,7 @@ export default function Sales() {
 
       if (safePage !== page) {
         setTotalPages(nextTotalPages)
-        setTotalCount(dateRows.length)
+        setTotalCount(totalMatchingCount)
         setPage(safePage)
         return
       }
@@ -331,7 +375,7 @@ export default function Sales() {
 
       setBatchItemCounts(countsMap)
       setSales(nextSales)
-      setTotalCount(dateRows.length)
+      setTotalCount(totalMatchingCount)
       setTotalPages(nextTotalPages)
       setActiveDayCount(activeDates.length)
       hasLoadedRef.current = true
@@ -350,6 +394,9 @@ export default function Sales() {
       if (!isLatest()) return
       setError(err instanceof Error ? err.message : 'Failed to load sales.')
     } finally {
+      if (inFlightKeyRef.current === requestKey) {
+        inFlightKeyRef.current = null
+      }
       if (isLatest()) {
         setLoading(false)
         setRefreshing(false)
@@ -358,13 +405,13 @@ export default function Sales() {
   }, [page, fulfillmentFilter, debouncedSearch, startDate, endDate])
 
   useEffect(() => {
-    void loadSales()
+    void loadSales(false)
   }, [loadSales])
 
   useDataInvalidation(
     ['sales', 'inventory_items', 'bookings'],
     () => {
-      void loadSales()
+      void loadSales(true)
     },
     { remoteOnly: true }
   )
@@ -888,12 +935,23 @@ export default function Sales() {
         return
       }
 
-      // Atomically sync individual item attributes to inventory_items and bookings
+      // Batch-update inventory_items sold status in a single query, then sync bookings
+      const groupItemIds = childSales
+        .map((s) => s.inventory_item_id)
+        .filter((id): id is string => Boolean(id))
+      if (groupItemIds.length > 0) {
+        await runChunked(groupItemIds, (chunk) =>
+          supabase
+            .from('inventory_items')
+            .update({ status: 'sold', updated_at: now })
+            .in('id', chunk)
+        )
+      }
+
       await Promise.all(
         childSales.map(async (s, index) => {
           if (!s.inventory_item_id) return
           const itemSalePrice = splitSalePrices[index] ?? 0
-          await updateInventoryItemSoldState(s.inventory_item_id, itemSalePrice, buyerName)
           await supabase
             .from('bookings')
             .update({

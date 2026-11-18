@@ -16,13 +16,13 @@ import { useToast } from '../lib/toast'
 import { logActivity } from '../lib/activityLog'
 
 const PAGE_SIZE = 200
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 600
 const BATCH_ITEMS_SELECT =
   'id, item_name, batch_name, batch_modal_total, modal_price, status, created_at'
 const BATCH_SALES_SELECT =
-  'id, inventory_item_id, buyer_name, sale_price, sale_date, created_at, inventory_items(batch_name, item_name)'
+  'id, inventory_item_id, buyer_name, sale_price, sale_date, created_at'
 const BATCH_BOOKINGS_SELECT =
-  'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at, inventory_items(batch_name, item_name)'
+  'id, inventory_item_id, booking_group_id, group_total_deal_price, buyer_name, deal_price, status, created_at'
 
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   const chunks: T[][] = []
@@ -150,7 +150,8 @@ export default function Batches() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebouncedSearch(search)
+      const trimmed = search.trim()
+      setDebouncedSearch(trimmed.length >= 2 ? trimmed : '')
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [search])
@@ -179,111 +180,80 @@ export default function Batches() {
       const to = from + PAGE_SIZE - 1
       const trimmedSearch = debouncedSearch.trim()
 
-      let paginatedBatchNames: string[] = []
-      let totalBatchesCount = 0
+      // Derive distinct batches directly from inventory_items (no physical `batches` table exists)
+      let allBatchItems: InventoryItemWithRelations[] = []
 
-      // Step 1: Check if physical `batches` table exists
-      let hasPhysicalTable = false
-      try {
-        let physicalQuery = supabase
-          .from('batches')
-          .select('batch_name', { count: 'exact' })
-
-        if (trimmedSearch) {
-          physicalQuery = physicalQuery.ilike('batch_name', `%${trimmedSearch}%`)
-        }
-
-        const physicalRes = await physicalQuery
-          .order('batch_name', { ascending: true })
-          .range(from, to)
-
-        if (!physicalRes.error && physicalRes.data && physicalRes.data.length > 0) {
-          hasPhysicalTable = true
-          totalBatchesCount = physicalRes.count ?? physicalRes.data.length
-          paginatedBatchNames = physicalRes.data
-            .map((b: { batch_name: string | null }) => b.batch_name?.trim())
-            .filter((n): n is string => Boolean(n))
-        }
-      } catch {
-        // Fall back to derived batches
-      }
-
-      // If no physical table, derive distinct batches from inventory_items
-      if (!hasPhysicalTable) {
-        let allBatchItems: {
-          batch_name: string | null
-          batch_modal_total: number | null
-          created_at: string | null
-        }[] = []
-
-        if (trimmedSearch) {
-          const words = trimmedSearch.split(/\s+/).filter(Boolean)
-          allBatchItems = await fetchAllRows(async (f, t) => {
-            let q = supabase
-              .from('inventory_items')
-              .select('batch_name, batch_modal_total, created_at')
-            for (const word of words) {
-              const safeWord = word.replace(/[,()]/g, '')
-              if (!safeWord) continue
-              q = q.or(`batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`)
-            }
-            return q
-              .order('created_at', { ascending: false })
-              .range(f, t)
-          }, 1000)
-        } else {
-          allBatchItems = await fetchAllRows(async (f, t) => {
-            return supabase
-              .from('inventory_items')
-              .select('batch_name, batch_modal_total, created_at')
-              .order('created_at', { ascending: false })
-              .range(f, t)
-          }, 1000)
-        }
-
-        if (!isLatest()) return
-
-        const distinctBatchMap = new Map<
-          string,
-          {
-            batchName: string
-            newestTime: number
-            oldestTime: number
+      if (trimmedSearch.length >= 2) {
+        const words = trimmedSearch.split(/\s+/).filter(Boolean)
+        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(async (f, t) => {
+          let q = supabase
+            .from('inventory_items')
+            .select(BATCH_ITEMS_SELECT)
+          for (const word of words) {
+            const safeWord = word.replace(/[,()]/g, '')
+            if (!safeWord) continue
+            q = q.or(`batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`)
           }
-        >()
-
-        for (const row of allBatchItems) {
-          const name = row.batch_name?.trim() || 'Unassigned'
-          const time = row.created_at ? new Date(row.created_at).getTime() : 0
-          const existing = distinctBatchMap.get(name)
-          if (!existing) {
-            distinctBatchMap.set(name, {
-              batchName: name,
-              newestTime: time,
-              oldestTime: time,
-            })
-          } else {
-            if (time > existing.newestTime) existing.newestTime = time
-            if (time < existing.oldestTime && time > 0) existing.oldestTime = time
-          }
-        }
-
-        const sortedBatchesList = Array.from(distinctBatchMap.values())
-
-        if (sortBy === 'oldest') {
-          sortedBatchesList.sort((a, b) => a.oldestTime - b.oldestTime || a.batchName.localeCompare(b.batchName))
-        } else if (sortBy === 'newest') {
-          sortedBatchesList.sort((a, b) => b.newestTime - a.newestTime || a.batchName.localeCompare(b.batchName))
-        } else {
-          sortedBatchesList.sort((a, b) => a.batchName.localeCompare(b.batchName))
-        }
-
-        totalBatchesCount = sortedBatchesList.length
-        const pagedBatches = sortedBatchesList.slice(from, to + 1)
-        paginatedBatchNames = pagedBatches.map((b) => b.batchName)
+          return q
+            .order('created_at', { ascending: false })
+            .range(f, t) as unknown as PromiseLike<{
+            data: InventoryItemWithRelations[] | null
+            error: { message: string } | null
+          }>
+        }, 1000)
+      } else {
+        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(async (f, t) => {
+          return supabase
+            .from('inventory_items')
+            .select(BATCH_ITEMS_SELECT)
+            .order('created_at', { ascending: true })
+            .range(f, t) as unknown as PromiseLike<{
+            data: InventoryItemWithRelations[] | null
+            error: { message: string } | null
+          }>
+        }, 1000)
       }
 
       if (!isLatest()) return
+
+      const distinctBatchMap = new Map<
+        string,
+        {
+          batchName: string
+          newestTime: number
+          oldestTime: number
+        }
+      >()
+
+      for (const row of allBatchItems) {
+        const name = row.batch_name?.trim() || 'Unassigned'
+        const time = row.created_at ? new Date(row.created_at).getTime() : 0
+        const existing = distinctBatchMap.get(name)
+        if (!existing) {
+          distinctBatchMap.set(name, {
+            batchName: name,
+            newestTime: time,
+            oldestTime: time,
+          })
+        } else {
+          if (time > existing.newestTime) existing.newestTime = time
+          if (time < existing.oldestTime && time > 0) existing.oldestTime = time
+        }
+      }
+
+      const sortedBatchesList = Array.from(distinctBatchMap.values())
+
+      if (sortBy === 'oldest') {
+        sortedBatchesList.sort((a, b) => a.oldestTime - b.oldestTime || a.batchName.localeCompare(b.batchName))
+      } else if (sortBy === 'newest') {
+        sortedBatchesList.sort((a, b) => b.newestTime - a.newestTime || a.batchName.localeCompare(b.batchName))
+      } else {
+        sortedBatchesList.sort((a, b) => a.batchName.localeCompare(b.batchName))
+      }
+
+      const totalBatchesCount = sortedBatchesList.length
+      const pagedBatches = sortedBatchesList.slice(from, to + 1)
+      const paginatedBatchNames = pagedBatches.map((b) => b.batchName)
 
       if (paginatedBatchNames.length === 0) {
         setBatches([])
@@ -293,100 +263,147 @@ export default function Batches() {
         return
       }
 
-      // Step 2: Fetch ALL inventory_items (and their nested sales/bookings) that belong to ONLY those batches
-      const namedBatches = paginatedBatchNames.filter((n) => n !== 'Unassigned')
-      const hasUnassigned = paginatedBatchNames.includes('Unassigned')
+      const paginatedBatchSet = new Set(paginatedBatchNames)
+      let inventoryItems: InventoryItemWithRelations[] = []
 
-      const inventoryItems: InventoryItemWithRelations[] = []
+      if (trimmedSearch.length < 2) {
+        // We already fetched all inventory_items with BATCH_ITEMS_SELECT above — reuse in memory!
+        inventoryItems = allBatchItems.filter((item) =>
+          paginatedBatchSet.has(item.batch_name?.trim() || 'Unassigned')
+        )
+      } else {
+        // Search matched specific items/batches: fetch full sibling items for the matched batches
+        const namedBatches = paginatedBatchNames.filter((n) => n !== 'Unassigned')
+        const hasUnassigned = paginatedBatchSet.has('Unassigned')
 
-      if (namedBatches.length > 0) {
-        const batchChunks = chunkArray(namedBatches, 50)
-        const chunkResults = await Promise.all(
-          batchChunks.map((chunk) =>
-            fetchAllRows<InventoryItemWithRelations>(
-              (f, t) =>
-                supabase
-                  .from('inventory_items')
-                  .select(BATCH_ITEMS_SELECT)
-                  .in('batch_name', chunk)
-                  .order('created_at', { ascending: true })
-                  .range(f, t) as unknown as PromiseLike<{
-                  data: InventoryItemWithRelations[] | null
-                  error: { message: string } | null
-                }>,
-              1000
+        if (namedBatches.length > 0) {
+          const batchChunks = chunkArray(namedBatches, 100)
+          const chunkResults = await Promise.all(
+            batchChunks.map((chunk) =>
+              fetchAllRows<InventoryItemWithRelations>(
+                (f, t) =>
+                  supabase
+                    .from('inventory_items')
+                    .select(BATCH_ITEMS_SELECT)
+                    .in('batch_name', chunk)
+                    .order('created_at', { ascending: true })
+                    .range(f, t) as unknown as PromiseLike<{
+                    data: InventoryItemWithRelations[] | null
+                    error: { message: string } | null
+                  }>,
+                1000
+              )
             )
           )
-        )
-        for (const items of chunkResults) {
-          inventoryItems.push(...items)
+          for (const items of chunkResults) {
+            inventoryItems.push(...items)
+          }
         }
-      }
 
-      if (hasUnassigned) {
-        const unassignedItems = await fetchAllRows<InventoryItemWithRelations>(
-          (f, t) =>
-            supabase
-              .from('inventory_items')
-              .select(BATCH_ITEMS_SELECT)
-              .or('batch_name.is.null,batch_name.eq.,batch_name.eq.Unassigned')
-              .order('created_at', { ascending: true })
-              .range(f, t) as unknown as PromiseLike<{
-              data: InventoryItemWithRelations[] | null
-              error: { message: string } | null
-            }>,
-          1000
-        )
-        inventoryItems.push(...unassignedItems)
+        if (hasUnassigned) {
+          const unassignedItems = await fetchAllRows<InventoryItemWithRelations>(
+            (f, t) =>
+              supabase
+                .from('inventory_items')
+                .select(BATCH_ITEMS_SELECT)
+                .or('batch_name.is.null,batch_name.eq.,batch_name.eq.Unassigned')
+                .order('created_at', { ascending: true })
+                .range(f, t) as unknown as PromiseLike<{
+                data: InventoryItemWithRelations[] | null
+                error: { message: string } | null
+              }>,
+            1000
+          )
+          inventoryItems.push(...unassignedItems)
+        }
       }
 
       if (!isLatest()) return
 
       const itemIds = inventoryItems.map((i) => i.id)
+      const itemIdSet = new Set(itemIds)
       const sales: SaleRow[] = []
       const bookings: BookingRow[] = []
 
       if (itemIds.length > 0) {
-        const idChunks = chunkArray(itemIds, 150)
-        const [salesChunks, bookingsChunks] = await Promise.all([
-          Promise.all(
-            idChunks.map((chunk) =>
-              fetchAllRows<SaleRow>(
-                (f, t) =>
-                  supabase
-                    .from('sales')
-                    .select(BATCH_SALES_SELECT)
-                    .in('inventory_item_id', chunk)
-                    .order('sale_date', { ascending: false })
-                    .range(f, t) as unknown as PromiseLike<{
-                    data: SaleRow[] | null
-                    error: { message: string } | null
-                  }>,
-                1000
+        if (itemIds.length <= 300) {
+          const idChunks = chunkArray(itemIds, 150)
+          const [salesChunks, bookingsChunks] = await Promise.all([
+            Promise.all(
+              idChunks.map((chunk) =>
+                fetchAllRows<SaleRow>(
+                  (f, t) =>
+                    supabase
+                      .from('sales')
+                      .select(BATCH_SALES_SELECT)
+                      .in('inventory_item_id', chunk)
+                      .order('sale_date', { ascending: false })
+                      .range(f, t) as unknown as PromiseLike<{
+                      data: SaleRow[] | null
+                      error: { message: string } | null
+                    }>,
+                  1000
+                )
               )
-            )
-          ),
-          Promise.all(
-            idChunks.map((chunk) =>
-              fetchAllRows<BookingRow>(
-                (f, t) =>
-                  supabase
-                    .from('bookings')
-                    .select(BATCH_BOOKINGS_SELECT)
-                    .in('inventory_item_id', chunk)
-                    .order('created_at', { ascending: false })
-                    .range(f, t) as unknown as PromiseLike<{
-                    data: BookingRow[] | null
-                    error: { message: string } | null
-                  }>,
-                1000
+            ),
+            Promise.all(
+              idChunks.map((chunk) =>
+                fetchAllRows<BookingRow>(
+                  (f, t) =>
+                    supabase
+                      .from('bookings')
+                      .select(BATCH_BOOKINGS_SELECT)
+                      .in('inventory_item_id', chunk)
+                      .order('created_at', { ascending: false })
+                      .range(f, t) as unknown as PromiseLike<{
+                      data: BookingRow[] | null
+                      error: { message: string } | null
+                    }>,
+                  1000
+                )
               )
-            )
-          ),
-        ])
-        if (!isLatest()) return
-        for (const chunk of salesChunks) sales.push(...chunk)
-        for (const chunk of bookingsChunks) bookings.push(...chunk)
+            ),
+          ])
+          if (!isLatest()) return
+          for (const chunk of salesChunks) sales.push(...chunk)
+          for (const chunk of bookingsChunks) bookings.push(...chunk)
+        } else {
+          // Avoid N+1 URL-chunked `.in()` storms when loading hundreds/thousands of items:
+          // fetch lightweight sales & bookings once and filter by itemIdSet in memory.
+          const [allSales, allBookings] = await Promise.all([
+            fetchAllRows<SaleRow>(
+              (f, t) =>
+                supabase
+                  .from('sales')
+                  .select(BATCH_SALES_SELECT)
+                  .order('sale_date', { ascending: false })
+                  .range(f, t) as unknown as PromiseLike<{
+                  data: SaleRow[] | null
+                  error: { message: string } | null
+                }>,
+              1000
+            ),
+            fetchAllRows<BookingRow>(
+              (f, t) =>
+                supabase
+                  .from('bookings')
+                  .select(BATCH_BOOKINGS_SELECT)
+                  .order('created_at', { ascending: false })
+                  .range(f, t) as unknown as PromiseLike<{
+                  data: BookingRow[] | null
+                  error: { message: string } | null
+                }>,
+              1000
+            ),
+          ])
+          if (!isLatest()) return
+          for (const s of allSales) {
+            if (s.inventory_item_id && itemIdSet.has(s.inventory_item_id)) sales.push(s)
+          }
+          for (const b of allBookings) {
+            if (b.inventory_item_id && itemIdSet.has(b.inventory_item_id)) bookings.push(b)
+          }
+        }
       }
 
       // Step 3: Group and calculate revenue, modal, and profit using the complete set of items
@@ -639,16 +656,6 @@ export default function Batches() {
       if (itemsError) {
         showToast(itemsError.message, 'error');
         return;
-      }
-
-      // Delete the batch itself if physical batches table exists
-      try {
-        await supabase
-          .from('batches')
-          .delete()
-          .eq('batch_name', batch.batchName);
-      } catch {
-        // Physical batches table may not exist
       }
 
       void logActivity({
