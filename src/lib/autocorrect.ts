@@ -135,11 +135,25 @@ function resolveBestVariant(stats: VariantStats): string {
   return applyCanonicalBrandCasing(bestVariant)
 }
 
+export interface CanonicalLookup {
+  matchExactOrCompact(input: string): string | null
+  matchWord(word: string): string | null
+}
+
+function isCanonicalLookup(value: unknown): value is CanonicalLookup {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'matchExactOrCompact' in value &&
+    'matchWord' in value
+  )
+}
+
 /**
  * Builds lookup maps (by canonical key, compact key, and individual word)
  * from an iterable of existing strings.
  */
-export function buildCanonicalLookup(knownValues: Iterable<string> = []) {
+export function buildCanonicalLookup(knownValues: Iterable<string> = []): CanonicalLookup {
   const byCanonicalKey = new Map<string, VariantStats>()
   const byCompactKey = new Map<string, VariantStats>()
   const byWordKey = new Map<string, VariantStats>()
@@ -165,21 +179,35 @@ export function buildCanonicalLookup(knownValues: Iterable<string> = []) {
     }
   }
 
+  const resolvedByCanonicalKey = new Map<string, string>()
+  for (const [key, stats] of byCanonicalKey.entries()) {
+    resolvedByCanonicalKey.set(key, resolveBestVariant(stats))
+  }
+
+  const resolvedByCompactKey = new Map<string, string>()
+  for (const [key, stats] of byCompactKey.entries()) {
+    resolvedByCompactKey.set(key, resolveBestVariant(stats))
+  }
+
+  const resolvedByWordKey = new Map<string, string>()
+  for (const [key, stats] of byWordKey.entries()) {
+    resolvedByWordKey.set(key, resolveBestVariant(stats))
+  }
+
   return {
     matchExactOrCompact(input: string): string | null {
       const cKey = toCanonicalKey(input)
-      const exactStats = byCanonicalKey.get(cKey)
-      if (exactStats) return resolveBestVariant(exactStats)
+      const exactMatch = resolvedByCanonicalKey.get(cKey)
+      if (exactMatch) return exactMatch
 
       const compactKey = toCompactKey(input)
-      const compactStats = byCompactKey.get(compactKey)
-      if (compactStats) return resolveBestVariant(compactStats)
+      const compactMatch = resolvedByCompactKey.get(compactKey)
+      if (compactMatch) return compactMatch
 
       return null
     },
     matchWord(word: string): string | null {
-      const stats = byWordKey.get(word.toLowerCase())
-      return stats ? resolveBestVariant(stats) : null
+      return resolvedByWordKey.get(word.toLowerCase()) ?? null
     },
   }
 }
@@ -193,12 +221,14 @@ export function buildCanonicalLookup(knownValues: Iterable<string> = []) {
  */
 export function autocorrectCategory(
   input: string,
-  knownCategories: Iterable<string> = []
+  knownCategoriesOrLookup: Iterable<string> | CanonicalLookup = []
 ): string {
   const cleaned = normalizeWhitespace(input)
   if (!cleaned) return ''
 
-  const lookup = buildCanonicalLookup(knownCategories)
+  const lookup = isCanonicalLookup(knownCategoriesOrLookup)
+    ? knownCategoriesOrLookup
+    : buildCanonicalLookup(knownCategoriesOrLookup)
   const matched = lookup.matchExactOrCompact(cleaned)
   if (matched) return matched
 
@@ -229,12 +259,14 @@ export function autocorrectCategory(
  */
 export function autocorrectItemName(
   input: string,
-  knownItemNames: Iterable<string> = []
+  knownItemNamesOrLookup: Iterable<string> | CanonicalLookup = []
 ): string {
   const cleaned = normalizeWhitespace(input)
   if (!cleaned) return ''
 
-  const lookup = buildCanonicalLookup(knownItemNames)
+  const lookup = isCanonicalLookup(knownItemNamesOrLookup)
+    ? knownItemNamesOrLookup
+    : buildCanonicalLookup(knownItemNamesOrLookup)
   const matched = lookup.matchExactOrCompact(cleaned)
   if (matched) return matched
 
@@ -257,13 +289,16 @@ export function autocorrectItemName(
 /**
  * Deduplicates and canonicalizes a list of category strings, sorted alphabetically.
  */
-export function deduplicateCategories(categories: Iterable<string>): string[] {
+export function deduplicateCategories(
+  categories: Iterable<string>,
+  existingLookup?: CanonicalLookup
+): string[] {
   const all = Array.from(categories).filter((c): c is string => Boolean(c && c.trim()))
-  const lookup = buildCanonicalLookup(all)
+  const lookup = existingLookup ?? buildCanonicalLookup(all)
   const seen = new Map<string, string>()
 
   for (const raw of all) {
-    const canonical = lookup.matchExactOrCompact(raw) ?? autocorrectCategory(raw)
+    const canonical = lookup.matchExactOrCompact(raw) ?? autocorrectCategory(raw, lookup)
     if (!canonical) continue
     const key = toCompactKey(canonical)
     if (!seen.has(key)) {

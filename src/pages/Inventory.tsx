@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
@@ -25,7 +25,10 @@ import { resolveItemTransactionDetails } from '../lib/itemTransactionSync'
 import {
   autocorrectCategory,
   autocorrectItemName,
+  buildCanonicalLookup,
   deduplicateCategories,
+  toCompactKey,
+  type CanonicalLookup,
 } from '../lib/autocorrect'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -41,6 +44,104 @@ interface MultiItemRow {
   notes: string
   quantity: number | string
 }
+
+interface BulkAddItemRowProps {
+  itemRow: MultiItemRow
+  index: number
+  canRemove: boolean
+  extraRecords: ItemSuggestionRecord[]
+  extraCategories: string[]
+  itemNameLookup: CanonicalLookup
+  categoryLookup: CanonicalLookup
+  onUpdateRow: (id: string, field: keyof MultiItemRow, value: string | number) => void
+  onSelectRecord: (id: string, rec: ItemSuggestionRecord) => void
+  onRemoveRow: (id: string) => void
+}
+
+const BulkAddItemRow = memo(function BulkAddItemRow({
+  itemRow,
+  index,
+  canRemove,
+  extraRecords,
+  extraCategories,
+  itemNameLookup,
+  categoryLookup,
+  onUpdateRow,
+  onSelectRecord,
+  onRemoveRow,
+}: BulkAddItemRowProps) {
+  return (
+    <div className="relative z-10 focus-within:z-30 transition-all grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start">
+      <div className="sm:col-span-4">
+        <ItemNameAutocomplete
+          required
+          label="Item Name *"
+          placeholder={`Item #${index + 1} name *`}
+          value={itemRow.item_name}
+          onChange={(name) => onUpdateRow(itemRow.id, 'item_name', name)}
+          onSelectRecord={(rec) => onSelectRecord(itemRow.id, rec)}
+          extraRecords={extraRecords}
+          itemNameLookup={itemNameLookup}
+          categoryLookup={categoryLookup}
+        />
+      </div>
+
+      <div className="sm:col-span-3">
+        <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+          Category *
+        </label>
+        <CategoryAutocomplete
+          required
+          label=""
+          placeholder="Category *"
+          value={itemRow.category}
+          onChange={(cat) => onUpdateRow(itemRow.id, 'category', cat)}
+          extraSuggestions={extraCategories}
+          categoryLookup={categoryLookup}
+        />
+      </div>
+
+      <div className="sm:col-span-3">
+        <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+          Notes
+        </label>
+        <input
+          type="text"
+          value={itemRow.notes}
+          onChange={(e) => onUpdateRow(itemRow.id, 'notes', e.target.value)}
+          placeholder="Notes (optional)"
+          className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
+        />
+      </div>
+
+      <div className="sm:col-span-1">
+        <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
+          Qty
+        </label>
+        <input
+          type="number"
+          min={1}
+          value={itemRow.quantity ?? 1}
+          onChange={(e) => onUpdateRow(itemRow.id, 'quantity', e.target.value)}
+          placeholder="Qty"
+          className="w-full rounded-md border border-gray-300 px-1 py-1.5 text-center text-sm focus:border-gray-500 focus:outline-none"
+        />
+      </div>
+
+      <div className="flex justify-end sm:col-span-1 sm:pt-1">
+        <button
+          type="button"
+          onClick={() => onRemoveRow(itemRow.id)}
+          disabled={!canRemove}
+          aria-label="Remove item row"
+          className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:opacity-30"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+})
 
 const emptyForm = {
   item_name: '',
@@ -386,33 +487,58 @@ export default function Inventory() {
     [selectedItemIds, mergedItemsById]
   )
 
-  const knownCategories = useMemo(() => {
-    const raw: string[] = []
+  const {
+    knownCategories,
+    knownCategoryLookup,
+    knownItemNames,
+    knownItemNameLookup,
+    knownItemRecords,
+  } = useMemo(() => {
+    const rawCats: string[] = []
+    const rawNames: string[] = []
     for (const item of mergedItemsById.values()) {
-      if (item.category?.trim()) raw.push(item.category)
+      if (item.category?.trim()) rawCats.push(item.category)
+      if (item.item_name?.trim()) rawNames.push(item.item_name)
     }
-    return deduplicateCategories(raw)
-  }, [mergedItemsById])
 
-  const knownItemNames = useMemo(() => {
-    const raw: string[] = []
-    for (const item of mergedItemsById.values()) {
-      if (item.item_name?.trim()) raw.push(item.item_name)
-    }
-    return raw
-  }, [mergedItemsById])
+    const categoryLookup = buildCanonicalLookup(rawCats)
+    const itemNameLookup = buildCanonicalLookup(rawNames)
+    const categories = deduplicateCategories(rawCats, categoryLookup)
 
-  const knownItemRecords = useMemo<ItemSuggestionRecord[]>(() => {
-    const records: ItemSuggestionRecord[] = []
+    const seenRecords = new Map<string, ItemSuggestionRecord>()
     for (const item of mergedItemsById.values()) {
-      if (!item.item_name?.trim()) continue
-      records.push({
-        item_name: item.item_name,
-        category: item.category,
-        notes: item.notes,
-      })
+      const rawName = item.item_name?.trim()
+      if (!rawName) continue
+      const canonicalName = autocorrectItemName(rawName, itemNameLookup)
+      const key = toCompactKey(canonicalName)
+      const canonicalCat = item.category?.trim()
+        ? autocorrectCategory(item.category, categoryLookup)
+        : null
+      const notes = item.notes?.trim() || null
+      const existing = seenRecords.get(key)
+      if (!existing) {
+        seenRecords.set(key, {
+          item_name: canonicalName,
+          category: canonicalCat,
+          notes,
+        })
+      } else {
+        if (!existing.category && canonicalCat) existing.category = canonicalCat
+        if (!existing.notes && notes) existing.notes = notes
+      }
     }
-    return records
+
+    const records = [...seenRecords.values()].sort((a, b) =>
+      a.item_name.localeCompare(b.item_name)
+    )
+
+    return {
+      knownCategories: categories,
+      knownCategoryLookup: categoryLookup,
+      knownItemNames: rawNames,
+      knownItemNameLookup: itemNameLookup,
+      knownItemRecords: records,
+    }
   }, [mergedItemsById])
 
   const filteredIds = useMemo(() => filtered.map((item) => item.id), [filtered])
@@ -519,23 +645,36 @@ export default function Inventory() {
 
   // ── Dynamic multi-item row handlers ──────────────────────────────────────
 
-  function addMultiRow() {
+  const addMultiRow = useCallback(() => {
     setMultiItems((prev) => [
       ...prev,
       { id: crypto.randomUUID(), item_name: '', category: '', notes: '', quantity: 1 },
     ])
-  }
+  }, [])
 
-  function updateMultiRow(id: string, field: keyof MultiItemRow, value: string | number) {
+  const updateMultiRow = useCallback((id: string, field: keyof MultiItemRow, value: string | number) => {
     setMultiItems((prev) =>
       prev.map((row) => (row.id === id ? { ...row, [field]: value } : row))
     )
-  }
+  }, [])
 
-  function removeMultiRow(id: string) {
-    if (multiItems.length === 1) return
-    setMultiItems((prev) => prev.filter((row) => row.id !== id))
-  }
+  const selectMultiRowRecord = useCallback((id: string, rec: ItemSuggestionRecord) => {
+    setMultiItems((prev) =>
+      prev.map((row) => {
+        if (row.id !== id) return row
+        return {
+          ...row,
+          item_name: rec.item_name,
+          category: rec.category ? rec.category : row.category,
+          notes: !row.notes.trim() && rec.notes ? rec.notes : row.notes,
+        }
+      })
+    )
+  }, [])
+
+  const removeMultiRow = useCallback((id: string) => {
+    setMultiItems((prev) => (prev.length <= 1 ? prev : prev.filter((row) => row.id !== id)))
+  }, [])
 
   // ── Submit handlers ──────────────────────────────────────────────────────
 
@@ -570,20 +709,20 @@ export default function Inventory() {
     setSaving(true)
     setFormError(null)
 
-    const sessionCategoryPool = [
+    const sessionCategoryLookup = buildCanonicalLookup([
       ...knownCategories,
       ...validItems.map((i) => i.category).filter(Boolean),
-    ]
-    const sessionItemNamePool = [
+    ])
+    const sessionItemNameLookup = buildCanonicalLookup([
       ...knownItemNames,
       ...validItems.map((i) => i.item_name).filter(Boolean),
-    ]
+    ])
 
     const itemsPayload = validItems.flatMap((item) => {
       const rawQty = typeof item.quantity === 'number' ? item.quantity : parseInt(String(item.quantity || '1'), 10)
       const qty = !rawQty || isNaN(rawQty) || rawQty < 1 ? 1 : Math.floor(rawQty)
-      const normalizedItemName = autocorrectItemName(item.item_name, sessionItemNamePool)
-      const normalizedCategory = autocorrectCategory(item.category, sessionCategoryPool)
+      const normalizedItemName = autocorrectItemName(item.item_name, sessionItemNameLookup)
+      const normalizedCategory = autocorrectCategory(item.category, sessionCategoryLookup)
       const itemObj = {
         item_name: normalizedItemName,
         category: normalizedCategory || null,
@@ -639,8 +778,8 @@ export default function Inventory() {
 
     const batchName = form.batch_name.trim()
     const modalTotal = form.batch_modal_total.trim() ? Number(form.batch_modal_total) : null
-    const normalizedItemName = autocorrectItemName(form.item_name, knownItemNames)
-    const normalizedCategory = autocorrectCategory(form.category, knownCategories)
+    const normalizedItemName = autocorrectItemName(form.item_name, knownItemNameLookup)
+    const normalizedCategory = autocorrectCategory(form.category, knownCategoryLookup)
 
     setSaving(true)
     setFormError(null)
@@ -895,7 +1034,7 @@ export default function Inventory() {
       return
     }
 
-    const targetCategory = autocorrectCategory(bulkTargetCategory, knownCategories)
+    const targetCategory = autocorrectCategory(bulkTargetCategory, knownCategoryLookup)
     if (!targetCategory) {
       setBulkCategoryError('Target category is required.')
       return
@@ -1396,6 +1535,8 @@ export default function Inventory() {
                     }))
                   }}
                   extraRecords={knownItemRecords}
+                  itemNameLookup={knownItemNameLookup}
+                  categoryLookup={knownCategoryLookup}
                   placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
                 />
 
@@ -1404,6 +1545,7 @@ export default function Inventory() {
                   value={form.category}
                   onChange={(cat) => setForm({ ...form, category: cat })}
                   extraSuggestions={knownCategories}
+                  categoryLookup={knownCategoryLookup}
                 />
 
                 <BatchAutocomplete
@@ -1465,112 +1607,22 @@ export default function Inventory() {
                   </div>
 
                   <div className="space-y-2">
-                    {(() => {
-                      const sessionItemNames = [
-                        ...knownItemNames,
-                        ...multiItems.map((i) => i.item_name).filter(Boolean),
-                      ]
-                      const sessionCategories = [
-                        ...knownCategories,
-                        ...multiItems.map((i) => i.category).filter(Boolean),
-                      ]
-                      const sessionRecords: ItemSuggestionRecord[] = [
-                        ...knownItemRecords,
-                        ...multiItems
-                          .filter((i) => Boolean(i.item_name.trim()))
-                          .map((i) => ({
-                            item_name: i.item_name.trim(),
-                            category: i.category.trim() || undefined,
-                            notes: i.notes.trim() || undefined,
-                          })),
-                      ]
-
-                      return multiItems.map((itemRow, index) => (
-                        <div
-                          key={itemRow.id}
-                          className="relative z-10 focus-within:z-30 transition-all grid grid-cols-1 gap-2 rounded-md border border-gray-200 p-3 sm:grid-cols-12 sm:items-start"
-                        >
-                          <div className="sm:col-span-4">
-                            <ItemNameAutocomplete
-                              required
-                              label="Item Name *"
-                              placeholder={`Item #${index + 1} name *`}
-                              value={itemRow.item_name}
-                              onChange={(name) => updateMultiRow(itemRow.id, 'item_name', name)}
-                              onSelectRecord={(rec) => {
-                                setMultiItems((prev) =>
-                                  prev.map((row) => {
-                                    if (row.id !== itemRow.id) return row
-                                    return {
-                                      ...row,
-                                      item_name: rec.item_name,
-                                      category: rec.category ? rec.category : row.category,
-                                      notes: !row.notes.trim() && rec.notes ? rec.notes : row.notes,
-                                    }
-                                  })
-                                )
-                              }}
-                              extraSuggestions={sessionItemNames}
-                              extraRecords={sessionRecords}
-                            />
-                          </div>
-
-                          <div className="sm:col-span-3">
-                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                              Category *
-                            </label>
-                            <CategoryAutocomplete
-                              required
-                              label=""
-                              placeholder="Category *"
-                              value={itemRow.category}
-                              onChange={(cat) => updateMultiRow(itemRow.id, 'category', cat)}
-                              extraSuggestions={sessionCategories}
-                            />
-                          </div>
-
-                          <div className="sm:col-span-3">
-                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                              Notes
-                            </label>
-                            <input
-                              type="text"
-                              value={itemRow.notes}
-                              onChange={(e) => updateMultiRow(itemRow.id, 'notes', e.target.value)}
-                              placeholder="Notes (optional)"
-                              className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-gray-500 focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="sm:col-span-1">
-                            <label className="mb-1 block text-xs font-medium text-gray-600 sm:hidden">
-                              Qty
-                            </label>
-                            <input
-                              type="number"
-                              min={1}
-                              value={itemRow.quantity ?? 1}
-                              onChange={(e) => updateMultiRow(itemRow.id, 'quantity', e.target.value)}
-                              placeholder="Qty"
-                              className="w-full rounded-md border border-gray-300 px-1 py-1.5 text-center text-sm focus:border-gray-500 focus:outline-none"
-                            />
-                          </div>
-
-                          <div className="flex justify-end sm:col-span-1 sm:pt-1">
-                            <button
-                              type="button"
-                              onClick={() => removeMultiRow(itemRow.id)}
-                              disabled={multiItems.length === 1}
-                              aria-label="Remove item row"
-                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-red-600 disabled:opacity-30"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </div>
-                      ))
-                    })()}
-                </div>
+                    {multiItems.map((itemRow, index) => (
+                      <BulkAddItemRow
+                        key={itemRow.id}
+                        itemRow={itemRow}
+                        index={index}
+                        canRemove={multiItems.length > 1}
+                        extraRecords={knownItemRecords}
+                        extraCategories={knownCategories}
+                        itemNameLookup={knownItemNameLookup}
+                        categoryLookup={knownCategoryLookup}
+                        onUpdateRow={updateMultiRow}
+                        onSelectRecord={selectMultiRowRecord}
+                        onRemoveRow={removeMultiRow}
+                      />
+                    ))}
+                  </div>
 
                   <button
                     type="button"
@@ -1694,6 +1746,7 @@ export default function Inventory() {
               value={bulkTargetCategory}
               onChange={setBulkTargetCategory}
               extraSuggestions={knownCategories}
+              categoryLookup={knownCategoryLookup}
             />
 
             {knownCategories.length > 0 && (

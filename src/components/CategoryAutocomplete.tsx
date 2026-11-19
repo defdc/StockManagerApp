@@ -2,10 +2,18 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   autocorrectCategory,
+  buildCanonicalLookup,
   deduplicateCategories,
   expandSearchWords,
   toCompactKey,
+  type CanonicalLookup,
 } from '../lib/autocorrect'
+
+interface IndexedCategory {
+  name: string
+  lowerName: string
+  compactName: string
+}
 
 interface CategoryAutocompleteProps {
   value: string
@@ -15,7 +23,10 @@ interface CategoryAutocompleteProps {
   placeholder?: string
   extraSuggestions?: string[]
   existingCategories?: string[]
+  categoryLookup?: CanonicalLookup
 }
+
+const EMPTY_STRING_ARRAY: string[] = []
 
 export default function CategoryAutocomplete({
   value,
@@ -23,8 +34,9 @@ export default function CategoryAutocomplete({
   label = 'Category',
   required,
   placeholder = 'Search or enter category...',
-  extraSuggestions = [],
+  extraSuggestions = EMPTY_STRING_ARRAY,
   existingCategories,
+  categoryLookup: externalCategoryLookup,
 }: CategoryAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -111,33 +123,55 @@ export default function CategoryAutocomplete({
     }
   }, [existingCategories, open, value])
 
-  const combinedCategories = useMemo(() => {
+  const { indexedCategories, compactCategorySet, activeCategoryLookup } = useMemo(() => {
     const sourceCategories = existingCategories ?? categories
-    return deduplicateCategories([...extraSuggestions, ...sourceCategories])
-  }, [existingCategories, categories, extraSuggestions])
+    const allRaw = [...extraSuggestions, ...sourceCategories]
+    const lookup = externalCategoryLookup ?? buildCanonicalLookup(allRaw)
+    const deduped = deduplicateCategories(allRaw, lookup)
+    const compactSet = new Set<string>()
+    const indexed: IndexedCategory[] = deduped.map((cat) => {
+      const compact = toCompactKey(cat)
+      compactSet.add(compact)
+      return {
+        name: cat,
+        lowerName: cat.toLowerCase(),
+        compactName: compact,
+      }
+    })
+    return {
+      indexedCategories: indexed,
+      compactCategorySet: compactSet,
+      activeCategoryLookup: lookup,
+    }
+  }, [existingCategories, categories, extraSuggestions, externalCategoryLookup])
 
   const filtered = useMemo(() => {
     const trimmed = value.trim()
-    if (!trimmed) return combinedCategories.slice(0, 10)
+    if (!trimmed) return indexedCategories.slice(0, 10)
     const searchWords = expandSearchWords(trimmed)
     const compactQuery = toCompactKey(trimmed)
-    return combinedCategories
-      .filter((c) => {
-        const lower = c.toLowerCase()
-        const compact = toCompactKey(c)
-        return (
-          searchWords.every((w) => lower.includes(w)) ||
-          (compactQuery.length > 0 && compact.includes(compactQuery))
-        )
-      })
-      .slice(0, 10)
-  }, [combinedCategories, value])
+    const results: IndexedCategory[] = []
+
+    for (let i = 0; i < indexedCategories.length; i++) {
+      const c = indexedCategories[i]
+      if (
+        searchWords.every((w) => c.lowerName.includes(w)) ||
+        (compactQuery.length > 0 && c.compactName.includes(compactQuery))
+      ) {
+        results.push(c)
+        if (results.length >= 10) break
+      }
+    }
+
+    return results
+  }, [indexedCategories, value])
 
   // Whether the typed value matches an existing category (case-insensitive / canonical)
-  const isExisting = combinedCategories.some((c) => toCompactKey(c) === toCompactKey(value))
+  const valueCompactKey = useMemo(() => (value.trim() ? toCompactKey(value) : ''), [value])
+  const isExisting = valueCompactKey ? compactCategorySet.has(valueCompactKey) : false
   const previewAutocorrected = useMemo(
-    () => (value.trim() ? autocorrectCategory(value, combinedCategories) : ''),
-    [value, combinedCategories]
+    () => (value.trim() ? autocorrectCategory(value, activeCategoryLookup) : ''),
+    [value, activeCategoryLookup]
   )
 
   return (
@@ -162,7 +196,7 @@ export default function CategoryAutocomplete({
         }}
         onBlur={() => {
           if (!value.trim()) return
-          const corrected = autocorrectCategory(value, combinedCategories)
+          const corrected = autocorrectCategory(value, activeCategoryLookup)
           if (corrected && corrected !== value) {
             onChange(corrected)
           }
@@ -197,21 +231,21 @@ export default function CategoryAutocomplete({
             <>
               {filtered.map((cat) => (
                 <button
-                  key={cat}
+                  key={cat.name}
                   type="button"
                   role="option"
-                  aria-selected={toCompactKey(cat) === toCompactKey(value)}
+                  aria-selected={cat.compactName === valueCompactKey}
                   onMouseDown={(event) => {
                     // Prevent input onBlur from firing before option click applies
                     event.preventDefault()
                   }}
                   onClick={() => {
-                    onChange(cat)
+                    onChange(cat.name)
                     setOpen(false)
                   }}
                   className="block w-full border-b border-gray-100 px-3 py-2 text-left text-sm last:border-0 hover:bg-gray-50"
                 >
-                  {cat}
+                  {cat.name}
                 </button>
               ))}
               {value.trim() && !isExisting && (
