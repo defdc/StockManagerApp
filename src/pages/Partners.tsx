@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { fetchAllRows, isAbortError } from '../lib/supabasePagination'
+import { createSummaryLoader } from '../lib/summaryCache'
 import { formatIDR, formatDate, todayISO } from '../lib/format'
 import type { InventoryItem, Partner, PartnerWithdrawal } from '../types/database'
 import DataTable, { type Column } from '../components/DataTable'
@@ -25,16 +26,72 @@ interface PartnerSummary {
 const emptyPartnerForm = { name: '', email: '' }
 const emptyWithdrawalForm = { partner_id: '', amount: '0', withdrawal_date: todayISO(), notes: '' }
 
+interface PartnersPayload {
+  partners: Partner[]
+  items: InventoryItem[]
+  sales: SaleProfit[]
+  withdrawals: PartnerWithdrawal[]
+}
+
+const partnersLoader = createSummaryLoader<PartnersPayload>(
+  ['partners', 'partner_withdrawals', 'inventory_items', 'sales'],
+  async (signal) => {
+    const [partnersRes, itemsData, salesData, withdrawalsRes] = await Promise.all([
+      supabase.from('partners').select('*').order('name').abortSignal(signal),
+      fetchAllRows<InventoryItem>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('inventory_items')
+            .select('id, modal_price, batch_name, batch_modal_total')
+            .order('id')
+            .range(from, to)
+          return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
+            data: InventoryItem[] | null
+            error: { message: string } | null
+          }>
+        },
+        { signal }
+      ),
+      fetchAllRows<SaleProfit>(
+        (from, to, sig) => {
+          const q = supabase.from('sales').select('net_profit').order('id').range(from, to)
+          return sig ? q.abortSignal(sig) : q
+        },
+        { signal }
+      ),
+      supabase
+        .from('partner_withdrawals')
+        .select('*')
+        .order('withdrawal_date', { ascending: false })
+        .abortSignal(signal),
+    ])
+
+    const firstError = partnersRes.error || withdrawalsRes.error
+    if (firstError) {
+      if (isAbortError(firstError)) throw new DOMException(firstError.message, 'AbortError')
+      throw new Error(firstError.message)
+    }
+
+    return {
+      partners: partnersRes.data ?? [],
+      items: itemsData ?? [],
+      sales: salesData ?? [],
+      withdrawals: withdrawalsRes.data ?? [],
+    }
+  }
+)
+
 export default function Partners() {
   const { canWrite } = useAuth()
   const { showToast } = useToast()
-  const [partners, setPartners] = useState<Partner[]>([])
+  const initialCached = partnersLoader.getCached('all')
+  const [partners, setPartners] = useState<Partner[]>(initialCached?.partners ?? [])
   const [deletingPartner, setDeletingPartner] = useState<Partner | null>(null)
   const [deletingWithdrawal, setDeletingWithdrawal] = useState<PartnerWithdrawal | null>(null)
-  const [items, setItems] = useState<InventoryItem[]>([])
-  const [sales, setSales] = useState<SaleProfit[]>([])
-  const [withdrawals, setWithdrawals] = useState<PartnerWithdrawal[]>([])
-  const [loading, setLoading] = useState(true)
+  const [items, setItems] = useState<InventoryItem[]>(initialCached?.items ?? [])
+  const [sales, setSales] = useState<SaleProfit[]>(initialCached?.sales ?? [])
+  const [withdrawals, setWithdrawals] = useState<PartnerWithdrawal[]>(initialCached?.withdrawals ?? [])
+  const [loading, setLoading] = useState(!initialCached)
   const [error, setError] = useState<string | null>(null)
 
   const [showPartnerModal, setShowPartnerModal] = useState(false)
@@ -47,42 +104,54 @@ export default function Partners() {
   const [savingWithdrawal, setSavingWithdrawal] = useState(false)
   const [withdrawalFormError, setWithdrawalFormError] = useState<string | null>(null)
 
-  async function loadAll() {
+  const releaseRef = useRef<(() => void) | null>(null)
+  const loadSeqRef = useRef(0)
+
+  const loadAll = useCallback(async (force = false) => {
+    const seq = ++loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current
+
+    if (!force) {
+      const cached = partnersLoader.getCached('all')
+      if (cached) {
+        setPartners(cached.partners)
+        setItems(cached.items)
+        setSales(cached.sales)
+        setWithdrawals(cached.withdrawals)
+        setLoading(false)
+        return
+      }
+    }
+
     setLoading(true)
     setError(null)
+    releaseRef.current?.()
+    const { promise, release } = partnersLoader.load('all', { force })
+    releaseRef.current = release
+
     try {
-      const [partnersRes, itemsData, salesData, withdrawalsRes] = await Promise.all([
-        supabase.from('partners').select('*').order('name'),
-        fetchAllRows<InventoryItem>((from, to) =>
-          supabase
-            .from('inventory_items')
-            .select('id, modal_price, batch_name, batch_modal_total')
-            .order('id')
-            .range(from, to) as unknown as PromiseLike<{ data: InventoryItem[] | null; error: { message: string } | null }>
-        ),
-        fetchAllRows<SaleProfit>((from, to) =>
-          supabase.from('sales').select('net_profit').order('id').range(from, to)
-        ),
-        supabase.from('partner_withdrawals').select('*').order('withdrawal_date', { ascending: false }),
-      ])
-
-      const firstError = partnersRes.error || withdrawalsRes.error
-      if (firstError) setError(firstError.message)
-
-      setPartners(partnersRes.data ?? [])
-      setItems(itemsData ?? [])
-      setSales(salesData ?? [])
-      setWithdrawals(withdrawalsRes.data ?? [])
+      const payload = await promise
+      if (!isLatest()) return
+      setPartners(payload.partners)
+      setItems(payload.items)
+      setSales(payload.sales)
+      setWithdrawals(payload.withdrawals)
     } catch (err) {
+      if (!isLatest() || isAbortError(err)) return
       setError(err instanceof Error ? err.message : 'Failed to load partners data.')
     } finally {
-      setLoading(false)
+      if (isLatest()) setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
-    loadAll()
-  }, [])
+    void loadAll(false)
+    return () => {
+      loadSeqRef.current += 1
+      releaseRef.current?.()
+      releaseRef.current = null
+    }
+  }, [loadAll])
 
   const summaries: PartnerSummary[] = useMemo(() => {
     const partnerCount = partners.length || 1
@@ -127,7 +196,7 @@ export default function Partners() {
     }
     setShowPartnerModal(false)
     setPartnerForm(emptyPartnerForm)
-    loadAll()
+    void loadAll(true)
   }
 
   function handleDeletePartner(p: Partner) {
@@ -144,7 +213,7 @@ export default function Partners() {
     } else {
       setDeletingPartner(null)
       showToast(`Partner "${p.name}" deleted.`)
-      loadAll()
+      void loadAll(true)
     }
   }
 
@@ -170,7 +239,7 @@ export default function Partners() {
     setShowWithdrawalModal(false)
     setWithdrawalForm(emptyWithdrawalForm)
     showToast('Withdrawal record added.')
-    loadAll()
+    void loadAll(true)
   }
 
   function handleDeleteWithdrawal(w: PartnerWithdrawal) {
@@ -187,7 +256,7 @@ export default function Partners() {
     } else {
       setDeletingWithdrawal(null)
       showToast('Withdrawal record deleted.')
-      loadAll()
+      void loadAll(true)
     }
   }
 

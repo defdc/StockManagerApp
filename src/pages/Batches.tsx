@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
 import { useDataInvalidation } from '../lib/dataSync'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { fetchAllRows, isAbortError } from '../lib/supabasePagination'
 import { formatDate, formatIDR, splitAmount } from '../lib/format'
 import Modal from '../components/Modal'
 import FormattedPriceInput from '../components/FormattedPriceInput'
@@ -166,10 +166,25 @@ export default function Batches() {
   // so a slow, older response can never overwrite fresher numbers ("ghost" revenue).
   const loadSeqRef = useRef(0)
   const hasLoadedRef = useRef(false)
+  const inFlightKeyRef = useRef<string | null>(null)
+  const activeControllerRef = useRef<AbortController | null>(null)
 
-  const loadBatches = useCallback(async () => {
+  const loadBatches = useCallback(async (force = false, externalSignal?: AbortSignal) => {
+    const requestKey = `${page}|${debouncedSearch.trim()}|${sortBy}`
+    if (!force && inFlightKeyRef.current === requestKey && !activeControllerRef.current?.signal.aborted) {
+      return
+    }
+    inFlightKeyRef.current = requestKey
+
+    if (!externalSignal) {
+      activeControllerRef.current?.abort()
+    }
+    const controller = externalSignal ? null : new AbortController()
+    const signal = externalSignal ?? controller!.signal
+    if (controller) activeControllerRef.current = controller
+
     const seq = ++loadSeqRef.current
-    const isLatest = () => seq === loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current && !signal.aborted
     // First load shows the full loader; later refreshes keep current data on screen.
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
@@ -185,33 +200,41 @@ export default function Batches() {
 
       if (trimmedSearch.length >= 2) {
         const words = trimmedSearch.split(/\s+/).filter(Boolean)
-        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(async (f, t) => {
-          let q = supabase
-            .from('inventory_items')
-            .select(BATCH_ITEMS_SELECT)
-          for (const word of words) {
-            const safeWord = word.replace(/[,()]/g, '')
-            if (!safeWord) continue
-            q = q.or(`batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`)
-          }
-          return q
-            .order('created_at', { ascending: false })
-            .range(f, t) as unknown as PromiseLike<{
-            data: InventoryItemWithRelations[] | null
-            error: { message: string } | null
-          }>
-        }, 1000)
+        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(
+          (f, t, sig) => {
+            let q = supabase
+              .from('inventory_items')
+              .select(BATCH_ITEMS_SELECT)
+            for (const word of words) {
+              const safeWord = word.replace(/[,()]/g, '')
+              if (!safeWord) continue
+              q = q.or(`batch_name.ilike.%${safeWord}%,item_name.ilike.%${safeWord}%`)
+            }
+            const paged = q.order('created_at', { ascending: false }).range(f, t)
+            return (sig ? paged.abortSignal(sig) : paged) as unknown as PromiseLike<{
+              data: InventoryItemWithRelations[] | null
+              error: { message: string } | null
+            }>
+          },
+          1000,
+          { signal }
+        )
       } else {
-        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(async (f, t) => {
-          return supabase
-            .from('inventory_items')
-            .select(BATCH_ITEMS_SELECT)
-            .order('created_at', { ascending: true })
-            .range(f, t) as unknown as PromiseLike<{
-            data: InventoryItemWithRelations[] | null
-            error: { message: string } | null
-          }>
-        }, 1000)
+        allBatchItems = await fetchAllRows<InventoryItemWithRelations>(
+          (f, t, sig) => {
+            const q = supabase
+              .from('inventory_items')
+              .select(BATCH_ITEMS_SELECT)
+              .order('created_at', { ascending: true })
+              .range(f, t)
+            return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
+              data: InventoryItemWithRelations[] | null
+              error: { message: string } | null
+            }>
+          },
+          1000,
+          { signal }
+        )
       }
 
       if (!isLatest()) return
@@ -281,17 +304,20 @@ export default function Batches() {
           const chunkResults = await Promise.all(
             batchChunks.map((chunk) =>
               fetchAllRows<InventoryItemWithRelations>(
-                (f, t) =>
-                  supabase
+                (f, t, sig) => {
+                  const q = supabase
                     .from('inventory_items')
                     .select(BATCH_ITEMS_SELECT)
                     .in('batch_name', chunk)
                     .order('created_at', { ascending: true })
-                    .range(f, t) as unknown as PromiseLike<{
+                    .range(f, t)
+                  return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                     data: InventoryItemWithRelations[] | null
                     error: { message: string } | null
-                  }>,
-                1000
+                  }>
+                },
+                1000,
+                { signal }
               )
             )
           )
@@ -302,17 +328,20 @@ export default function Batches() {
 
         if (hasUnassigned) {
           const unassignedItems = await fetchAllRows<InventoryItemWithRelations>(
-            (f, t) =>
-              supabase
+            (f, t, sig) => {
+              const q = supabase
                 .from('inventory_items')
                 .select(BATCH_ITEMS_SELECT)
                 .or('batch_name.is.null,batch_name.eq.,batch_name.eq.Unassigned')
                 .order('created_at', { ascending: true })
-                .range(f, t) as unknown as PromiseLike<{
+                .range(f, t)
+              return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                 data: InventoryItemWithRelations[] | null
                 error: { message: string } | null
-              }>,
-            1000
+              }>
+            },
+            1000,
+            { signal }
           )
           inventoryItems.push(...unassignedItems)
         }
@@ -332,34 +361,40 @@ export default function Batches() {
             Promise.all(
               idChunks.map((chunk) =>
                 fetchAllRows<SaleRow>(
-                  (f, t) =>
-                    supabase
+                  (f, t, sig) => {
+                    const q = supabase
                       .from('sales')
                       .select(BATCH_SALES_SELECT)
                       .in('inventory_item_id', chunk)
                       .order('sale_date', { ascending: false })
-                      .range(f, t) as unknown as PromiseLike<{
+                      .range(f, t)
+                    return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                       data: SaleRow[] | null
                       error: { message: string } | null
-                    }>,
-                  1000
+                    }>
+                  },
+                  1000,
+                  { signal }
                 )
               )
             ),
             Promise.all(
               idChunks.map((chunk) =>
                 fetchAllRows<BookingRow>(
-                  (f, t) =>
-                    supabase
+                  (f, t, sig) => {
+                    const q = supabase
                       .from('bookings')
                       .select(BATCH_BOOKINGS_SELECT)
                       .in('inventory_item_id', chunk)
                       .order('created_at', { ascending: false })
-                      .range(f, t) as unknown as PromiseLike<{
+                      .range(f, t)
+                    return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                       data: BookingRow[] | null
                       error: { message: string } | null
-                    }>,
-                  1000
+                    }>
+                  },
+                  1000,
+                  { signal }
                 )
               )
             ),
@@ -372,28 +407,34 @@ export default function Batches() {
           // fetch lightweight sales & bookings once and filter by itemIdSet in memory.
           const [allSales, allBookings] = await Promise.all([
             fetchAllRows<SaleRow>(
-              (f, t) =>
-                supabase
+              (f, t, sig) => {
+                const q = supabase
                   .from('sales')
                   .select(BATCH_SALES_SELECT)
                   .order('sale_date', { ascending: false })
-                  .range(f, t) as unknown as PromiseLike<{
+                  .range(f, t)
+                return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                   data: SaleRow[] | null
                   error: { message: string } | null
-                }>,
-              1000
+                }>
+              },
+              1000,
+              { signal }
             ),
             fetchAllRows<BookingRow>(
-              (f, t) =>
-                supabase
+              (f, t, sig) => {
+                const q = supabase
                   .from('bookings')
                   .select(BATCH_BOOKINGS_SELECT)
                   .order('created_at', { ascending: false })
-                  .range(f, t) as unknown as PromiseLike<{
+                  .range(f, t)
+                return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
                   data: BookingRow[] | null
                   error: { message: string } | null
-                }>,
-              1000
+                }>
+              },
+              1000,
+              { signal }
             ),
           ])
           if (!isLatest()) return
@@ -545,9 +586,12 @@ export default function Batches() {
       )
       hasLoadedRef.current = true
     } catch (loadError) {
-      if (!isLatest()) return
+      if (!isLatest() || isAbortError(loadError)) return
       setError(loadError instanceof Error ? loadError.message : 'Unable to load batches.')
     } finally {
+      if (inFlightKeyRef.current === requestKey) {
+        inFlightKeyRef.current = null
+      }
       if (isLatest()) {
         setLoading(false)
         setRefreshing(false)
@@ -557,7 +601,13 @@ export default function Batches() {
 
   // Fresh fetch on mount and when page / search / sort changes
   useEffect(() => {
-    void loadBatches()
+    const controller = new AbortController()
+    activeControllerRef.current = controller
+    void loadBatches(false, controller.signal)
+    return () => {
+      controller.abort()
+      inFlightKeyRef.current = null
+    }
   }, [loadBatches])
 
   // … and whenever inventory / sales / bookings change anywhere (this tab or another),
@@ -565,7 +615,7 @@ export default function Batches() {
   useDataInvalidation(
     ['inventory_items', 'sales', 'bookings', 'batches'],
     () => {
-      void loadBatches()
+      void loadBatches(true)
     },
     { remoteOnly: true }
   )

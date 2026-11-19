@@ -15,6 +15,7 @@ import {
   resolveIndividualItemModal,
   shouldFetchBatchCountForItem,
 } from '../lib/inventoryModal'
+import { isAbortError } from '../lib/supabasePagination'
 import type { Booking, BookingStatus, FulfillmentStatus } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -169,10 +170,25 @@ export default function Bookings() {
   const [refreshing, setRefreshing] = useState(false)
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
+  const inFlightKeyRef = useRef<string | null>(null)
+  const activeControllerRef = useRef<AbortController | null>(null)
 
-  const loadBookings = useCallback(async () => {
+  const loadBookings = useCallback(async (force = false, externalSignal?: AbortSignal) => {
+    const requestKey = `${page}|${statusFilter}|${showConverted}|${debouncedSearch.trim()}`
+    if (!force && inFlightKeyRef.current === requestKey && !activeControllerRef.current?.signal.aborted) {
+      return
+    }
+    inFlightKeyRef.current = requestKey
+
+    if (!externalSignal) {
+      activeControllerRef.current?.abort()
+    }
+    const controller = externalSignal ? null : new AbortController()
+    const signal = externalSignal ?? controller!.signal
+    if (controller) activeControllerRef.current = controller
+
     const seq = ++loadSeqRef.current
-    const isLatest = () => seq === loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current && !signal.aborted
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
@@ -201,6 +217,8 @@ export default function Bookings() {
             .select('id')
             .or(`item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%`)
             .limit(200)
+            .abortSignal(signal)
+          if (!isLatest()) return
           const matchedIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
           if (matchedIds.length > 0) {
             query = query.or(
@@ -220,8 +238,12 @@ export default function Bookings() {
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
         .range(from, to)
+        .abortSignal(signal)
 
-      if (fetchError) throw new Error(fetchError.message)
+      if (fetchError) {
+        if (isAbortError(fetchError)) return
+        throw new Error(fetchError.message)
+      }
       if (!isLatest()) return
 
       let nextBookings = ((data as unknown as BookingRow[]) ?? []).slice()
@@ -243,6 +265,7 @@ export default function Bookings() {
             return siblingQuery
               .order('created_at', { ascending: false })
               .order('id', { ascending: false })
+              .abortSignal(signal)
           })
         )
         const siblingData = siblingResults.flatMap((r) => r.data ?? [])
@@ -294,9 +317,12 @@ export default function Bookings() {
       // Preserve open convert modal target without closing or resetting
       setSingleConvertTarget((current) => (current ? nextBookings.find((b) => b.id === current.id) ?? current : null))
     } catch (err) {
-      if (!isLatest()) return
+      if (!isLatest() || isAbortError(err)) return
       setError(err instanceof Error ? err.message : 'Failed to load bookings.')
     } finally {
+      if (inFlightKeyRef.current === requestKey) {
+        inFlightKeyRef.current = null
+      }
       if (isLatest()) {
         setLoading(false)
         setRefreshing(false)
@@ -305,13 +331,19 @@ export default function Bookings() {
   }, [page, statusFilter, showConverted, debouncedSearch])
 
   useEffect(() => {
-    void loadBookings()
+    const controller = new AbortController()
+    activeControllerRef.current = controller
+    void loadBookings(false, controller.signal)
+    return () => {
+      controller.abort()
+      inFlightKeyRef.current = null
+    }
   }, [loadBookings])
 
   useDataInvalidation(
     ['bookings', 'sales', 'inventory_items'],
     () => {
-      void loadBookings()
+      void loadBookings(true)
     },
     { remoteOnly: true }
   )
@@ -1421,6 +1453,41 @@ export default function Bookings() {
     )
   }
 
+  async function handleCopyUnpaidBuyers() {
+    const sourceBookings =
+      statusFilter === 'converted_to_sale' || statusFilter === 'cancelled'
+        ? bookings
+        : filtered
+
+    const seen = new Set<string>()
+    const uniqueBuyers: string[] = []
+
+    for (const booking of sourceBookings) {
+      if (booking.status !== 'active') continue
+      const cleanName = (booking.buyer_name ?? '').trim().replace(/\s+/g, ' ')
+      if (!cleanName) continue
+      const key = cleanName.toLowerCase()
+      if (!seen.has(key)) {
+        seen.add(key)
+        uniqueBuyers.push(cleanName)
+      }
+    }
+
+    if (uniqueBuyers.length === 0) {
+      showToast('No active/unpaid buyers found to copy.', 'info')
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(uniqueBuyers.join('\n'))
+      showToast(
+        `Copied ${uniqueBuyers.length} unique unpaid buyer${uniqueBuyers.length === 1 ? '' : 's'} to clipboard.`
+      )
+    } catch {
+      showToast('Failed to copy buyer names to clipboard.', 'error')
+    }
+  }
+
   const bulkSaleHelperText = bulkPurchase
     ? 'Total price will be split evenly across all selected items (remainder goes to last item).'
     : 'Each booking will be converted at its own deal price, preserving all individual booking details.'
@@ -1546,7 +1613,14 @@ export default function Bookings() {
             </span>
           )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void handleCopyUnpaidBuyers()}
+            className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Copy Unpaid Buyers
+          </button>
           <button
             onClick={handleExport}
             className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"

@@ -1,5 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import {
+  autocorrectCategory,
+  deduplicateCategories,
+  expandSearchWords,
+  toCompactKey,
+} from '../lib/autocorrect'
 
 interface CategoryAutocompleteProps {
   value: string
@@ -76,7 +82,7 @@ export default function CategoryAutocomplete({
           .select('category')
           .not('category', 'is', null)
 
-        const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+        const searchWords = expandSearchWords(trimmed)
         searchWords.forEach((word) => {
           query = query.ilike('category', `%${word}%`)
         })
@@ -87,16 +93,11 @@ export default function CategoryAutocomplete({
 
         if (cancelled) return
 
-        // Deduplicate: trim + case-insensitive comparison, preserve first-seen casing
-        const seen = new Map<string, string>() // normalized key → original display value
-        for (const row of data ?? []) {
-          const raw = (row.category as string).trim()
-          if (!raw) continue
-          const key = raw.toLowerCase()
-          if (!seen.has(key)) seen.set(key, raw)
-        }
+        const rawCategories = (data ?? [])
+          .map((row) => (row.category as string | null) ?? '')
+          .filter((raw) => Boolean(raw.trim()))
 
-        setCategories([...seen.values()].sort((a, b) => a.localeCompare(b)))
+        setCategories(deduplicateCategories(rawCategories))
       } finally {
         if (!cancelled) {
           setLoading(false)
@@ -111,25 +112,33 @@ export default function CategoryAutocomplete({
   }, [existingCategories, open, value])
 
   const combinedCategories = useMemo(() => {
-    const seen = new Map<string, string>()
     const sourceCategories = existingCategories ?? categories
-    for (const item of [...extraSuggestions, ...sourceCategories]) {
-      const raw = (item || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) seen.set(key, raw)
-    }
-    return [...seen.values()].sort((a, b) => a.localeCompare(b))
+    return deduplicateCategories([...extraSuggestions, ...sourceCategories])
   }, [existingCategories, categories, extraSuggestions])
 
   const filtered = useMemo(() => {
-    const q = value.trim().toLowerCase()
-    if (!q) return combinedCategories.slice(0, 10)
-    return combinedCategories.filter((c) => c.toLowerCase().includes(q)).slice(0, 10)
+    const trimmed = value.trim()
+    if (!trimmed) return combinedCategories.slice(0, 10)
+    const searchWords = expandSearchWords(trimmed)
+    const compactQuery = toCompactKey(trimmed)
+    return combinedCategories
+      .filter((c) => {
+        const lower = c.toLowerCase()
+        const compact = toCompactKey(c)
+        return (
+          searchWords.every((w) => lower.includes(w)) ||
+          (compactQuery.length > 0 && compact.includes(compactQuery))
+        )
+      })
+      .slice(0, 10)
   }, [combinedCategories, value])
 
-  // Whether the typed value matches an existing category (case-insensitive)
-  const isExisting = combinedCategories.some((c) => c.toLowerCase() === value.trim().toLowerCase())
+  // Whether the typed value matches an existing category (case-insensitive / canonical)
+  const isExisting = combinedCategories.some((c) => toCompactKey(c) === toCompactKey(value))
+  const previewAutocorrected = useMemo(
+    () => (value.trim() ? autocorrectCategory(value, combinedCategories) : ''),
+    [value, combinedCategories]
+  )
 
   return (
     <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>
@@ -150,6 +159,13 @@ export default function CategoryAutocomplete({
         onFocus={() => {
           setOpen(true)
           updatePosition()
+        }}
+        onBlur={() => {
+          if (!value.trim()) return
+          const corrected = autocorrectCategory(value, combinedCategories)
+          if (corrected && corrected !== value) {
+            onChange(corrected)
+          }
         }}
         onChange={(event) => {
           onChange(event.target.value)
@@ -172,7 +188,7 @@ export default function CategoryAutocomplete({
           ) : filtered.length === 0 ? (
             value.trim() ? (
               <p className="px-3 py-3 text-sm text-gray-500">
-                Press Enter or click away to create <strong>{value.trim()}</strong>
+                Press Enter or click away to create <strong>{previewAutocorrected}</strong>
               </p>
             ) : (
               <p className="px-3 py-3 text-sm text-gray-500">No categories yet — type to create one</p>
@@ -184,7 +200,11 @@ export default function CategoryAutocomplete({
                   key={cat}
                   type="button"
                   role="option"
-                  aria-selected={cat.toLowerCase() === value.trim().toLowerCase()}
+                  aria-selected={toCompactKey(cat) === toCompactKey(value)}
+                  onMouseDown={(event) => {
+                    // Prevent input onBlur from firing before option click applies
+                    event.preventDefault()
+                  }}
                   onClick={() => {
                     onChange(cat)
                     setOpen(false)
@@ -197,13 +217,16 @@ export default function CategoryAutocomplete({
               {value.trim() && !isExisting && (
                 <button
                   type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                  }}
                   onClick={() => {
-                    onChange(value.trim())
+                    onChange(previewAutocorrected)
                     setOpen(false)
                   }}
                   className="block w-full border-t border-gray-200 px-3 py-2 text-left text-sm text-blue-600 hover:bg-blue-50"
                 >
-                  + Create &ldquo;{value.trim()}&rdquo;
+                  + Create &ldquo;{previewAutocorrected}&rdquo;
                 </button>
               )}
             </>

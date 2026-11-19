@@ -5,7 +5,8 @@ import { useDataInvalidation } from '../lib/dataSync'
 import { formatIDR, formatDate } from '../lib/format'
 import StatCard from '../components/StatCard'
 import type { FulfillmentStatus, InventoryItem, Sale } from '../types/database'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { fetchAllRows, isAbortError } from '../lib/supabasePagination'
+import { createSummaryLoader } from '../lib/summaryCache'
 import { getLiveModalPrice } from '../lib/inventoryModal'
 import {
   calculatePeriodSummary,
@@ -58,208 +59,276 @@ interface DashboardData {
   monthSummary: PeriodSummary
 }
 
+async function fetchDashboardData(signal: AbortSignal, thresholdKey: string): Promise<DashboardData> {
+  const lowStockThreshold = Number(thresholdKey) || 0
+
+  const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, activeBookings] =
+    await Promise.all([
+      supabase.from('inventory_items').select('id', { count: 'exact', head: true }).abortSignal(signal),
+      fetchAllRows<InventoryAggregate>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('inventory_items')
+            .select('id, status, quantity, modal_price, batch_name, batch_modal_total')
+            .order('id')
+            .range(from, to)
+          return sig ? q.abortSignal(sig) : q
+        },
+        { signal }
+      ),
+      fetchAllRows<SaleSummaryInput>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('sales')
+            .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status, inventory_items(batch_name)')
+            .order('id')
+            .range(from, to)
+          return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
+            data: SaleSummaryInput[] | null
+            error: { message: string } | null
+          }>
+        },
+        { signal }
+      ),
+      fetchAllRows<ExpenseSummaryInput>(
+        (from, to, sig) => {
+          const q = supabase.from('expenses').select('id, amount, expense_date').order('id').range(from, to)
+          return sig ? q.abortSignal(sig) : q
+        },
+        { signal }
+      ),
+      supabase
+        .from('sales')
+        .select('*, inventory_items(item_name)')
+        .order('created_at', { ascending: false })
+        .limit(5)
+        .abortSignal(signal),
+      supabase
+        .from('inventory_items')
+        .select('id, item_name, quantity, status, created_at')
+        .eq('status', 'ready')
+        .lte('quantity', lowStockThreshold)
+        .order('created_at', { ascending: true })
+        .limit(8)
+        .abortSignal(signal),
+      supabase
+        .from('sales')
+        .select('*, inventory_items(item_name)')
+        .order('net_profit', { ascending: false })
+        .limit(5)
+        .abortSignal(signal),
+      fetchAllRows<{ deal_price: number; inventory_items: { batch_name: string | null } | null }>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('bookings')
+            .select('deal_price, inventory_items(batch_name)')
+            .eq('status', 'active')
+            .range(from, to)
+          return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
+            data: { deal_price: number; inventory_items: { batch_name: string | null } | null }[] | null
+            error: { message: string } | null
+          }>
+        },
+        { signal }
+      ),
+    ])
+
+  const firstError = itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error
+  if (firstError) {
+    if (isAbortError(firstError)) throw new DOMException(firstError.message, 'AbortError')
+    throw new Error(firstError.message)
+  }
+
+  const readyQty = items.filter((i) => i.status === 'ready').length
+  const bookedQty = items.filter((i) => i.status === 'booked').length
+  const soldQty = items.filter((i) => i.status === 'sold').length
+  const modalValue = items
+    .filter((i) => i.status === 'ready' || i.status === 'booked')
+    .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
+  const readyInventoryValue = items
+    .filter((i) => i.status === 'ready')
+    .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
+  const bookedInventoryValue = items
+    .filter((i) => i.status === 'booked')
+    .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
+
+  const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
+  const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
+  const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0)
+  const netProfit = sales.reduce((s, sale) => s + sale.net_profit, 0) - totalExpenses
+  const currentMonth = new Date().toISOString().slice(0, 7)
+  const soldThisMonth = sales.filter((sale) => sale.sale_date?.startsWith(currentMonth)).length
+  const buyerRevenue = new Map<string, number>()
+  for (const sale of sales) {
+    buyerRevenue.set(sale.buyer_name, (buyerRevenue.get(sale.buyer_name) ?? 0) + sale.sale_price)
+  }
+  const topBuyerEntry = [...buyerRevenue.entries()].sort((a, b) => b[1] - a[1])[0]
+
+  // Calculate Batch Recovery % (including sales and active booked revenue)
+  const batchRecoveryMap = new Map<
+    string,
+    { batchModal: number; salesRevenue: number; bookedRevenue: number; netProfit: number }
+  >()
+
+  for (const item of items) {
+    const batchName = item.batch_name?.trim() || 'Unassigned'
+    const current = batchRecoveryMap.get(batchName) ?? {
+      batchModal: item.batch_modal_total ?? 0,
+      salesRevenue: 0,
+      bookedRevenue: 0,
+      netProfit: 0,
+    }
+    if ((item.batch_modal_total ?? 0) > 0 && current.batchModal === 0) {
+      current.batchModal = item.batch_modal_total ?? 0
+    }
+    batchRecoveryMap.set(batchName, current)
+  }
+
+  for (const sale of sales) {
+    const batchName = getBatchName(sale.inventory_items)
+    const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
+    current.salesRevenue += sale.sale_price
+    current.netProfit += sale.net_profit
+    batchRecoveryMap.set(batchName, current)
+  }
+
+  for (const booking of activeBookings) {
+    const batchName = getBatchName(booking.inventory_items)
+    const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
+    current.bookedRevenue += booking.deal_price
+    batchRecoveryMap.set(batchName, current)
+  }
+
+  const highestProfitBatchEntry = [...batchRecoveryMap.entries()].sort((a, b) => b[1].netProfit - a[1].netProfit)[0]
+
+  const recoveredBatchNames = new Set<string>()
+  for (const [batchName, bData] of batchRecoveryMap.entries()) {
+    const totalRev = bData.salesRevenue + bData.bookedRevenue
+    if (bData.batchModal > 0 && totalRev >= bData.batchModal) {
+      recoveredBatchNames.add(batchName)
+    }
+  }
+
+  function calculateRecoveryProfitForSales(salesList: SaleSummaryInput[]) {
+    return salesList.reduce((sum, sale) => {
+      const batchName = getBatchName(sale.inventory_items)
+      if (recoveredBatchNames.has(batchName)) {
+        return sum + sale.gross_profit
+      }
+      return sum
+    }, 0)
+  }
+
+  const totalRecoveryProfit = calculateRecoveryProfitForSales(sales)
+
+  const batchSummary = Array.from(batchRecoveryMap.values()).reduce(
+    (summary, batch) => {
+      const totalRev = batch.salesRevenue + batch.bookedRevenue
+      if (totalRev === 0) summary.noSalesBatches += 1
+      else if (batch.batchModal > 0 && totalRev < batch.batchModal) summary.inProgressBatches += 1
+      else summary.profitableBatches += 1
+      return summary
+    },
+    { totalBatches: batchRecoveryMap.size, profitableBatches: 0, inProgressBatches: 0, noSalesBatches: 0 }
+  )
+  const fulfillmentSummary = sales.reduce(
+    (summary, sale) => {
+      const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
+      summary[rawStatus] = (summary[rawStatus] ?? 0) + 1
+      return summary
+    },
+    { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 } as Record<FulfillmentStatus, number>
+  )
+
+  // Calculate Period Summaries
+  const weekBounds = getWeekBounds(0)
+  const monthBounds = getMonthBounds(0)
+
+  const weekSummary = calculatePeriodSummary(sales, expenses, weekBounds.start, weekBounds.end, weekBounds.label, 'week')
+  const monthSummary = calculatePeriodSummary(sales, expenses, monthBounds.start, monthBounds.end, monthBounds.label, 'month')
+
+  const weekRecoveryProfit = calculateRecoveryProfitForSales(weekSummary.sales)
+  const monthRecoveryProfit = calculateRecoveryProfitForSales(monthSummary.sales)
+
+  return {
+    totalItems: itemCountRes.count ?? 0,
+    readyQty,
+    bookedQty,
+    soldQty,
+    modalValue,
+    readyInventoryValue,
+    bookedInventoryValue,
+    soldThisMonth,
+    topBuyer: topBuyerEntry ? `${topBuyerEntry[0]} (${formatIDR(topBuyerEntry[1])})` : '-',
+    highestProfitBatch: highestProfitBatchEntry
+      ? `${highestProfitBatchEntry[0]} (${formatIDR(highestProfitBatchEntry[1].netProfit)})`
+      : '-',
+    revenue,
+    grossProfit,
+    netProfit,
+    totalRecoveryProfit,
+    weekRecoveryProfit,
+    monthRecoveryProfit,
+    recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
+    lowStockItems: (lowStockRes.data as unknown as InventoryItem[]) ?? [],
+    topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
+    batchSummary,
+    fulfillmentSummary,
+    weekSummary,
+    monthSummary,
+  }
+}
+
+const dashboardLoader = createSummaryLoader<DashboardData>(
+  ['inventory_items', 'sales', 'bookings', 'expenses'],
+  fetchDashboardData
+)
+
 export default function Dashboard() {
   const navigate = useNavigate()
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [lowStockThreshold, setLowStockThreshold] = useState(2)
+  const initialCached = dashboardLoader.getCached(String(lowStockThreshold))
+  const [data, setData] = useState<DashboardData | null>(initialCached)
+  const [loading, setLoading] = useState(!initialCached)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [lowStockThreshold, setLowStockThreshold] = useState(2)
 
-  const hasLoadedRef = useRef(false)
+  const hasLoadedRef = useRef(Boolean(initialCached))
   const loadSeqRef = useRef(0)
+  const releaseRef = useRef<(() => void) | null>(null)
 
-  const load = useCallback(async () => {
-    const seq = ++loadSeqRef.current
-    const isLatest = () => seq === loadSeqRef.current
-    if (hasLoadedRef.current) setRefreshing(true)
-    else setLoading(true)
-    setError(null)
+  const load = useCallback(
+    async (force = false) => {
+      const key = String(lowStockThreshold)
+      const seq = ++loadSeqRef.current
+      const isLatest = () => seq === loadSeqRef.current
+
+      if (!force) {
+        const cached = dashboardLoader.getCached(key)
+        if (cached) {
+          setData(cached)
+          setLoading(false)
+          setRefreshing(false)
+          hasLoadedRef.current = true
+          return
+        }
+      }
+
+      if (hasLoadedRef.current) setRefreshing(true)
+      else setLoading(true)
+      setError(null)
+
+      releaseRef.current?.()
+      const { promise, release } = dashboardLoader.load(key, { force })
+      releaseRef.current = release
 
       try {
-        const [itemCountRes, items, sales, expenses, recentSalesRes, lowStockRes, topProfitRes, activeBookings] =
-          await Promise.all([
-            supabase.from('inventory_items').select('id', { count: 'exact', head: true }),
-            fetchAllRows<InventoryAggregate>((from, to) =>
-              supabase
-                .from('inventory_items')
-                .select('id, status, quantity, modal_price, batch_name, batch_modal_total')
-                .order('id')
-                .range(from, to)
-            ),
-            fetchAllRows<SaleSummaryInput>((from, to) =>
-              supabase
-                .from('sales')
-                .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status, inventory_items(batch_name)')
-                .order('id')
-                .range(from, to) as unknown as PromiseLike<{ data: SaleSummaryInput[] | null; error: { message: string } | null }>
-            ),
-            fetchAllRows<ExpenseSummaryInput>((from, to) =>
-              supabase.from('expenses').select('id, amount, expense_date').order('id').range(from, to)
-            ),
-            supabase
-              .from('sales')
-              .select('*, inventory_items(item_name)')
-              .order('created_at', { ascending: false })
-              .limit(5),
-            supabase
-              .from('inventory_items')
-              .select('id, item_name, quantity, status, created_at')
-              .eq('status', 'ready')
-              .lte('quantity', lowStockThreshold)
-              .order('created_at', { ascending: true })
-              .limit(8),
-            supabase
-              .from('sales')
-              .select('*, inventory_items(item_name)')
-              .order('net_profit', { ascending: false })
-              .limit(5),
-            fetchAllRows<{ deal_price: number; inventory_items: { batch_name: string | null } | null }>((from, to) =>
-              supabase
-                .from('bookings')
-                .select('deal_price, inventory_items(batch_name)')
-                .eq('status', 'active')
-                .range(from, to) as unknown as PromiseLike<{ data: { deal_price: number; inventory_items: { batch_name: string | null } | null }[] | null; error: { message: string } | null }>
-            ),
-          ])
-
-        const firstError = itemCountRes.error || recentSalesRes.error || lowStockRes.error || topProfitRes.error
-        if (firstError) throw new Error(firstError.message)
-
-        const readyQty = items.filter((i) => i.status === 'ready').length
-        const bookedQty = items.filter((i) => i.status === 'booked').length
-        const soldQty = items.filter((i) => i.status === 'sold').length
-        const modalValue = items
-          .filter((i) => i.status === 'ready' || i.status === 'booked')
-          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
-        const readyInventoryValue = items
-          .filter((i) => i.status === 'ready')
-          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
-        const bookedInventoryValue = items
-          .filter((i) => i.status === 'booked')
-          .reduce((s, i) => s + getLiveModalPrice(i, items), 0)
-
-        const revenue = sales.reduce((s, sale) => s + sale.sale_price, 0)
-        const grossProfit = sales.reduce((s, sale) => s + sale.gross_profit, 0)
-        const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0)
-        const netProfit = sales.reduce((s, sale) => s + sale.net_profit, 0) - totalExpenses
-        const currentMonth = new Date().toISOString().slice(0, 7)
-        const soldThisMonth = sales.filter((sale) => sale.sale_date?.startsWith(currentMonth)).length
-        const buyerRevenue = new Map<string, number>()
-        for (const sale of sales) {
-          buyerRevenue.set(sale.buyer_name, (buyerRevenue.get(sale.buyer_name) ?? 0) + sale.sale_price)
-        }
-        const topBuyerEntry = [...buyerRevenue.entries()].sort((a, b) => b[1] - a[1])[0]
-
-        // Calculate Batch Recovery % (including sales and active booked revenue)
-        const batchRecoveryMap = new Map<string, { batchModal: number; salesRevenue: number; bookedRevenue: number; netProfit: number }>()
-
-        for (const item of items) {
-          const batchName = item.batch_name?.trim() || 'Unassigned'
-          const current = batchRecoveryMap.get(batchName) ?? { batchModal: item.batch_modal_total ?? 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
-          if ((item.batch_modal_total ?? 0) > 0 && current.batchModal === 0) {
-            current.batchModal = item.batch_modal_total ?? 0
-          }
-          batchRecoveryMap.set(batchName, current)
-        }
-
-        for (const sale of sales) {
-          const batchName = getBatchName(sale.inventory_items)
-          const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
-          current.salesRevenue += sale.sale_price
-          current.netProfit += sale.net_profit
-          batchRecoveryMap.set(batchName, current)
-        }
-
-        for (const booking of activeBookings) {
-          const batchName = getBatchName(booking.inventory_items)
-          const current = batchRecoveryMap.get(batchName) ?? { batchModal: 0, salesRevenue: 0, bookedRevenue: 0, netProfit: 0 }
-          current.bookedRevenue += booking.deal_price
-          batchRecoveryMap.set(batchName, current)
-        }
-
-        const highestProfitBatchEntry = [...batchRecoveryMap.entries()].sort((a, b) => b[1].netProfit - a[1].netProfit)[0]
-
-        const recoveredBatchNames = new Set<string>()
-        for (const [batchName, bData] of batchRecoveryMap.entries()) {
-          const totalRev = bData.salesRevenue + bData.bookedRevenue
-          if (bData.batchModal > 0 && totalRev >= bData.batchModal) {
-            recoveredBatchNames.add(batchName)
-          }
-        }
-
-        function calculateRecoveryProfitForSales(salesList: SaleSummaryInput[]) {
-          return salesList.reduce((sum, sale) => {
-            const batchName = getBatchName(sale.inventory_items)
-            if (recoveredBatchNames.has(batchName)) {
-              return sum + sale.gross_profit
-            }
-            return sum
-          }, 0)
-        }
-
-        const totalRecoveryProfit = calculateRecoveryProfitForSales(sales)
-
-        const batchSummary = Array.from(batchRecoveryMap.values()).reduce(
-          (summary, batch) => {
-            const totalRev = batch.salesRevenue + batch.bookedRevenue
-            if (totalRev === 0) summary.noSalesBatches += 1
-            else if (batch.batchModal > 0 && totalRev < batch.batchModal) summary.inProgressBatches += 1
-            else summary.profitableBatches += 1
-            return summary
-          },
-          { totalBatches: batchRecoveryMap.size, profitableBatches: 0, inProgressBatches: 0, noSalesBatches: 0 }
-        )
-        const fulfillmentSummary = sales.reduce(
-          (summary, sale) => {
-            const rawStatus = (sale.fulfillment_status ?? 'parking') as FulfillmentStatus
-            summary[rawStatus] = (summary[rawStatus] ?? 0) + 1
-            return summary
-          },
-          { parking: 0, shipping: 0, parking_shipping: 0, shipping_cod: 0, delivered: 0 } as Record<FulfillmentStatus, number>
-        )
-
-        // Calculate Period Summaries
-        const weekBounds = getWeekBounds(0)
-        const monthBounds = getMonthBounds(0)
-
-        const weekSummary = calculatePeriodSummary(sales, expenses, weekBounds.start, weekBounds.end, weekBounds.label, 'week')
-        const monthSummary = calculatePeriodSummary(sales, expenses, monthBounds.start, monthBounds.end, monthBounds.label, 'month')
-
-        const weekRecoveryProfit = calculateRecoveryProfitForSales(weekSummary.sales)
-        const monthRecoveryProfit = calculateRecoveryProfitForSales(monthSummary.sales)
-
-        setData({
-          totalItems: itemCountRes.count ?? 0,
-          readyQty,
-          bookedQty,
-          soldQty,
-          modalValue,
-          readyInventoryValue,
-          bookedInventoryValue,
-          soldThisMonth,
-          topBuyer: topBuyerEntry ? `${topBuyerEntry[0]} (${formatIDR(topBuyerEntry[1])})` : '-',
-          highestProfitBatch: highestProfitBatchEntry
-            ? `${highestProfitBatchEntry[0]} (${formatIDR(highestProfitBatchEntry[1].netProfit)})`
-            : '-',
-          revenue,
-          grossProfit,
-          netProfit,
-          totalRecoveryProfit,
-          weekRecoveryProfit,
-          monthRecoveryProfit,
-          recentSales: (recentSalesRes.data as unknown as SaleWithItem[]) ?? [],
-          lowStockItems: (lowStockRes.data as unknown as InventoryItem[]) ?? [],
-          topProfitSales: (topProfitRes.data as unknown as SaleWithItem[]) ?? [],
-          batchSummary,
-          fulfillmentSummary,
-          weekSummary,
-          monthSummary,
-        })
+        const result = await promise
         if (!isLatest()) return
+        setData(result)
         hasLoadedRef.current = true
       } catch (loadError) {
-        if (!isLatest()) return
+        if (!isLatest() || isAbortError(loadError)) return
         setError(loadError instanceof Error ? loadError.message : 'Unable to load dashboard.')
       } finally {
         if (isLatest()) {
@@ -267,14 +336,21 @@ export default function Dashboard() {
           setRefreshing(false)
         }
       }
-  }, [lowStockThreshold])
+    },
+    [lowStockThreshold]
+  )
 
   useEffect(() => {
-    void load()
+    void load(false)
+    return () => {
+      loadSeqRef.current += 1
+      releaseRef.current?.()
+      releaseRef.current = null
+    }
   }, [load])
 
   useDataInvalidation(['inventory_items', 'sales', 'bookings', 'expenses'], () => {
-    void load()
+    void load(true)
   })
 
   if (loading) return <p className="text-gray-500">Loading dashboard...</p>

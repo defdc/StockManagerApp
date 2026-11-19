@@ -20,7 +20,13 @@ import {
   resolveIndividualItemModal,
   shouldFetchBatchCountForItem,
 } from '../lib/inventoryModal'
+import { isAbortError } from '../lib/supabasePagination'
 import { resolveItemTransactionDetails } from '../lib/itemTransactionSync'
+import {
+  autocorrectCategory,
+  autocorrectItemName,
+  deduplicateCategories,
+} from '../lib/autocorrect'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -141,6 +147,10 @@ export default function Inventory() {
   const [bulkBookingSaving, setBulkBookingSaving] = useState(false)
   const [bulkDeleteSaving, setBulkDeleteSaving] = useState(false)
   const [bulkBookingError, setBulkBookingError] = useState<string | null>(null)
+  const [showBulkCategoryModal, setShowBulkCategoryModal] = useState(false)
+  const [bulkTargetCategory, setBulkTargetCategory] = useState('')
+  const [bulkCategorySaving, setBulkCategorySaving] = useState(false)
+  const [bulkCategoryError, setBulkCategoryError] = useState<string | null>(null)
 
   // Detail drawer
   const [drawerItem, setDrawerItem] = useState<InventoryItem | null>(null)
@@ -152,6 +162,8 @@ export default function Inventory() {
   const [refreshing, setRefreshing] = useState(false)
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
+  const inFlightKeyRef = useRef<string | null>(null)
+  const activeControllerRef = useRef<AbortController | null>(null)
 
   const drawerResolvedDetails = useMemo(() => {
     if (!drawerItem) return { salePrice: null, buyerName: null, hasSaleOrConvertedBooking: false }
@@ -160,9 +172,22 @@ export default function Inventory() {
 
   // ── Data loading ─────────────────────────────────────────────────────────
 
-  const loadItems = useCallback(async () => {
+  const loadItems = useCallback(async (force = false, externalSignal?: AbortSignal) => {
+    const requestKey = `${page}|${statusFilter}|${debouncedSearch.trim()}`
+    if (!force && inFlightKeyRef.current === requestKey && !activeControllerRef.current?.signal.aborted) {
+      return
+    }
+    inFlightKeyRef.current = requestKey
+
+    if (!externalSignal) {
+      activeControllerRef.current?.abort()
+    }
+    const controller = externalSignal ? null : new AbortController()
+    const signal = externalSignal ?? controller!.signal
+    if (controller) activeControllerRef.current = controller
+
     const seq = ++loadSeqRef.current
-    const isLatest = () => seq === loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current && !signal.aborted
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
@@ -197,8 +222,12 @@ export default function Inventory() {
         // ordering by id, page boundaries are non-deterministic (duplicate / missing UUIDs).
         .order('id', { ascending: false })
         .range(from, to)
+        .abortSignal(signal)
 
-      if (fetchError) throw new Error(fetchError.message)
+      if (fetchError) {
+        if (isAbortError(fetchError)) return
+        throw new Error(fetchError.message)
+      }
       if (!isLatest()) return
 
       // Defensive de-duplication by UUID so every row (and React key) is unique.
@@ -225,9 +254,12 @@ export default function Inventory() {
       // Preserve detail drawer item without closing it
       setDrawerItem((current) => (current ? uniqueById.get(current.id) ?? current : null))
     } catch (err) {
-      if (!isLatest()) return
+      if (!isLatest() || isAbortError(err)) return
       setError(err instanceof Error ? err.message : 'Failed to load inventory items.')
     } finally {
+      if (inFlightKeyRef.current === requestKey) {
+        inFlightKeyRef.current = null
+      }
       if (isLatest()) {
         setLoading(false)
         setRefreshing(false)
@@ -236,13 +268,19 @@ export default function Inventory() {
   }, [page, statusFilter, debouncedSearch])
 
   useEffect(() => {
-    void loadItems()
+    const controller = new AbortController()
+    activeControllerRef.current = controller
+    void loadItems(false, controller.signal)
+    return () => {
+      controller.abort()
+      inFlightKeyRef.current = null
+    }
   }, [loadItems])
 
   useDataInvalidation(
     ['inventory_items', 'sales', 'bookings'],
     () => {
-      void loadItems()
+      void loadItems(true)
     },
     { remoteOnly: true }
   )
@@ -348,6 +386,35 @@ export default function Inventory() {
     [selectedItemIds, mergedItemsById]
   )
 
+  const knownCategories = useMemo(() => {
+    const raw: string[] = []
+    for (const item of mergedItemsById.values()) {
+      if (item.category?.trim()) raw.push(item.category)
+    }
+    return deduplicateCategories(raw)
+  }, [mergedItemsById])
+
+  const knownItemNames = useMemo(() => {
+    const raw: string[] = []
+    for (const item of mergedItemsById.values()) {
+      if (item.item_name?.trim()) raw.push(item.item_name)
+    }
+    return raw
+  }, [mergedItemsById])
+
+  const knownItemRecords = useMemo<ItemSuggestionRecord[]>(() => {
+    const records: ItemSuggestionRecord[] = []
+    for (const item of mergedItemsById.values()) {
+      if (!item.item_name?.trim()) continue
+      records.push({
+        item_name: item.item_name,
+        category: item.category,
+        notes: item.notes,
+      })
+    }
+    return records
+  }, [mergedItemsById])
+
   const filteredIds = useMemo(() => filtered.map((item) => item.id), [filtered])
 
   const allFilteredSelected =
@@ -416,6 +483,13 @@ export default function Inventory() {
     setBulkBookingForm(emptyBulkBookingForm)
     setBulkBookingError(null)
     setShowBulkBookingModal(true)
+  }
+
+  function openBulkMoveCategoryModal() {
+    if (selectedItemIds.length === 0) return
+    setBulkTargetCategory('')
+    setBulkCategoryError(null)
+    setShowBulkCategoryModal(true)
   }
 
   function openAddModal() {
@@ -496,12 +570,23 @@ export default function Inventory() {
     setSaving(true)
     setFormError(null)
 
+    const sessionCategoryPool = [
+      ...knownCategories,
+      ...validItems.map((i) => i.category).filter(Boolean),
+    ]
+    const sessionItemNamePool = [
+      ...knownItemNames,
+      ...validItems.map((i) => i.item_name).filter(Boolean),
+    ]
+
     const itemsPayload = validItems.flatMap((item) => {
       const rawQty = typeof item.quantity === 'number' ? item.quantity : parseInt(String(item.quantity || '1'), 10)
       const qty = !rawQty || isNaN(rawQty) || rawQty < 1 ? 1 : Math.floor(rawQty)
+      const normalizedItemName = autocorrectItemName(item.item_name, sessionItemNamePool)
+      const normalizedCategory = autocorrectCategory(item.category, sessionCategoryPool)
       const itemObj = {
-        item_name: item.item_name.trim(),
-        category: item.category.trim() || null,
+        item_name: normalizedItemName,
+        category: normalizedCategory || null,
         batch_name: batchName || null,
         batch_modal_total: batchName ? modalTotal : null,
         modal_price: 0,
@@ -554,13 +639,15 @@ export default function Inventory() {
 
     const batchName = form.batch_name.trim()
     const modalTotal = form.batch_modal_total.trim() ? Number(form.batch_modal_total) : null
+    const normalizedItemName = autocorrectItemName(form.item_name, knownItemNames)
+    const normalizedCategory = autocorrectCategory(form.category, knownCategories)
 
     setSaving(true)
     setFormError(null)
 
     const payload: Record<string, unknown> = {
-      item_name: form.item_name.trim(),
-      category: form.category.trim() || null,
+      item_name: normalizedItemName,
+      category: normalizedCategory || null,
       batch_name: batchName || null,
       batch_modal_total: batchName ? modalTotal : null,
       notes: form.notes.trim() || null,
@@ -597,17 +684,17 @@ export default function Inventory() {
     if (editingId) {
       void logActivity({
         action: 'Edit Item',
-        description: `Edited item: ${form.item_name.trim()} in batch ${batchName || 'Unassigned'}`,
+        description: `Edited item: ${normalizedItemName} in batch ${batchName || 'Unassigned'}`,
         entityId: editingId,
         userId: user?.id,
-        details: { item_name: form.item_name.trim(), batch_name: batchName || 'Unassigned' },
+        details: { item_name: normalizedItemName, category: normalizedCategory, batch_name: batchName || 'Unassigned' },
       })
     } else {
       void logActivity({
         action: 'Add Item',
-        description: `Added item: ${form.item_name.trim()} to batch ${batchName || 'Unassigned'}`,
+        description: `Added item: ${normalizedItemName} to batch ${batchName || 'Unassigned'}`,
         userId: user?.id,
-        details: { item_name: form.item_name.trim(), batch_name: batchName || 'Unassigned' },
+        details: { item_name: normalizedItemName, category: normalizedCategory, batch_name: batchName || 'Unassigned' },
       })
     }
 
@@ -801,6 +888,62 @@ export default function Inventory() {
     }
   }
 
+  async function handleBulkMoveCategorySubmit(e: FormEvent) {
+    e.preventDefault()
+    if (selectedItemIds.length === 0) {
+      setBulkCategoryError('Please select at least one item.')
+      return
+    }
+
+    const targetCategory = autocorrectCategory(bulkTargetCategory, knownCategories)
+    if (!targetCategory) {
+      setBulkCategoryError('Target category is required.')
+      return
+    }
+
+    const targetIds = [...selectedItemIds]
+    const count = targetIds.length
+    setBulkCategorySaving(true)
+    setBulkCategoryError(null)
+
+    const { error: moveError } = await runChunked(targetIds, (idChunk) =>
+      supabase
+        .from('inventory_items')
+        .update({ category: targetCategory })
+        .in('id', idChunk)
+    )
+
+    setBulkCategorySaving(false)
+    if (moveError) {
+      setBulkCategoryError(moveError.message)
+      showToast(moveError.message, 'error')
+      return
+    }
+
+    setKnownItemsById((prev) => {
+      const next = new Map(prev)
+      for (const id of targetIds) {
+        const existing = next.get(id)
+        if (existing) {
+          next.set(id, { ...existing, category: targetCategory })
+        }
+      }
+      return next
+    })
+
+    void logActivity({
+      action: 'Bulk Move Category',
+      description: `Moved ${count} item${count === 1 ? '' : 's'} to category "${targetCategory}"`,
+      userId: user?.id,
+      details: { count, category: targetCategory, item_ids: targetIds },
+    })
+
+    setShowBulkCategoryModal(false)
+    setSelectedItemIds([])
+    showToast(`Moved ${count} item${count === 1 ? '' : 's'} to "${targetCategory}".`)
+    loadItems()
+  }
+
   function handleDelete(item: InventoryItem) {
     setDeletingItem(item)
   }
@@ -941,13 +1084,19 @@ export default function Inventory() {
         {selectedItemIds.length > 0 && (
           <>
             <span className="text-gray-500">{selectedItemIds.length} selected</span>
-                        {canWrite && (
+            {canWrite && (
               <>
                 <button
                   onClick={openBulkBookingModal}
                   className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700"
                 >
                   Book Selected
+                </button>
+                <button
+                  onClick={openBulkMoveCategoryModal}
+                  className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                >
+                  Move Category
                 </button>
                 <button
                   onClick={handleBulkDelete}
@@ -1246,6 +1395,7 @@ export default function Inventory() {
                       notes: !prev.notes.trim() && rec.notes ? rec.notes : prev.notes,
                     }))
                   }}
+                  extraRecords={knownItemRecords}
                   placeholder="e.g. Hot Wheels 71 Datsun Bluebird U"
                 />
 
@@ -1253,6 +1403,7 @@ export default function Inventory() {
                   required
                   value={form.category}
                   onChange={(cat) => setForm({ ...form, category: cat })}
+                  extraSuggestions={knownCategories}
                 />
 
                 <BatchAutocomplete
@@ -1315,15 +1466,24 @@ export default function Inventory() {
 
                   <div className="space-y-2">
                     {(() => {
-                      const sessionItemNames = multiItems.map((i) => i.item_name).filter(Boolean)
-                      const sessionCategories = multiItems.map((i) => i.category).filter(Boolean)
-                      const sessionRecords: ItemSuggestionRecord[] = multiItems
-                        .filter((i) => Boolean(i.item_name.trim()))
-                        .map((i) => ({
-                          item_name: i.item_name.trim(),
-                          category: i.category.trim() || undefined,
-                          notes: i.notes.trim() || undefined,
-                        }))
+                      const sessionItemNames = [
+                        ...knownItemNames,
+                        ...multiItems.map((i) => i.item_name).filter(Boolean),
+                      ]
+                      const sessionCategories = [
+                        ...knownCategories,
+                        ...multiItems.map((i) => i.category).filter(Boolean),
+                      ]
+                      const sessionRecords: ItemSuggestionRecord[] = [
+                        ...knownItemRecords,
+                        ...multiItems
+                          .filter((i) => Boolean(i.item_name.trim()))
+                          .map((i) => ({
+                            item_name: i.item_name.trim(),
+                            category: i.category.trim() || undefined,
+                            notes: i.notes.trim() || undefined,
+                          })),
+                      ]
 
                       return multiItems.map((itemRow, index) => (
                         <div
@@ -1510,6 +1670,70 @@ export default function Inventory() {
                 className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {bulkBookingSaving ? 'Booking...' : 'Create bookings'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* Bulk Move Category Modal */}
+      {showBulkCategoryModal && (
+        <Modal
+          title={`Move ${selectedItemIds.length} selected item${selectedItemIds.length === 1 ? '' : 's'} to category`}
+          onClose={() => setShowBulkCategoryModal(false)}
+        >
+          <form onSubmit={handleBulkMoveCategorySubmit} className="space-y-4">
+            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+              Updating category for <span className="font-medium text-gray-900">{selectedItemIds.length}</span> selected item{selectedItemIds.length === 1 ? '' : 's'}.
+            </div>
+
+            <CategoryAutocomplete
+              required
+              label="Target category"
+              placeholder="Select existing or enter target category..."
+              value={bulkTargetCategory}
+              onChange={setBulkTargetCategory}
+              extraSuggestions={knownCategories}
+            />
+
+            {knownCategories.length > 0 && (
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-gray-500">Quick pick from loaded categories:</p>
+                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                  {knownCategories.map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setBulkTargetCategory(cat)}
+                      className={`rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                        bulkTargetCategory.trim().toLowerCase() === cat.toLowerCase()
+                          ? 'border-pink-600 bg-pink-50 text-pink-700'
+                          : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {bulkCategoryError && <p className="text-sm text-red-600">{bulkCategoryError}</p>}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkCategoryModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={bulkCategorySaving || !bulkTargetCategory.trim()}
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+              >
+                {bulkCategorySaving ? 'Moving...' : 'Move Category'}
               </button>
             </div>
           </form>

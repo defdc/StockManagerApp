@@ -15,7 +15,7 @@ import {
   resolveIndividualItemModal,
   shouldFetchBatchCountForItem,
 } from '../lib/inventoryModal'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { fetchAllRows, isAbortError } from '../lib/supabasePagination'
 import type { FulfillmentStatus, Sale } from '../types/database'
 import ItemCombobox from '../components/ItemCombobox'
 import Modal from '../components/Modal'
@@ -174,16 +174,24 @@ export default function Sales() {
   const hasLoadedRef = useRef(false)
   const loadSeqRef = useRef(0)
   const inFlightKeyRef = useRef<string | null>(null)
+  const activeControllerRef = useRef<AbortController | null>(null)
 
-  const loadSales = useCallback(async (force = false) => {
+  const loadSales = useCallback(async (force = false, externalSignal?: AbortSignal) => {
     const requestKey = `${page}|${fulfillmentFilter}|${debouncedSearch.trim()}|${startDate}|${endDate}`
-    if (!force && inFlightKeyRef.current === requestKey) {
+    if (!force && inFlightKeyRef.current === requestKey && !activeControllerRef.current?.signal.aborted) {
       return
     }
     inFlightKeyRef.current = requestKey
 
+    if (!externalSignal) {
+      activeControllerRef.current?.abort()
+    }
+    const controller = externalSignal ? null : new AbortController()
+    const signal = externalSignal ?? controller!.signal
+    if (controller) activeControllerRef.current = controller
+
     const seq = ++loadSeqRef.current
-    const isLatest = () => seq === loadSeqRef.current
+    const isLatest = () => seq === loadSeqRef.current && !signal.aborted
     if (hasLoadedRef.current) setRefreshing(true)
     else setLoading(true)
     setError(null)
@@ -202,6 +210,8 @@ export default function Sales() {
             .select('id')
             .or(`item_name.ilike.%${safeWord}%,batch_name.ilike.%${safeWord}%`)
             .limit(200)
+            .abortSignal(signal)
+          if (!isLatest()) return
           const matchedItemIds = (matchedItems ?? []).map((i) => i.id).filter(Boolean)
           searchFilters.push({ safeWord, matchedItemIds })
         }
@@ -240,17 +250,20 @@ export default function Sales() {
 
       if (searchFilters.length <= 1) {
         const singleFilter = searchFilters[0]
-        const { data: rpcRows, error: rpcError } = await supabase.rpc('get_sales_date_counts', {
-          p_fulfillment_status: fulfillmentFilter !== 'all' ? fulfillmentFilter : null,
-          p_start_date: startDate || null,
-          p_end_date: endDate || null,
-          p_search: singleFilter ? singleFilter.safeWord : null,
-          p_matching_item_ids:
-            singleFilter && singleFilter.matchedItemIds.length > 0
-              ? singleFilter.matchedItemIds
-              : null,
-        })
+        const { data: rpcRows, error: rpcError } = await supabase
+          .rpc('get_sales_date_counts', {
+            p_fulfillment_status: fulfillmentFilter !== 'all' ? fulfillmentFilter : null,
+            p_start_date: startDate || null,
+            p_end_date: endDate || null,
+            p_search: singleFilter ? singleFilter.safeWord : null,
+            p_matching_item_ids:
+              singleFilter && singleFilter.matchedItemIds.length > 0
+                ? singleFilter.matchedItemIds
+                : null,
+          })
+          .abortSignal(signal)
 
+        if (!isLatest()) return
         if (!rpcError && Array.isArray(rpcRows)) {
           usedRpc = true
           dailyAggregations = (
@@ -268,12 +281,15 @@ export default function Sales() {
 
       if (!usedRpc) {
         const dateRows = await fetchAllRows<{ sale_date: string }>(
-          (from, to) =>
-            buildFilteredSalesQuery('sale_date')
+          (from, to, sig) => {
+            const q = buildFilteredSalesQuery('sale_date')
               .order('sale_date', { ascending: false })
               .order('id', { ascending: false })
-              .range(from, to),
-          DATE_AGGREGATION_FETCH_SIZE
+              .range(from, to)
+            return sig ? q.abortSignal(sig) : q
+          },
+          DATE_AGGREGATION_FETCH_SIZE,
+          { signal }
         )
 
         const countsByDate = new Map<string, number>()
@@ -319,8 +335,12 @@ export default function Sales() {
         .in('sale_date', activeDates)
         .order('sale_date', { ascending: false })
         .order('id', { ascending: false })
+        .abortSignal(signal)
 
-      if (fetchError) throw new Error(fetchError.message)
+      if (fetchError) {
+        if (isAbortError(fetchError)) return
+        throw new Error(fetchError.message)
+      }
       if (!isLatest()) return
 
       let nextSales = ((data as unknown as SaleRow[]) ?? []).slice()
@@ -338,6 +358,7 @@ export default function Sales() {
               .in('booking_group_id', chunk)
               .order('sale_date', { ascending: false })
               .order('id', { ascending: false })
+              .abortSignal(signal)
           )
         )
         const siblingData = siblingResults.flatMap((r) => r.data ?? [])
@@ -391,7 +412,7 @@ export default function Sales() {
         return next
       })
     } catch (err) {
-      if (!isLatest()) return
+      if (!isLatest() || isAbortError(err)) return
       setError(err instanceof Error ? err.message : 'Failed to load sales.')
     } finally {
       if (inFlightKeyRef.current === requestKey) {
@@ -405,7 +426,13 @@ export default function Sales() {
   }, [page, fulfillmentFilter, debouncedSearch, startDate, endDate])
 
   useEffect(() => {
-    void loadSales(false)
+    const controller = new AbortController()
+    activeControllerRef.current = controller
+    void loadSales(false, controller.signal)
+    return () => {
+      controller.abort()
+      inFlightKeyRef.current = null
+    }
   }, [loadSales])
 
   useDataInvalidation(

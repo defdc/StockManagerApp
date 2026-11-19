@@ -10,43 +10,90 @@ import {
   type PeriodSummary,
   type SaleSummaryInput,
 } from '../lib/salesSummary'
-import { fetchAllRows } from '../lib/supabasePagination'
+import { fetchAllRows, isAbortError } from '../lib/supabasePagination'
+import { createSummaryLoader } from '../lib/summaryCache'
 import { FULFILLMENT_BADGE_CLASSES, FULFILLMENT_LABELS } from '../lib/constants'
 
+interface ReportsPayload {
+  sales: SaleSummaryInput[]
+  expenses: ExpenseSummaryInput[]
+}
+
+const reportsLoader = createSummaryLoader<ReportsPayload>(
+  ['sales', 'expenses', 'inventory_items'],
+  async (signal) => {
+    const [salesData, expensesData] = await Promise.all([
+      fetchAllRows<SaleSummaryInput>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('sales')
+            .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status, inventory_items(item_name)')
+            .order('sale_date', { ascending: false })
+            .range(from, to)
+          return (sig ? q.abortSignal(sig) : q) as unknown as PromiseLike<{
+            data: SaleSummaryInput[] | null
+            error: { message: string } | null
+          }>
+        },
+        { signal }
+      ),
+      fetchAllRows<ExpenseSummaryInput>(
+        (from, to, sig) => {
+          const q = supabase
+            .from('expenses')
+            .select('id, amount, expense_date')
+            .order('expense_date', { ascending: false })
+            .range(from, to)
+          return sig ? q.abortSignal(sig) : q
+        },
+        { signal }
+      ),
+    ])
+    return { sales: salesData, expenses: expensesData }
+  }
+)
+
 export default function Reports() {
+  const initialCached = reportsLoader.getCached('all')
   const [periodType, setPeriodType] = useState<'week' | 'month'>('week')
   const [offset, setOffset] = useState<number>(0)
-  const [sales, setSales] = useState<SaleSummaryInput[]>([])
-  const [expenses, setExpenses] = useState<ExpenseSummaryInput[]>([])
-  const [loading, setLoading] = useState(true)
+  const [sales, setSales] = useState<SaleSummaryInput[]>(initialCached?.sales ?? [])
+  const [expenses, setExpenses] = useState<ExpenseSummaryInput[]>(initialCached?.expenses ?? [])
+  const [loading, setLoading] = useState(!initialCached)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    async function loadData() {
-      setLoading(true)
-      setError(null)
-      try {
-        const [salesData, expensesData] = await Promise.all([
-          fetchAllRows<SaleSummaryInput>((from, to) =>
-            supabase
-              .from('sales')
-              .select('id, buyer_name, sale_price, gross_profit, net_profit, sale_date, fulfillment_status, inventory_items(item_name)')
-              .order('sale_date', { ascending: false })
-              .range(from, to) as unknown as PromiseLike<{ data: SaleSummaryInput[] | null; error: { message: string } | null }>
-          ),
-          fetchAllRows<ExpenseSummaryInput>((from, to) =>
-            supabase.from('expenses').select('id, amount, expense_date').order('expense_date', { ascending: false }).range(from, to)
-          ),
-        ])
-        setSales(salesData)
-        setExpenses(expensesData)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load sales reports data.')
-      } finally {
-        setLoading(false)
-      }
+    const cached = reportsLoader.getCached('all')
+    if (cached) {
+      setSales(cached.sales)
+      setExpenses(cached.expenses)
+      setLoading(false)
+      return
     }
-    loadData()
+
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    const { promise, release } = reportsLoader.load('all')
+
+    promise
+      .then((payload) => {
+        if (cancelled) return
+        setSales(payload.sales)
+        setExpenses(payload.expenses)
+      })
+      .catch((err) => {
+        if (cancelled || isAbortError(err)) return
+        setError(err instanceof Error ? err.message : 'Failed to load sales reports data.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+      release()
+    }
   }, [])
 
   const bounds = useMemo(() => {

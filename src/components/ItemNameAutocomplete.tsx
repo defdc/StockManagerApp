@@ -1,5 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import {
+  autocorrectCategory,
+  autocorrectItemName,
+  expandSearchWords,
+  toCompactKey,
+} from '../lib/autocorrect'
 
 export interface ItemSuggestionRecord {
   item_name: string
@@ -88,7 +94,7 @@ export default function ItemNameAutocomplete({
           .select('item_name, category, notes')
           .not('item_name', 'is', null)
 
-        const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+        const searchWords = expandSearchWords(trimmed)
         searchWords.forEach((word) => {
           query = query.ilike('item_name', `%${word}%`)
         })
@@ -99,17 +105,33 @@ export default function ItemNameAutocomplete({
 
         if (cancelled) return
 
+        const allFetchedNames = (data ?? [])
+          .map((row) => ((row.item_name as string) || '').trim())
+          .filter(Boolean)
+        const allFetchedCategories = (data ?? [])
+          .map((row) => ((row.category as string) || '').trim())
+          .filter(Boolean)
+
         const seen = new Map<string, ItemSuggestionRecord>()
         for (const row of data ?? []) {
           const raw = ((row.item_name as string) || '').trim()
           if (!raw) continue
-          const key = raw.toLowerCase()
-          if (!seen.has(key)) {
+          const canonicalName = autocorrectItemName(raw, allFetchedNames)
+          const key = toCompactKey(canonicalName)
+          const canonicalCat = row.category
+            ? autocorrectCategory(String(row.category), allFetchedCategories)
+            : null
+          const existing = seen.get(key)
+          if (!existing) {
             seen.set(key, {
-              item_name: raw,
-              category: row.category ? String(row.category).trim() : null,
+              item_name: canonicalName,
+              category: canonicalCat,
               notes: row.notes ? String(row.notes).trim() : null,
             })
+          } else {
+            // Fill in missing category/notes if a later row has them
+            if (!existing.category && canonicalCat) existing.category = canonicalCat
+            if (!existing.notes && row.notes) existing.notes = String(row.notes).trim()
           }
         }
 
@@ -128,60 +150,80 @@ export default function ItemNameAutocomplete({
   }, [existingRecords, open, value])
 
   const combinedRecords = useMemo(() => {
+    const sourceRecords = existingRecords ?? records
+    const allNames: string[] = [
+      ...extraRecords.map((r) => r.item_name),
+      ...extraSuggestions,
+      ...sourceRecords.map((r) => r.item_name),
+    ].filter((n): n is string => Boolean(n && n.trim()))
+
+    const allCategories: string[] = [
+      ...extraRecords.map((r) => r.category),
+      ...sourceRecords.map((r) => r.category),
+    ].filter((c): c is string => Boolean(c && c.trim()))
+
     const seen = new Map<string, ItemSuggestionRecord>()
 
-    // 1. Extra records from session
-    for (const rec of extraRecords) {
+    function addRecord(rec: ItemSuggestionRecord) {
       const raw = (rec.item_name || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) {
+      if (!raw) return
+      const canonicalName = autocorrectItemName(raw, allNames)
+      const key = toCompactKey(canonicalName)
+      const canonicalCat = rec.category
+        ? autocorrectCategory(rec.category, allCategories)
+        : null
+      const notes = rec.notes ? rec.notes.trim() : null
+      const existing = seen.get(key)
+      if (!existing) {
         seen.set(key, {
-          item_name: raw,
-          category: rec.category ? rec.category.trim() : null,
-          notes: rec.notes ? rec.notes.trim() : null,
+          item_name: canonicalName,
+          category: canonicalCat,
+          notes,
         })
+      } else {
+        if (!existing.category && canonicalCat) existing.category = canonicalCat
+        if (!existing.notes && notes) existing.notes = notes
       }
     }
 
+    // 1. Extra records from session
+    for (const rec of extraRecords) addRecord(rec)
     // 2. Extra string suggestions
-    for (const item of extraSuggestions) {
-      const raw = (item || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) {
-        seen.set(key, { item_name: raw })
-      }
-    }
-
+    for (const item of extraSuggestions) addRecord({ item_name: item })
     // 3. Database / provided existing records
-    const sourceRecords = existingRecords ?? records
-    for (const rec of sourceRecords) {
-      const raw = (rec.item_name || '').trim()
-      if (!raw) continue
-      const key = raw.toLowerCase()
-      if (!seen.has(key)) {
-        seen.set(key, rec)
-      }
-    }
+    for (const rec of sourceRecords) addRecord(rec)
 
     return [...seen.values()].sort((a, b) => a.item_name.localeCompare(b.item_name))
   }, [existingRecords, records, extraSuggestions, extraRecords])
+
+  const knownItemNames = useMemo(
+    () => combinedRecords.map((r) => r.item_name),
+    [combinedRecords]
+  )
 
   const filteredRecords = useMemo(() => {
     const trimmed = value.trim()
     if (!trimmed) return combinedRecords.slice(0, 50)
 
-    const searchWords = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+    const searchWords = expandSearchWords(trimmed)
+    const compactQuery = toCompactKey(trimmed)
     return combinedRecords
       .filter((r) => {
         const normalizedItemName = r.item_name.toLowerCase()
-        return searchWords.every((word) => normalizedItemName.includes(word))
+        const compactItemName = toCompactKey(r.item_name)
+        return (
+          searchWords.every((word) => normalizedItemName.includes(word)) ||
+          (compactQuery.length > 0 && compactItemName.includes(compactQuery))
+        )
       })
       .slice(0, 50)
   }, [combinedRecords, value])
 
-  const isExisting = combinedRecords.some((r) => r.item_name.toLowerCase() === value.trim().toLowerCase())
+  const isExisting = combinedRecords.some((r) => toCompactKey(r.item_name) === toCompactKey(value))
+  const previewAutocorrected = useMemo(
+    () => (value.trim() ? autocorrectItemName(value, knownItemNames) : ''),
+    [value, knownItemNames]
+  )
 
   return (
     <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>
@@ -204,6 +246,19 @@ export default function ItemNameAutocomplete({
           setOpen(true)
           updatePosition()
         }}
+        onBlur={() => {
+          if (!value.trim()) return
+          const corrected = autocorrectItemName(value, knownItemNames)
+          if (corrected && corrected !== value) {
+            onChange(corrected)
+          }
+          const matchedRecord = combinedRecords.find(
+            (r) => toCompactKey(r.item_name) === toCompactKey(corrected)
+          )
+          if (matchedRecord) {
+            onSelectRecord?.(matchedRecord)
+          }
+        }}
         onChange={(event) => {
           onChange(event.target.value)
           setOpen(true)
@@ -225,7 +280,7 @@ export default function ItemNameAutocomplete({
           ) : filteredRecords.length === 0 ? (
             value.trim() ? (
               <p className="px-3 py-3 text-sm text-gray-500">
-                Type new item name <strong>{value.trim()}</strong>
+                Type new item name <strong>{previewAutocorrected}</strong>
               </p>
             ) : (
               <p className="px-3 py-3 text-sm text-gray-500">Type to search existing item names</p>
@@ -237,7 +292,10 @@ export default function ItemNameAutocomplete({
                   key={rec.item_name}
                   type="button"
                   role="option"
-                  aria-selected={rec.item_name.toLowerCase() === value.trim().toLowerCase()}
+                  aria-selected={toCompactKey(rec.item_name) === toCompactKey(value)}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                  }}
                   onClick={() => {
                     onChange(rec.item_name)
                     onSelectRecord?.(rec)
@@ -256,20 +314,25 @@ export default function ItemNameAutocomplete({
               {value.trim() && !isExisting && (
                 <button
                   type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                  }}
                   onClick={() => {
-                    const trimmed = value.trim()
-                    onChange(trimmed)
-                    const existingRec = combinedRecords.find((r) => r.item_name.toLowerCase() === trimmed.toLowerCase())
+                    const corrected = previewAutocorrected
+                    onChange(corrected)
+                    const existingRec = combinedRecords.find(
+                      (r) => toCompactKey(r.item_name) === toCompactKey(corrected)
+                    )
                     if (existingRec) {
                       onSelectRecord?.(existingRec)
                     } else {
-                      onSelectRecord?.({ item_name: trimmed })
+                      onSelectRecord?.({ item_name: corrected })
                     }
                     setOpen(false)
                   }}
                   className="block w-full border-t border-gray-200 px-3 py-2 text-left text-sm text-blue-600 hover:bg-blue-50"
                 >
-                  + Use &ldquo;{value.trim()}&rdquo;
+                  + Use &ldquo;{previewAutocorrected}&rdquo;
                 </button>
               )}
             </>
