@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabase'
-import { useDataInvalidation } from '../lib/dataSync'
+import { invalidateData, useDataInvalidation } from '../lib/dataSync'
 import { useAuth } from '../lib/auth'
 import { useToast } from '../lib/toast'
 import { formatIDR, formatDate, formatStatus, todayISO, splitAmount } from '../lib/format'
@@ -157,6 +157,9 @@ export default function Bookings() {
   const [bulkEditForm, setBulkEditForm] = useState(emptyBulkEditForm)
   const [bulkEditSaving, setBulkEditSaving] = useState(false)
   const [bulkEditError, setBulkEditError] = useState<string | null>(null)
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false)
+  const [bulkDeleteSaving, setBulkDeleteSaving] = useState(false)
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null)
 
   // Collapse state for status sections — persisted in localStorage
   const [collapsedStatuses, setCollapsedStatuses] = useState<Set<string>>(loadCollapsedStatuses)
@@ -562,6 +565,22 @@ export default function Bookings() {
     setBulkPurchase(false)
     setBulkFulfillmentStatus('parking')
     setShowBulkSaleModal(true)
+  }
+
+  function openBulkDeleteModal() {
+    if (bulkDeleteSaving || selectedBookingIds.length === 0) return
+
+    const hasConverted = selectedBookings.some((booking) => booking.status === 'converted_to_sale')
+    if (hasConverted) {
+      showToast(
+        'Cannot bulk delete: One or more selected bookings are already converted to sale. Please unselect them first.',
+        'error'
+      )
+      return
+    }
+
+    setBulkDeleteError(null)
+    setShowBulkDeleteModal(true)
   }
 
   function openAddModal() {
@@ -1067,9 +1086,168 @@ export default function Bookings() {
       userId: user?.id,
       details: { buyer_name: b.buyer_name, item_name: b.inventory_items?.item_name },
     })
+    setSelectedBookingIds((current) => current.filter((id) => id !== b.id))
     setDeletingBooking(null)
     showToast('Booking deleted successfully.')
     loadBookings()
+  }
+
+  async function handleBulkDeleteBookings() {
+    if (bulkDeleteSaving || selectedBookingIds.length === 0) return
+
+    // Resolve selected bookings from persistent selection cache + loaded bookings
+    const resolvedById = new Map<string, Pick<BookingRow, 'id' | 'inventory_item_id' | 'status'>>()
+    for (const id of selectedBookingIds) {
+      const cached = mergedBookingsById.get(id)
+      if (cached) {
+        resolvedById.set(id, cached)
+      }
+    }
+
+    setBulkDeleteSaving(true)
+    setBulkDeleteError(null)
+
+    const succeededBookingIds: string[] = []
+
+    try {
+      const missingIds = selectedBookingIds.filter((id) => !resolvedById.has(id))
+      if (missingIds.length > 0) {
+        const { results: missingResults, error: missingError } = await runChunked(missingIds, (chunk) =>
+          supabase
+            .from('bookings')
+            .select('id, inventory_item_id, status')
+            .in('id', chunk)
+        )
+        if (missingError) {
+          throw new Error(missingError.message)
+        }
+        for (const row of missingResults.flatMap((r) => r.data ?? [])) {
+          resolvedById.set(row.id, row as Pick<BookingRow, 'id' | 'inventory_item_id' | 'status'>)
+        }
+      }
+
+      const targetBookings = selectedBookingIds
+        .map((id) => resolvedById.get(id))
+        .filter((b): b is Pick<BookingRow, 'id' | 'inventory_item_id' | 'status'> => Boolean(b))
+
+      if (targetBookings.length === 0) {
+        setBulkDeleteSaving(false)
+        setShowBulkDeleteModal(false)
+        setSelectedBookingIds([])
+        return
+      }
+
+      if (targetBookings.some((b) => b.status === 'converted_to_sale')) {
+        const msg =
+          'Cannot bulk delete: One or more selected bookings are already converted to sale. Please unselect them first.'
+        setBulkDeleteSaving(false)
+        setShowBulkDeleteModal(false)
+        showToast(msg, 'error')
+        return
+      }
+
+      const targetIds = targetBookings.map((b) => b.id)
+      const deleteChunks = chunkArray(targetIds)
+      const { results: deleteResults, error: deleteError } = await runChunked(targetIds, (chunk) =>
+        supabase.from('bookings').delete().in('id', chunk)
+      )
+
+      deleteResults.forEach((res, idx) => {
+        if (!res.error) {
+          succeededBookingIds.push(...(deleteChunks[idx] ?? []))
+        }
+      })
+
+      // Collect non-null inventory_item_id values from deleted active bookings
+      const succeededSet = new Set(succeededBookingIds)
+      const activeItemIds = Array.from(
+        new Set(
+          targetBookings
+            .filter((b) => succeededSet.has(b.id) && b.status === 'active')
+            .map((b) => b.inventory_item_id)
+            .filter((id): id is string => Boolean(id))
+        )
+      )
+
+      // Revert linked inventory items back to 'ready' (matching single-delete logic; never reverts 'sold' items)
+      if (activeItemIds.length > 0) {
+        const now = new Date().toISOString()
+        const { error: itemError } = await runChunked(activeItemIds, (chunk) =>
+          supabase
+            .from('inventory_items')
+            .update({ status: 'ready', updated_at: now })
+            .in('id', chunk)
+            .eq('status', 'booked')
+        )
+        if (itemError) {
+          throw new Error(itemError.message)
+        }
+      }
+
+      if (deleteError) {
+        throw new Error(deleteError.message)
+      }
+
+      const deletedCount = succeededBookingIds.length
+
+      void logActivity({
+        action: 'Bulk Delete Bookings',
+        description: `Bulk deleted ${deletedCount} booking(s)`,
+        userId: user?.id,
+        details: {
+          count: deletedCount,
+          booking_ids: succeededBookingIds,
+          reverted_item_ids: activeItemIds,
+        },
+      })
+
+      selectedBookingIdsRef.current = []
+      setSelectedBookingIds([])
+      setKnownBookingsById((prev) => {
+        const next = new Map(prev)
+        for (const id of succeededSet) {
+          next.delete(id)
+        }
+        return next
+      })
+      setShowBulkDeleteModal(false)
+      setBulkDeleteSaving(false)
+
+      invalidateData(['bookings', 'inventory_items'])
+      showToast(`Successfully deleted ${deletedCount} booking(s)`)
+
+      const estimatedRemaining = Math.max(0, totalCount - deletedCount)
+      const maxPageAfterDelete = Math.max(1, Math.ceil(estimatedRemaining / PAGE_SIZE))
+      if (page > maxPageAfterDelete) {
+        setPage(maxPageAfterDelete)
+      } else {
+        void loadBookings(true)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete selected bookings.'
+      setBulkDeleteSaving(false)
+      setBulkDeleteError(message)
+      showToast(message, 'error')
+
+      if (succeededBookingIds.length > 0) {
+        const succeededSet = new Set(succeededBookingIds)
+        const remainingSelection = selectedBookingIds.filter((id) => !succeededSet.has(id))
+        selectedBookingIdsRef.current = remainingSelection
+        setSelectedBookingIds(remainingSelection)
+        setKnownBookingsById((prev) => {
+          const next = new Map(prev)
+          for (const id of succeededSet) {
+            next.delete(id)
+          }
+          return next
+        })
+        if (remainingSelection.length === 0) {
+          setShowBulkDeleteModal(false)
+        }
+        invalidateData(['bookings', 'inventory_items'])
+        void loadBookings(true)
+      }
+    }
   }
 
   function resolveBookingEffectiveDealPrice(b: BookingRow): number {
@@ -1766,16 +1944,28 @@ export default function Bookings() {
         {selectedBookingIds.length > 0 && (
           <div className="flex max-w-full items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
             {canWrite && (
-              <button
-                onClick={openBulkSaleModal}
-                className="shrink-0 rounded-md bg-green-700 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-green-800 sm:text-sm"
-              >
-                Convert Selected to Sale
-              </button>
+              <>
+                <button
+                  onClick={openBulkSaleModal}
+                  disabled={bulkDeleteSaving}
+                  className="shrink-0 rounded-md bg-green-700 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
+                >
+                  Convert Selected to Sale
+                </button>
+                <button
+                  type="button"
+                  onClick={openBulkDeleteModal}
+                  disabled={bulkDeleteSaving}
+                  className="shrink-0 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
+                >
+                  {bulkDeleteSaving ? 'Deleting...' : 'Delete Selected'}
+                </button>
+              </>
             )}
             <button
               onClick={() => setSelectedBookingIds([])}
-              className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium whitespace-nowrap text-gray-700 hover:bg-gray-50 sm:text-sm"
+              disabled={bulkDeleteSaving}
+              className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium whitespace-nowrap text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
             >
               Clear
             </button>
@@ -2643,6 +2833,64 @@ export default function Bookings() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {showBulkDeleteModal && (
+        <Modal
+          title="Delete selected bookings?"
+          onClose={() => {
+            if (!bulkDeleteSaving) {
+              setShowBulkDeleteModal(false)
+              setBulkDeleteError(null)
+            }
+          }}
+        >
+          <div className="space-y-3">
+            <p className="text-sm text-gray-700">
+              Are you sure you want to delete{' '}
+              <strong>{selectedBookings.length || selectedBookingIds.length}</strong> selected
+              booking(s)? Their linked inventory items will be returned to Ready status. This action
+              cannot be undone.
+            </p>
+            {selectedBookings.length > 0 && (
+              <div className="max-h-40 overflow-y-auto rounded-md border border-gray-200 bg-gray-50 p-2.5 space-y-1.5 text-xs text-gray-700">
+                {selectedBookings.map((b) => (
+                  <div
+                    key={b.id}
+                    className="flex items-center justify-between gap-2 rounded border border-gray-100 bg-white p-1.5"
+                  >
+                    <span className="truncate font-medium text-gray-800">
+                      {b.inventory_items?.item_name ?? 'Unknown item'}
+                    </span>
+                    <span className="shrink-0 text-gray-500">{b.buyer_name || '-'}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {bulkDeleteError && <p className="text-sm text-red-600">{bulkDeleteError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={bulkDeleteSaving}
+                onClick={() => {
+                  setShowBulkDeleteModal(false)
+                  setBulkDeleteError(null)
+                }}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={bulkDeleteSaving}
+                onClick={() => void handleBulkDeleteBookings()}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {bulkDeleteSaving ? 'Deleting...' : 'Delete Selected'}
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
 

@@ -11,7 +11,7 @@ import { ITEM_STATUSES, STATUS_BADGE_CLASSES } from '../lib/constants'
 import type { Booking, InventoryItem, Sale } from '../types/database'
 import Modal from '../components/Modal'
 import BuyerAutocomplete from '../components/BuyerAutocomplete'
-import BatchAutocomplete from '../components/BatchAutocomplete'
+import BatchAutocomplete, { type BatchSuggestion } from '../components/BatchAutocomplete'
 import CategoryAutocomplete from '../components/CategoryAutocomplete'
 import ItemNameAutocomplete, { type ItemSuggestionRecord } from '../components/ItemNameAutocomplete'
 import FormattedPriceInput from '../components/FormattedPriceInput'
@@ -252,6 +252,11 @@ export default function Inventory() {
   const [bulkTargetCategory, setBulkTargetCategory] = useState('')
   const [bulkCategorySaving, setBulkCategorySaving] = useState(false)
   const [bulkCategoryError, setBulkCategoryError] = useState<string | null>(null)
+  const [showBulkBatchModal, setShowBulkBatchModal] = useState(false)
+  const [bulkTargetBatch, setBulkTargetBatch] = useState('')
+  const [bulkBatchMatch, setBulkBatchMatch] = useState<BatchSuggestion | null>(null)
+  const [bulkBatchSaving, setBulkBatchSaving] = useState(false)
+  const [bulkBatchError, setBulkBatchError] = useState<string | null>(null)
 
   // Detail drawer
   const [drawerItem, setDrawerItem] = useState<InventoryItem | null>(null)
@@ -616,6 +621,14 @@ export default function Inventory() {
     setBulkTargetCategory('')
     setBulkCategoryError(null)
     setShowBulkCategoryModal(true)
+  }
+
+  function openBulkMoveBatchModal() {
+    if (selectedItemIds.length === 0) return
+    setBulkTargetBatch('')
+    setBulkBatchMatch(null)
+    setBulkBatchError(null)
+    setShowBulkBatchModal(true)
   }
 
   function openAddModal() {
@@ -1083,6 +1096,91 @@ export default function Inventory() {
     loadItems()
   }
 
+  async function handleBulkMoveBatchSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (selectedItemIds.length === 0) {
+      setBulkBatchError('Please select at least one item.')
+      return
+    }
+    if (!bulkBatchMatch) {
+      setBulkBatchError('Please choose an existing batch.')
+      return
+    }
+
+    const targetBatchName = bulkBatchMatch.name.trim()
+    const targetIds = [...selectedItemIds]
+    const count = targetIds.length
+    setBulkBatchSaving(true)
+    setBulkBatchError(null)
+
+    let targetBatchModalTotal: number | null = bulkBatchMatch.modalTotal ?? null
+    if (targetBatchModalTotal === null) {
+      const { data: modalRows, error: lookupError } = await supabase
+        .from('inventory_items')
+        .select('batch_modal_total')
+        .eq('batch_name', targetBatchName)
+        .not('batch_modal_total', 'is', null)
+        .limit(1)
+      if (lookupError) {
+        setBulkBatchSaving(false)
+        setBulkBatchError(lookupError.message)
+        showToast(lookupError.message, 'error')
+        return
+      }
+      targetBatchModalTotal = (modalRows?.[0]?.batch_modal_total as number | null | undefined) ?? null
+    }
+
+    const { error: moveError } = await runChunked(targetIds, async (idChunk) =>
+      supabase
+        .from('inventory_items')
+        .update({
+          batch_name: targetBatchName,
+          batch_modal_total: targetBatchModalTotal,
+          updated_at: new Date().toISOString(),
+        })
+        .in('id', idChunk)
+    )
+
+    setBulkBatchSaving(false)
+    if (moveError) {
+      setBulkBatchError(moveError.message)
+      showToast(moveError.message, 'error')
+      return
+    }
+
+    setKnownItemsById((prev) => {
+      const next = new Map(prev)
+      for (const id of targetIds) {
+        const existing = next.get(id)
+        if (existing) {
+          next.set(id, {
+            ...existing,
+            batch_name: targetBatchName,
+            batch_modal_total: targetBatchModalTotal,
+          })
+        }
+      }
+      return next
+    })
+
+    void logActivity({
+      action: 'Bulk Move Batch',
+      description: `Moved ${count} item(s) to batch "${targetBatchName}"`,
+      userId: user?.id,
+      details: {
+        count,
+        batch_name: targetBatchName,
+        batch_modal_total: targetBatchModalTotal,
+        item_ids: targetIds,
+      },
+    })
+
+    setShowBulkBatchModal(false)
+    setSelectedItemIds([])
+    showToast(`Moved ${count} item(s) to ${targetBatchName}`)
+    loadItems()
+  }
+
   function handleDelete(item: InventoryItem) {
     setDeletingItem(item)
   }
@@ -1236,6 +1334,12 @@ export default function Inventory() {
                   className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
                 >
                   Move Category
+                </button>
+                <button
+                  onClick={openBulkMoveBatchModal}
+                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
+                >
+                  Move Batch
                 </button>
                 <button
                   onClick={handleBulkDelete}
@@ -1787,6 +1891,58 @@ export default function Inventory() {
                 className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
               >
                 {bulkCategorySaving ? 'Moving...' : 'Move Category'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* Bulk Move Batch Modal */}
+      {showBulkBatchModal && (
+        <Modal
+          title={`Move ${selectedItemIds.length} selected item${selectedItemIds.length === 1 ? '' : 's'} to an existing batch`}
+          onClose={() => setShowBulkBatchModal(false)}
+        >
+          <form onSubmit={handleBulkMoveBatchSubmit} className="space-y-4">
+            <div className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+              Move <span className="font-medium text-gray-900">{selectedItemIds.length}</span> selected item{selectedItemIds.length === 1 ? '' : 's'} to an existing batch.
+            </div>
+
+            <BatchAutocomplete
+              required
+              existingOnly
+              label="Destination batch"
+              placeholder="Search existing batches..."
+              value={bulkTargetBatch}
+              onChange={(name) => setBulkTargetBatch(name)}
+              onMatchChange={setBulkBatchMatch}
+            />
+
+            {bulkBatchMatch && (
+              <p className="rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+                Batch modal total:{' '}
+                <span className="font-medium text-gray-900">
+                  {bulkBatchMatch.modalTotal ? formatIDR(bulkBatchMatch.modalTotal) : '-'}
+                </span>
+              </p>
+            )}
+
+            {bulkBatchError && <p className="text-sm text-red-600">{bulkBatchError}</p>}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkBatchModal(false)}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={bulkBatchSaving || !bulkBatchMatch}
+                className="rounded-md bg-pink-600 px-4 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50"
+              >
+                {bulkBatchSaving ? 'Moving...' : 'Move Batch'}
               </button>
             </div>
           </form>

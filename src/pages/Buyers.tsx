@@ -55,7 +55,7 @@ export function generateInvoiceText(buyerName: string, activeBookings: BuyerBook
 ${itemListSection}- Total item (${qty} pcs): ${formattedTotal} 
 - Packing: Rp. 3.000
 - Ongkir: (tergantung lokasi, estimasi di bawah)
- 
+
 (Acuan Ongkir: Jabodetabek start 9k | Luar Jabodetabek start 15k | Luar Pulau start 20k-50k)
 
 💳 PEMBAYARAN (a.n Benedictus Jody Setiawan)
@@ -66,7 +66,7 @@ ${itemListSection}- Total item (${qty} pcs): ${formattedTotal}
 1  ⁠Bayar maksimal 1x24 jam (Lewat dari itu = B&R/Cancel). Diproses setelah payment.
 2. Pastikan Nama, Alamat, dan No. HP sudah BENAR.
 3.⁠ ⁠❌ TIDAK TERIMA KOMPLAIN untuk minus yang sudah dijelaskan saat live (crack, kerut, dll).
-4. 🚚 Tidak terima komplain barang rusak akibat pihak ekspedisi(box hancur/rusak/terbuka)saat diterima. JANGAN DIBUKA dan segera hubungi dahulu pihak ekspedisi.
+4. 🚚 Tidak TERIMA KOMPLAIN barang rusak akibat pihak ekspedisi(dus rusak/terbuka)saat diterima. JANGAN DIBUKA dan segera hubungi dahulu pihak ekspedisi.
 5. 📦 Syarat Komplain: Wajib video unboxing utuh tanpa jeda/edit. Rekam dari sebelum paket dibuka(segel utuh, resi & semua sisi terlihat). Barang tidak boleh out of frame sampai selesai.(Tanpa video sesuai syarat = komplain tidak sah).
 6.⁠   ⁠Wajib kirim bukti transfer.
 

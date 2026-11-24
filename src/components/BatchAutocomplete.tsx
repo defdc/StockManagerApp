@@ -28,6 +28,10 @@ interface BatchAutocompleteProps {
   placeholder?: string
   required?: boolean
   existingBatches?: BatchSuggestion[]
+  /** Only allow picking existing batches: hides the "new batch" modal total input. */
+  existingOnly?: boolean
+  /** Called when the typed value changes its exact match against known batches. */
+  onMatchChange?: (match: BatchSuggestion | null) => void
 }
 
 export default function BatchAutocomplete({
@@ -38,6 +42,8 @@ export default function BatchAutocomplete({
   placeholder = 'Search or enter batch name...',
   required,
   existingBatches,
+  existingOnly = false,
+  onMatchChange,
 }: BatchAutocompleteProps) {
   const listboxId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -161,7 +167,11 @@ export default function BatchAutocomplete({
     return activeSuggestions.find((s) => s.name.trim().toLowerCase() === value.trim().toLowerCase())
   }, [activeSuggestions, value])
 
-  const isNewBatch = Boolean(value.trim()) && !existingMatch
+  const isNewBatch = !existingOnly && Boolean(value.trim()) && !existingMatch
+
+  useEffect(() => {
+    onMatchChange?.(existingMatch ?? null)
+  }, [existingMatch, onMatchChange])
 
   return (
     <div ref={containerRef} className={`relative ${open ? 'z-40' : 'z-10'}`}>
@@ -208,7 +218,11 @@ export default function BatchAutocomplete({
             <p className="px-3 py-3 text-sm text-gray-500">Loading batches...</p>
           ) : filteredSuggestions.length === 0 ? (
             <p className="px-3 py-3 text-sm text-gray-500">
-              Type a new batch name to create it
+              {existingOnly
+                ? value.trim().length < 2
+                  ? 'Type at least 2 characters to search existing batches'
+                  : 'No matching existing batch'
+                : 'Type a new batch name to create it'}
             </p>
           ) : (
             filteredSuggestions.map((suggestion) => (
